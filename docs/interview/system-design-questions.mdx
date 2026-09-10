@@ -1,0 +1,181 @@
+---
+title: "System Design Questions"
+description: "Practice system design interview questions."
+---
+
+# System Design Questions
+
+System design interviews test structured thinking.
+
+Do not start by naming tools.
+
+<Tip>
+Looking for the step-by-step answering framework, back-of-the-envelope estimation formulas, and trade-off matrices? Review [System Design Answer Style](/interview/system-design-answers).
+</Tip>
+
+Start by understanding the problem.
+
+## Answer Format
+
+```text
+1. Clarify requirements
+2. Estimate scale
+3. Define APIs
+4. Design data model
+5. Draw high level architecture
+6. Explain read and write flows
+7. Find bottlenecks
+8. Add scaling ideas
+9. Discuss failures
+10. Explain tradeoffs
+```
+
+## Requirement Questions
+
+Ask:
+
+- who uses this?
+- how many users?
+- read-heavy or write-heavy?
+- does data need to be strongly consistent?
+- what latency is acceptable?
+- do we need analytics?
+- what happens when dependencies fail?
+- what is out of scope?
+
+## Beginner Designs
+
+Design these first:
+
+- Todo API
+- Notes API
+- Blog API
+- File upload service
+- URL shortener
+- Rate limiter
+
+For each one, include:
+
+- APIs
+- tables
+- validation rules
+- error responses
+- pagination
+- basic deployment
+
+## Intermediate Designs
+
+- Notification system
+- Chat backend
+- Food delivery backend
+- E-commerce checkout
+- Payment callback system
+- Search API
+- Audit log system
+
+For each one, include:
+
+- queue or no queue decision
+- consistency model
+- retry behavior
+- idempotency
+- observability
+- failure handling
+
+## Advanced Designs
+
+- Video streaming backend
+- High scale logging system
+- Distributed rate limiter
+- Multi-region URL shortener
+- Payment system
+- Feature flag system
+- Metrics collection system
+
+For each one, include:
+
+- capacity estimates
+- partitioning or sharding
+- cache strategy
+- data retention
+- disaster recovery
+- operational risks
+
+## Example: URL Shortener Checklist
+
+Your answer should include:
+
+- create short URL API
+- redirect API
+- short code generation
+- collision handling
+- database schema
+- cache for redirects
+- async click analytics
+- abuse protection
+- Redis failure behavior
+
+Weak answer:
+
+```text
+Use database and Redis.
+```
+
+Strong answer:
+
+```text
+Redirect path is read-heavy, so I cache shortCode to longUrl in Redis.
+If Redis misses, I read database and refill cache.
+Click analytics goes to queue so redirect stays fast.
+Short code has unique constraint to handle collisions safely.
+```
+
+## Example: Notification System Checklist
+
+Your answer should include:
+
+- event shape
+- queue
+- worker
+- templates
+- preferences
+- provider integration
+- retry with backoff
+- dead letter queue
+- delivery status
+- duplicate prevention
+
+## Example: E-commerce Checkout Checklist
+
+Your answer should include:
+
+- cart validation
+- inventory safety
+- order transaction
+- payment pending state
+- payment callback
+- idempotency key
+- order status transitions
+- notification event
+- observability
+- rollback thinking
+
+## Practice Routine
+
+For every design:
+
+```text
+10 minutes requirements
+10 minutes API and data model
+10 minutes high level design
+10 minutes bottlenecks and failures
+10 minutes explain tradeoffs
+```
+
+Record yourself answering.
+
+If the answer has no numbers, add estimates.
+
+If the answer has no failures, add failure handling.
+
+If the answer has only tools, explain why each tool is needed.

@@ -1,0 +1,158 @@
+---
+title: "Backend Interview Questions"
+description: "The definitive technical question bank: deep foundational questions asked by senior and staff interviewers on networking, Java runtime internals, database engines, and concurrency."
+---
+
+# Backend Interview Questions
+
+Senior and Staff interviewers do not ask trivia. They ask **foundational questions with extreme depth** to evaluate whether you understand the mechanical reality of your system—from CPU cache lines and Linux socket buffers to database disk pages and concurrency anomalies.
+
+<Tip>
+Looking for complete, production-tested answers, memory diagrams, and code for every question below? Review [Backend Interview Answers](/interview/backend-answers).
+</Tip>
+
+---
+
+## 1. Networking & Socket Layer Internals
+
+Interviewers ask these questions to test whether you understand how bytes travel over the wire before Spring Boot or HTTP frameworks touch them.
+
+1. **Trace an API Call End-to-End**: Walk through the exact packet sequence when a client issues `POST https://api.store.com/v1/orders`. Detail DNS resolution, TCP 3-way handshake (`SYN`, `SYN-ACK`, `ACK`), TLS 1.3 key exchange (1-RTT), reverse proxy routing, and the response flow.
+2. **TCP Connection Termination & The `TIME_WAIT` Disaster**: Why does TCP require a 4-way handshake (`FIN` $\rightarrow$ `ACK` $\rightarrow$ `FIN` $\rightarrow$ `ACK`)? What is the `TIME_WAIT` socket state, why does it last $2 \times \text{MSL}$, and how does high-frequency microservice traffic cause ephemeral port exhaustion (`Cannot assign requested address`)? How do you prevent it using HTTP connection pooling and Linux kernel tuning (`net.ipv4.tcp_tw_reuse`)?
+3. **Protocol Evolution**: What physical limitations in HTTP/1.1 (head-of-line blocking, repetitive headers) led to HTTP/2 binary framing and multiplexed streams? Why does HTTP/2 still suffer from TCP-level head-of-line blocking on packet loss, and how does HTTP/3 solve this using QUIC over UDP?
+4. **Socket Timeouts Anatomy**: What is the exact difference between **Connection Timeout**, **Read Timeout** (Socket Timeout), and **Execution Timeout**? What kernel events trigger `java.net.ConnectException: Connection refused` vs `java.net.SocketTimeoutException: Read timed out`?
+5. **Backpressure & Socket Buffers**: What happens inside the Linux kernel when a producer writes data faster than a consumer reads? Explain `SO_SNDBUF`, `SO_RCVBUF`, TCP sliding window zero-window probing, and how TCP automatically applies backpressure across the network.
+
+---
+
+## 2. Core Java & JVM Runtime Internals
+
+Interviewers probe Java fundamentals to separate developers who rely on framework magic from engineers who understand memory layout, garbage collection, and runtime behavior.
+
+1. **`HashMap` Internals Under the Hood**: 
+   - How does `HashMap` physically store entries?
+   - Trace `put(K, V)` step by step: hash spreading bit-shift `(h ^ (h >>> 16))`, bucket index calculation `(n - 1) & hash`, and linked list collision resolution.
+   - Why must the internal table capacity always be a power of 2?
+   - What triggers **treeification** into a Red-Black tree (threshold: 8 entries AND minimum table capacity 64), and why was 8 chosen mathematically (Poisson distribution)?
+   - How does resizing work at the 0.75 load factor, and how does power-of-2 resizing avoid recalculating hashes?
+2. **The `equals()` and `hashCode()` Contract & Memory Leaks**:
+   - What is the exact contract between `equals()` and `hashCode()`?
+   - What catastrophic bug occurs if two objects return `true` on `equals()` but generate different `hashCode()` values when inserted into a `HashSet` or `HashMap`?
+   - What happens if a field used in `hashCode()` is **mutated** after the object is inserted as a key in a `HashMap`? Why does `map.get(key)` return `null`, and why does this cause a permanent memory leak?
+3. **`==` vs `.equals()` & The `Integer` Cache Trap**:
+   - Why does `Integer.valueOf(100) == Integer.valueOf(100)` evaluate to `true`, while `Integer.valueOf(200) == Integer.valueOf(200)` evaluates to `false`?
+   - What is the JVM Integer Cache range (`-128` to `127`), and why does auto-boxing introduce dangerous intermittent bugs when comparing IDs with `==`?
+4. **String Immutability, Memory Layout & Compact Strings**:
+   - Why is `String` immutable in Java (security, thread safety, hashcode caching, String Constant Pool)?
+   - What is the difference between `String s = "apple"` and `String s = new String("apple")`?
+   - How did Java 9 Compact Strings replace `char[]` with `byte[]` plus a single-byte encoding flag (`LATIN1` vs `UTF16`), and how much heap RAM does this save in production backends?
+5. **Memory Locality: `ArrayList` vs `LinkedList`**:
+   - Why is `LinkedList` almost universally considered an antipattern in modern production software, even though computer science textbooks claim it has $O(1)$ insertions?
+   - Explain contiguous array memory layout, CPU L1/L2 cache lines (64 bytes), spatial prefetching, and why pointer-chasing in `LinkedList` causes continuous CPU cache misses.
+6. **JVM Memory Layout & Garbage Collection**:
+   - Describe the JVM heap memory structure: Eden space, Survivor spaces (S0/S1), and Tenured/Old Generation.
+   - What is the difference between Minor GC, Major GC, and Full GC?
+   - What is a Stop-The-World (STW) pause?
+   - How does Generational ZGC achieve sub-millisecond maximum pause times compared to G1GC?
+7. **`ThreadLocal` Leaks in Pooled Worker Threads**:
+   - Why do `ThreadLocal` variables risk silent memory leaks and cross-request data contamination when used in web servers like Tomcat or Netty?
+   - How does `ThreadLocalMap` use weak keys with strong values, and why is `finally { threadLocal.remove(); }` mandatory?
+8. **Java 21 Virtual Threads & The Carrier Pinning Trap**:
+   - How do Java 21 Virtual Threads achieve $M:N$ lightweight scheduling using continuations and ForkJoinPool carrier threads?
+   - What is the **Carrier Thread Pinning Trap**? Why does executing blocking I/O inside a `synchronized` block pin the underlying OS carrier thread, and why does replacing it with `ReentrantLock` solve the issue?
+
+---
+
+## 3. Database Engine & Relational Storage Internals
+
+Interviewers ask these questions to verify that your data modeling and query optimizations are grounded in physical storage realities.
+
+1. **Logical Query Processing Order**:
+   - What is the exact 11-step execution order of an SQL query (`FROM` $\rightarrow$ `ON` $\rightarrow$ `JOIN` $\rightarrow$ `WHERE` $\rightarrow$ `GROUP BY` $\rightarrow$ `HAVING` $\rightarrow$ `WINDOW` $\rightarrow$ `SELECT` $\rightarrow$ `DISTINCT` $\rightarrow$ `ORDER BY` $\rightarrow$ `LIMIT`)?
+   - Why does referencing a column alias created in `SELECT` fail with an error if used in a `WHERE` or `HAVING` clause?
+2. **B+Tree Index Internals**:
+   - Why do relational databases (PostgreSQL, MySQL) use B+Trees instead of Binary Search Trees (BST), Red-Black Trees, or Hash Tables for primary and secondary indexes?
+   - What is **high fanout** (branching factor $\approx 300\text{--}500$), and how does a 3-level B+Tree index over 50,000,000 rows with only 3 physical disk page reads?
+   - Why are doubly-linked lists at the leaf level critical for range queries (`BETWEEN`, `<`, `>`)?
+3. **Composite Indexes & The Leftmost Prefix Rule**:
+   - If you create an index on `(status, created_at, user_id)`, which of the following queries can use the index, and which cannot?
+     - Query A: `WHERE status = 'PAID' AND created_at > '2026-01-01'`
+     - Query B: `WHERE created_at > '2026-01-01' AND user_id = 42`
+     - Query C: `WHERE status = 'PAID' AND user_id = 42`
+   - Explain how the phonebook analogy dictates why skipping the leading column forces an index skip scan or a full sequential scan.
+4. **Covering Indexes & Index-Only Scans**:
+   - What is the difference between a Sequential Scan, an Index Scan, a Bitmap Index Scan, and an Index-Only Scan?
+   - How does a covering index created with `CREATE INDEX ... INCLUDE (total_amount)` allow PostgreSQL to return query results without touching the physical table heap pages?
+   - What role does the database **Visibility Map (VM)** play in enabling Index-Only Scans?
+5. **PostgreSQL 8 KB Page Anatomy & MVCC Tuple Storage**:
+   - How is data physically organized inside an 8 KB database page (PageHeader, ItemId line pointers, free space hole, and TupleHeader)?
+   - Why does an `UPDATE` in PostgreSQL physically execute an `INSERT` of a new tuple version followed by marking the old tuple as dead via `xmax`?
+   - What causes **table bloat**, and how does the `VACUUM` process reclaim dead tuple space?
+6. **Financial Data Types: Floating-Point vs Exact Numerics**:
+   - Why must monetary balances never be stored as `DOUBLE`, `FLOAT`, or Java `double`?
+   - Demonstrate the IEEE 754 binary rounding error (`0.1 + 0.2 != 0.3`).
+   - Why does `new BigDecimal(0.1)` produce an inaccurate representation while `BigDecimal.valueOf(0.1)` does not?
+   - How should prices and currencies be modeled in PostgreSQL and Java?
+
+---
+
+## 4. Concurrency, Locking & Transaction Anomalies
+
+Senior interviewers evaluate your ability to protect business invariants under high multi-threaded and distributed write contention.
+
+1. **Concurrency Anomalies Beyond Dirty Reads**:
+   - Define the 6 classical concurrency anomalies:
+     - Dirty Read (P1)
+     - Non-Repeatable Read (P2)
+     - Phantom Read (P3)
+     - Lost Update (P4)
+     - Read Skew (A5A)
+     - Write Skew (A5B)
+   - Explain **Write Skew** in depth using the classic "Doctor On-Call" dilemma. Why does PostgreSQL `REPEATABLE READ` isolation fail to prevent Write Skew, and what are the two ways to prevent it (Pessimistic locking vs Serializable Snapshot Isolation)?
+2. **Pessimistic vs Optimistic vs Atomic SQL Updates**:
+   - When should you use:
+     - Optimistic locking via `@Version`?
+     - Pessimistic row locking via `SELECT FOR UPDATE`?
+     - Atomic in-place SQL updates (`UPDATE accounts SET balance = balance - ? WHERE id = ? AND balance >= ?`)?
+   - Compare them across throughput, latency, thread blocking, and rollback failure rates during flash sales.
+3. **High-Throughput Queue Processing with `FOR UPDATE SKIP LOCKED`**:
+   - What happens when 20 background workers run `SELECT * FROM tasks WHERE status = 'PENDING' LIMIT 1 FOR UPDATE`?
+   - How does `SKIP LOCKED` prevent thread contention and lock waits, allowing background workers to achieve linear throughput scaling?
+4. **Deadlock Mechanics & The Canonical Ordering Rule**:
+   - How does a database deadlock occur when Transaction 1 transfers money from User A to User B while Transaction 2 transfers money from User B to User A?
+   - What is the **Canonical Ordering Rule**, and how does sorting entity IDs (`ORDER BY id` or `Math.min(idA, idB)`) guarantee mathematical elimination of deadlocks?
+
+---
+
+## 5. API Architecture, Protocols & Invariant Protection
+
+1. **Distributed Idempotency Architecture**:
+   - If a mobile client loses network connectivity while processing a checkout and automatically retries, how do you guarantee the customer is charged exactly once?
+   - Design an end-to-end database-backed idempotency mechanism using `Idempotency-Key` headers, unique constraints, and atomic state transitions.
+2. **Defending Business Invariants: Rich Domain Models vs Anemic Bags**:
+   - Why are public setters on domain entities considered a major code smell and security risk in production backends?
+   - How do you design rich domain models in Java 21 that enforce invariants (e.g., non-negative prices, valid state transitions) at the moment of construction and modification?
+3. **HTTP Semantics Matrix**:
+   - Classify `GET`, `POST`, `PUT`, `PATCH`, and `DELETE` across three axes: **Safe**, **Idempotent**, and **Cacheable**.
+   - Why must a `GET` request never trigger state mutations (e.g., search engine crawlers prefetching URLs)?
+4. **Standardized Error Handling with RFC 7807**:
+   - Why are custom JSON error formats like `{ "error": "failed" }` bad for enterprise API contracts?
+   - How does RFC 7807 / RFC 9457 `ProblemDetail` standardize machine-readable error reporting in Spring Boot 3?
+
+---
+
+## 6. Real-World Production Debugging & Incident Response
+
+1. **PostgreSQL Connection Pool Exhaustion & The Lock Queue Trap**:
+   - Your API is returning `500 Internal Server Error` with `CannotGetJdbcConnectionException: Connection is not available, request timed out after 30000ms`.
+   - CPU is at 100%, and HikariCP active connections equal maximum connections.
+   - How do you use `pg_stat_activity` to diagnose the root cause?
+   - Explain the **Lock Queue Trap**: how a slow analytical read blocks an `ALTER TABLE` schema migration, which in turn blocks every subsequent fast `SELECT` query in the web thread pool.
+   - How do you mitigate the incident in seconds using `pg_cancel_backend` or `pg_terminate_backend`?
+2. **JVM OutOfMemoryError & Container OOMKills (Exit Code 137)**:
+   - What is the difference between a JVM `java.lang.OutOfMemoryError: Java heap space` and a Kubernetes container being terminated with `Exit Code 137` (OOMKilled)?
+   - How do you tune JVM cgroup memory limits (`-XX:MaxRAMPercentage=75.0`), and how do you capture a heap dump upon crash for analysis in Eclipse Memory Analyzer (MAT)?
+3. **Cascading Downstream 504 Gateway Timeouts**:
+   - A third-party fraud verification API begins responding in 25 seconds instead of 100ms. Within 2 minutes, your entire e-commerce checkout platform collapses with 504 Gateway Timeouts.
+   - Why did your system fail even though the bug was in an external vendor's system?
+   - How do you configure connection timeouts, read timeouts, and Resilience4j circuit breakers to fail fast and preserve system stability?

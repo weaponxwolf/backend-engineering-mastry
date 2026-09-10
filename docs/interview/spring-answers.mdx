@@ -1,0 +1,472 @@
+---
+title: "Spring Interview Answers"
+description: "Comprehensive, production-tested answers for deep Spring Boot framework and runtime internals interview questions."
+---
+
+# Spring Interview Answers
+
+When interviewing for Senior and Staff backend engineering positions, interviewers look beyond basic annotation usage. They evaluate whether you understand **how the Spring IoC container works at runtime, how dynamic bytecode proxies execute, how transactions interact with HikariCP connection pools, and how Hibernate manages persistence contexts**.
+
+<Tip>
+Use the **Senior Answer Formula**:
+1. **Core Mechanism**: What happens under the hood inside the JVM and framework.
+2. **Failure Mode / The Trap**: The production failure, deadlock, or silent data bug.
+3. **Production Implementation**: Concrete Java 21 / Spring Boot 3 code snippet.
+</Tip>
+
+---
+
+## 1. Spring IoC Container, Bean Lifecycle & Dynamic Proxies
+
+<AccordionGroup>
+  <Accordion title="1. What are the architectural differences between BeanFactory and ApplicationContext?">
+    - **`BeanFactory` (The Foundation)**:
+      - The root interface for the Spring IoC container (`org.springframework.beans.factory.BeanFactory`).
+      - Uses **lazy initialization**: Beans are instantiated only when explicitly requested via `getBean()`.
+      - Provides basic Dependency Injection (DI) and lifecycle management. It is designed for resource-constrained environments (like mobile/embedded systems).
+    - **`ApplicationContext` (The Enterprise Container)**:
+      - A sub-interface of `BeanFactory` (`org.springframework.context.ApplicationContext`) representing the complete Spring runtime environment.
+      - Uses **eager pre-instantiation**: All singleton beans are instantiated, wired, and validated upon application startup, failing fast if misconfigured.
+      - Adds enterprise-grade subsystems:
+        1. **AOP Integration**: Dynamic proxy weaving for `@Transactional`, `@Async`, and `@Cacheable`.
+        2. **`MessageSource`**: Internationalization (i18n) support.
+        3. **`ApplicationEventPublisher`**: Decoupled in-memory event publishing (`ApplicationEvent`).
+        4. **`EnvironmentCapable`**: Profile-aware configuration properties (`application.yml`).
+  </Accordion>
+
+  <Accordion title="2. Walk through the 12-step Spring Bean Lifecycle">
+    - When the Spring `ApplicationContext` boots, every bean executes a strict 12-step lifecycle:
+      1. **Bean Definition Loading**: Reads annotations (`@Component`, `@Bean`) and creates `BeanDefinition` metadata.
+      2. **Instantiation**: Instantiates the raw Java object using reflection (`Constructor.newInstance()`).
+      3. **Populate Properties**: Injects dependencies via constructor, setters, or fields.
+      4. **`BeanNameAware`**: Injects the bean's registered name via `setBeanName()`.
+      5. **`BeanFactoryAware` / `ApplicationContextAware`**: Injects the container instance via `setApplicationContext()`.
+      6. **`BeanPostProcessor.postProcessBeforeInitialization()`**: Executes custom pre-initialization hooks across all beans (e.g., `@Autowired` annotation processing).
+      7. **`@PostConstruct`**: Executes methods annotated with Jakarta's `@PostConstruct`.
+      8. **`InitializingBean.afterPropertiesSet()`**: Spring interface callback.
+      9. **Custom `initMethod`**: Executes custom initialization defined in `@Bean(initMethod = "init")`.
+      10. **`BeanPostProcessor.postProcessAfterInitialization()`**: **The Dynamic Proxy Stage!** If the bean has `@Transactional`, `@Async`, `@Cacheable`, or `@Observed`, Spring wraps the target bean in a **CGLIB dynamic proxy** and returns the proxy instead of the raw bean.
+      11. **Bean is Ready for Use**: Active in singleton cache, serving requests.
+      12. **Destruction Stage**: Upon JVM shutdown (`ContextClosedEvent`), executes `@PreDestroy`, `DisposableBean.destroy()`, and custom `destroyMethod`.
+  </Accordion>
+
+  <Accordion title="3. Explain Dynamic Proxy Mechanics: JDK Dynamic Proxy vs CGLIB">
+    - Spring AOP does not modify your compiled `.class` files directly. It creates **runtime proxy wrappers**:
+    - **JDK Dynamic Proxy (`java.lang.reflect.Proxy`)**:
+      - Requires the target class to implement an interface (e.g., `UserRepository extends JpaRepository`).
+      - Generates a proxy class implementing the same interface and delegates method calls through an `InvocationHandler`.
+      - **Limitation**: Cannot proxy classes that do not implement interfaces.
+    - **CGLIB (Code Generation Library via ASM)**:
+      - Generates a new subclass of the target class dynamically at runtime by manipulating bytecode.
+      - Overrides methods and intercepts calls using a `MethodInterceptor`.
+      - **Spring Boot Default**: Spring Boot 2 and 3 enable CGLIB by default (`spring.aop.proxy-target-class=true`).
+      - **The Trap**: Because CGLIB creates a subclass, the target class and its methods **cannot be marked `final`**. If a class or method is `final`, CGLIB cannot override it, and transactional/async aspects will silently fail.
+  </Accordion>
+
+  <Accordion title="4. Explain the Self-Invocation Proxy Trap and its architectural solutions">
+    - **The Bug**:
+      ```java
+      @Service
+      public class OrderService {
+
+          public void placeOrder(OrderRequest request) {
+              // Internal method call!
+              this.processPayment(request); 
+          }
+
+          @Transactional(propagation = Propagation.REQUIRES_NEW)
+          public void processPayment(OrderRequest request) {
+              // Database mutations...
+          }
+      }
+      ```
+    - **Why It Silently Fails**:
+      - When an external caller (e.g., `OrderController`) calls `orderService.placeOrder()`, it invokes the method on the **CGLIB Proxy**.
+      - However, inside `placeOrder()`, `this.processPayment()` calls the method directly on the **target instance (`this`)**, completely bypassing the CGLIB proxy wrapper!
+      - The `@Transactional` aspect is never invoked. No transaction is opened, and no rollback occurs on failure.
+    - **Solution 1: Extract to a Separate Collaborator Bean (Recommended)**:
+      ```java
+      @Service
+      public class OrderService {
+          private final PaymentProcessor paymentProcessor;
+
+          public OrderService(PaymentProcessor paymentProcessor) {
+              this.paymentProcessor = paymentProcessor;
+          }
+
+          public void placeOrder(OrderRequest request) {
+              paymentProcessor.processPayment(request); // Invokes the proxy!
+          }
+      }
+      ```
+    - **Solution 2: Programmatic TransactionTemplate**:
+      ```java
+      @Service
+      public class OrderService {
+          private final TransactionTemplate transactionTemplate;
+
+          public OrderService(PlatformTransactionManager txManager) {
+              this.transactionTemplate = new TransactionTemplate(txManager);
+              this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+          }
+
+          public void placeOrder(OrderRequest request) {
+              transactionTemplate.execute(status -> {
+                  // Guaranteed transactional boundary without proxy tricks
+                  return processPaymentInternal(request);
+              });
+          }
+      }
+      ```
+  </Accordion>
+
+  <Accordion title="5. What is the Scoped Proxy Hazard with Request-Scoped Beans?">
+    - **The Scenario**: A singleton service (`OrderService`) injects a request-scoped bean (`UserSession`).
+    - **The Disaster**:
+      - Singleton beans are initialized **once** on application startup.
+      - If injected directly, the singleton holds a reference to whichever `UserSession` was created on startup (or crashes with `ScopeNotActiveException`).
+      - All subsequent HTTP requests share the exact same user session across concurrent users!
+    - **The Solution (`ScopedProxyMode.TARGET_CLASS`)**:
+      ```java
+      @Component
+      @Scope(value = WebApplicationContext.SCOPE_REQUEST, proxyMode = ScopedProxyMode.TARGET_CLASS)
+      public class UserSession {
+          private String userId;
+      }
+      ```
+      Spring injects a CGLIB proxy into the singleton. When `orderService` calls `userSession.getUserId()`, the proxy intercepts the call and extracts the current request's `UserSession` instance dynamically from `RequestContextHolder`.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## 2. Transaction Boundaries, Propagation & Connection Pooling
+
+<AccordionGroup>
+  <Accordion title="1. Compare @Transactional propagation behaviors: REQUIRED vs REQUIRES_NEW">
+    - **`REQUIRED` (Default)**:
+      - If an existing transaction exists, the method joins it.
+      - If no transaction exists, it creates a new one.
+      - **Atomicity**: If any method in the call chain fails, the entire transaction rolls back together.
+    - **`REQUIRES_NEW`**:
+      - **Always suspends** the currently active transaction (if any).
+      - Checks out a **new physical database connection** from HikariCP.
+      - Opens an independent physical database transaction.
+      - Commits or rolls back independently of the outer transaction.
+    - **The Exception Handling Trap**:
+      - If Method B (`REQUIRES_NEW`) throws an unhandled runtime exception, the exception bubbles up to Method A (`REQUIRED`).
+      - Unless Method A explicitly catches the exception from Method B, **both** Method B and Method A will roll back.
+  </Accordion>
+
+  <Accordion title="2. How does nested REQUIRES_NEW cause HikariCP connection pool deadlocks?">
+    - **The Scenario**:
+      - HikariCP `maximum-pool-size` is set to **10**.
+      - Method A (`REQUIRED`) checks out Connection 1 from the pool.
+      - Inside Method A, it calls Method B (`REQUIRES_NEW`).
+      - Because Method A's transaction is suspended, Connection 1 remains held. Method B requests a **second connection** (Connection 2) from HikariCP.
+    - **The Deadlock Sequence Under High Traffic**:
+      1. 10 concurrent requests arrive at the web server simultaneously.
+      2. 10 worker threads enter Method A. All 10 threads check out Connection 1 through Connection 10.
+      3. The HikariCP pool is now **100% exhausted** (0 free connections).
+      4. All 10 threads now call Method B (`REQUIRES_NEW`).
+      5. Method B requests an available connection from HikariCP.
+      6. Because the pool is empty, all 10 threads **block and wait** for an available connection.
+      7. No thread can ever release its first connection because it is blocked waiting for Method B to finish.
+    - **The Result**: Total system freeze. After 30 seconds, all 10 threads crash simultaneously with `SQLTransientConnectionException: Connection is not available, request timed out after 30000ms`.
+    - **The Rule**: Never use nested `REQUIRES_NEW` transactions unless HikariCP pool size is sized using the formula:
+      $$\text{Max Pool Size} > (\text{Max Concurrent Threads} \times (\text{Nested Transactions} + 1))$$
+  </Accordion>
+
+  <Accordion title="3. Why do checked exceptions not roll back transactions by default in Spring?">
+    - **The Default Behavior**:
+      - Spring's `TransactionAspectSupport` intercepts exceptions thrown from `@Transactional` methods.
+      - By default, Spring triggers a rollback **only for unchecked exceptions** (`RuntimeException` and `Error`).
+      - If your method throws a **checked exception** (e.g., `IOException`, `SQLException`, `Exception`), Spring **commits** the transaction anyway!
+    - **Historical Reason**:
+      - EJB / early Java philosophy treated checked exceptions as "recoverable business conditions" rather than system crashes.
+    - **The Production Standard**:
+      - Always specify `rollbackFor = Exception.class`:
+      ```java
+      @Transactional(rollbackFor = Exception.class)
+      public void executeOrder(OrderRequest request) throws PaymentFailedException {
+          // ...
+      }
+      ```
+    - **The Catch-and-Swallow Trap**:
+      ```java
+      @Transactional
+      public void updateAccount() {
+          try {
+              accountRepo.debit(100);
+              externalService.sync(); // Throws RuntimeException!
+          } catch (Exception e) {
+              log.error("Failed to sync", e); // Swallowed exception!
+          }
+      }
+      ```
+      Because the exception was caught and not rethrown, Spring assumes the method succeeded and **commits the database debit**!
+  </Accordion>
+
+  <Accordion title="4. What physical optimizations happen during @Transactional(readOnly = true)?">
+    - **Hibernate First-Level Cache Snapshot Bypass**:
+      - In a normal read-write transaction, when Hibernate loads an entity, it stores a second snapshot copy of all column values in RAM to perform dirty checking during flush.
+      - When `readOnly = true` is set, Hibernate sets the `FlushMode` to `MANUAL`. It skips creating entity snapshot copies, cutting CPU cycles and heap memory by **50%** on heavy read queries.
+    - **JDBC Driver Optimization**:
+      - The underlying JDBC connection executes `connection.setReadOnly(true)`.
+      - In PostgreSQL and MySQL, the database engine avoids opening write-ahead log (WAL) reservations and optimizes locking.
+    - **Read-Replica Dynamic Routing**:
+      - In multi-database architectures, Spring's `AbstractRoutingDataSource` inspects `TransactionSynchronizationManager.isCurrentTransactionReadOnly()`.
+      - If `true`, it automatically routes the connection to a read-replica database node, shielding the primary database from read traffic.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## 3. Spring Data JPA & Hibernate 6 Internals
+
+<AccordionGroup>
+  <Accordion title="1. Define the 4 Entity Lifecycle States and the First-Level Cache">
+    - **1. Transient**:
+      - An object instantiated with `new User()`.
+      - Has no database identity (primary key is null) and is not attached to any `EntityManager`.
+    - **2. Managed (Persistent)**:
+      - The entity is associated with an active `EntityManager` and has a database identity.
+      - It resides in the **First-Level Cache** (a Java `Map<EntityKey, Object>` inside `PersistenceContext`).
+      - All changes are automatically tracked via dirty checking.
+      - **Deduplication**: If you call `repo.findById(1L)` 10 times in the same transaction, Hibernate executes **1 SQL query**. The remaining 9 calls return the exact same Java object reference from the First-Level Cache.
+    - **3. Detached**:
+      - The entity has a database ID, but its `EntityManager` was closed or the transaction committed.
+      - Changes made to detached entities are **not** written to the database.
+    - **4. Removed**:
+      - Marked for deletion via `entityManager.remove(entity)` or `repository.delete(entity)`.
+      - Physical `DELETE` SQL will be executed upon transaction commit or flush.
+  </Accordion>
+
+  <Accordion title="2. Why is calling repository.save() redundant on managed entities?">
+    - In Spring Data JPA, many developers write:
+      ```java
+      @Transactional
+      public void updateEmail(Long id, String newEmail) {
+          User user = userRepository.findById(id).orElseThrow();
+          user.setEmail(newEmail);
+          userRepository.save(user); // Redundant and unnecessary!
+      }
+      ```
+    - **How Automatic Dirty Checking Works**:
+      1. When `findById()` loads the entity, Hibernate stores an internal snapshot array of its fields in the `PersistenceContext`.
+      2. When `user.setEmail(newEmail)` mutates the field, the entity remains managed.
+      3. At the end of the `@Transactional` method, Spring triggers `transactionManager.commit()`, which flushes the `EntityManager`.
+      4. Hibernate compares the managed entity against the initial snapshot array.
+      5. It detects that `email` changed and automatically generates and executes:
+         ```sql
+         UPDATE users SET email = ? WHERE id = ?;
+         ```
+      6. Calling `repository.save()` does nothing more than return the entity and perform redundant `merge()` checks.
+  </Accordion>
+
+  <Accordion title="3. What is the N+1 query problem and what are the 4 ways to solve it?">
+    - **The Cause**:
+      - A `Post` entity has a `@ManyToOne` relationship with `Author` (or `@OneToMany` with `Comment`).
+      - When you query 50 posts:
+        ```sql
+        SELECT * FROM posts LIMIT 50; -- Query 1
+        ```
+      - When your code iterates through posts and accesses `post.getAuthor().getName()`, Hibernate executes an additional query for each author:
+        ```sql
+        SELECT * FROM authors WHERE id = ?; -- Executed 50 times (N queries!)
+        ```
+      - Total queries: $1 + 50 = 51$ queries. Under load, this crashes database connection pools.
+    - **Solution 1: JPQL JOIN FETCH**:
+      ```java
+      @Query("SELECT p FROM Post p JOIN FETCH p.author WHERE p.published = true")
+      List<Post> findAllWithAuthor();
+      ```
+      Forces a single SQL `INNER JOIN`, loading posts and authors in one database round-trip.
+    - **Solution 2: @EntityGraph**:
+      ```java
+      @EntityGraph(attributePaths = {"author", "tags"})
+      List<Post> findByPublishedTrue();
+      ```
+      Declaratively defines which relationships to fetch eagerly without writing custom JPQL queries.
+    - **Solution 3: Hibernate Default Batch Fetch Size (Global Optimization)**:
+      ```yaml
+      spring.jpa.properties.hibernate.default_batch_fetch_size: 25
+      ```
+      Converts $N$ individual queries into a single batched query using an `IN` clause:
+      ```sql
+      SELECT * FROM authors WHERE id IN (?, ?, ?, ... 25 parameters);
+      ```
+      Reduces 1,000 queries down to 40 queries with zero repository changes!
+    - **Solution 4: Read-Only DTO Constructor Projections**:
+      ```java
+      @Query("SELECT new com.example.dto.PostSummary(p.id, p.title, a.name) FROM Post p JOIN p.author a")
+      List<PostSummary> findSummaries();
+      ```
+      Extracts only the required columns directly into a Java 21 Record. Bypasses Hibernate entity state tracking completely.
+    - **The Cartesian Explosion (`MultipleBagFetchException`)**:
+      - You cannot `JOIN FETCH` two `@OneToMany` collections (`List<Comment>` and `List<Tag>`) simultaneously in a single query.
+      - If a post has 10 comments and 10 tags, the SQL join produces $10 \times 10 = 100$ duplicate rows per post! Hibernate 6 throws `MultipleBagFetchException`.
+      - **Fix**: Use `default_batch_fetch_size` or use `Set` instead of `List`.
+  </Accordion>
+
+  <Accordion title="4. Why should you never use Lombok @Data on JPA entities?">
+    - Lombok's `@Data` bundles `@ToString`, `@EqualsAndHashCode`, `@Getter`, `@Setter`, and `@RequiredArgsConstructor`.
+    - **Disaster 1: Infinite Recursion (`StackOverflowError`)**:
+      - If `Order` has `@OneToMany List<OrderItem>` and `OrderItem` has `@ManyToOne Order`:
+      - `@ToString` generates a string representation that calls `OrderItem.toString()`, which calls `Order.toString()`, crashing the JVM with `StackOverflowError`.
+    - **Disaster 2: Broken Equals & HashCode in HashSets**:
+      - `@EqualsAndHashCode` by default inspects all fields (including generated IDs).
+      - When an entity is created with `new Order()`, its `id` is `null`. Its `hashCode` is computed based on `null`.
+      - You add `order` to a `HashSet`.
+      - You save the order (`repo.save(order)`). The database generates `id = 42`.
+      - The entity's `hashCode` has now changed! `set.contains(order)` returns `false`.
+    - **The Production Standard**:
+      - Use `@Getter` and `@Setter` explicitly (or eliminate public setters).
+      - Implement `equals()` and `hashCode()` based strictly on **business key identity** (e.g., UUID, email, or order number) or use JPA proxy-safe ID comparisons:
+      ```java
+      @Override
+      public boolean equals(Object o) {
+          if (this == o) return true;
+          if (!(o instanceof Order other)) return false;
+          return id != null && id.equals(other.id);
+      }
+
+      @Override
+      public int hashCode() {
+          return getClass().hashCode(); // Constant hash code guarantees stability across state transitions
+      }
+      ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## 4. Spring MVC Architecture & Modern Client Calling
+
+<AccordionGroup>
+  <Accordion title="1. Trace an incoming HTTP request through the DispatcherServlet pipeline">
+    - **1. DispatcherServlet Ingress**:
+      - Tomcat's connector forwards the request to `DispatcherServlet.doDispatch()`.
+    - **2. HandlerMapping**:
+      - Inspects the request URL and method (e.g., `POST /api/v1/orders`) and queries `RequestMappingHandlerMapping` to locate the target controller method (`OrderController.createOrder`).
+      - Returns a `HandlerExecutionChain` containing the controller method and all registered `HandlerInterceptors`.
+    - **3. Interceptor `preHandle()`**:
+      - Executes `preHandle()` on all interceptors in order (e.g., security checks, rate limiting, MDC tracing). If any returns `false`, processing halts immediately.
+    - **4. HandlerAdapter**:
+      - Resolves parameters using `HandlerMethodArgumentResolver` (e.g., `@RequestBody`, `@PathVariable`, `@AuthenticationPrincipal`).
+      - Invokes Jackson's `MappingJackson2HttpMessageConverter` to deserialize JSON bytes into Java objects.
+      - Executes the controller method via reflection.
+    - **5. Interceptor `postHandle()` & View/JSON Serialization**:
+      - The controller return value is serialized back to JSON via Jackson.
+    - **6. Interceptor `afterCompletion()` & Exception Handling**:
+      - If an exception was thrown, `HandlerExceptionResolver` directs the flow to `@RestControllerAdvice` to serialize an RFC 7807 `ProblemDetail` response.
+      - Cleans up thread-local MDC context in `afterCompletion()`.
+  </Accordion>
+
+  <Accordion title="2. Compare RestClient vs WebClient vs RestTemplate">
+    - **`RestTemplate` (Legacy)**:
+      - Synchronous blocking client. Heavy reliance on method overloading (`getForObject`, `getForEntity`, `exchange`) with clunky template URLs. In maintenance mode since Spring 5.
+    - **`WebClient` (Reactive)**:
+      - Non-blocking, reactive HTTP client based on Project Reactor and Netty.
+      - Excellent for high-concurrency streaming, but requires reactive dependencies (`spring-boot-starter-webflux`).
+      - Using it in traditional blocking Spring MVC apps introduces unnecessary thread context switching and reactive complexity.
+    - **`RestClient` (Spring Boot 3.2+ Standard)**:
+      - Modern, fluent, synchronous HTTP client.
+      - Combines the simplicity of synchronous code with the fluent API of `WebClient`.
+      - Natively integrates with Apache HttpClient 5 connection pooling and Micrometer distributed tracing.
+      ```java
+      RestClient restClient = RestClient.builder()
+          .baseUrl("https://api.payment.com")
+          .defaultHeader("Authorization", "Bearer " + apiKey)
+          .build();
+
+      PaymentResponse response = restClient.post()
+          .uri("/charges")
+          .contentType(MediaType.APPLICATION_JSON)
+          .body(chargeRequest)
+          .retrieve()
+          .body(PaymentResponse.class);
+      ```
+  </Accordion>
+
+  <Accordion title="3. Why is Page<T> dangerous on large tables, and when should you use Slice<T>?">
+    - When your repository returns `Page<T>`:
+      ```java
+      Page<Order> findByUserId(Long userId, Pageable pageable);
+      ```
+      Spring Data executes **two SQL queries**:
+      1. The data query: `SELECT * FROM orders WHERE user_id = ? LIMIT 20 OFFSET 0;`
+      2. The count query: `SELECT COUNT(*) FROM orders WHERE user_id = ?;`
+    - **The Performance Hazard**:
+      - `COUNT(*)` requires the database engine to count matching rows. On a table with 10,000,000 rows, this query cannot use index leaf lists easily and forces expensive index tree or bitmap index scans.
+      - Even if the data query takes 2ms, the count query takes 800ms!
+    - **The Solution (`Slice<T>`)**:
+      ```java
+      Slice<Order> findByUserId(Long userId, Pageable pageable);
+      ```
+      - `Slice<T>` does **not** execute a count query.
+      - If you request 20 items (`size = 20`), Spring Data executes:
+        ```sql
+        SELECT * FROM orders WHERE user_id = ? LIMIT 21;
+        ```
+      - It requests **21 rows** ($N + 1$). If 21 rows return, `slice.hasNext()` is `true`. It discards the 21st row and returns 20 items.
+      - Zero count overhead! Perfect for mobile infinite-scroll and modern pagination.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## 5. Spring Security & Production Filter Chains
+
+<AccordionGroup>
+  <Accordion title="1. Explain the SecurityFilterChain and 401 Unauthorized vs 403 Forbidden">
+    - **Filter Chain Architecture**:
+      - Spring Security integrates with the servlet container through `DelegatingFilterProxy`.
+      - It delegates incoming requests to `FilterChainProxy`, which evaluates a chain of ordered filters (`SecurityFilterChain`):
+        1. `HeaderWriterFilter`
+        2. `CorsFilter`
+        3. `CsrfFilter`
+        4. `JwtAuthenticationFilter` (Custom token verification)
+        5. `UsernamePasswordAuthenticationFilter`
+        6. `AuthorizationFilter`
+      - Security filters execute **before** the request ever reaches `DispatcherServlet`.
+    - **401 Unauthorized (`AuthenticationEntryPoint`)**:
+      - Triggered when the request **lacks valid authentication** (e.g., missing JWT token, expired signature, or invalid credentials).
+      - Answers: *"Who are you? You have not proved your identity."*
+    - **403 Forbidden (`AccessDeniedHandler`)**:
+      - Triggered when the user is **successfully authenticated**, but lacks sufficient permissions or roles to access the resource (e.g., normal user attempting to access `/api/admin/users`).
+      - Answers: *"I know who you are, but you are not allowed here."*
+  </Accordion>
+
+  <Accordion title="2. Why can CSRF protection be disabled for stateless JWT REST APIs?">
+    - **Cross-Site Request Forgery (CSRF)**:
+      - CSRF attacks exploit **ambient authentication** (credentials automatically attached by the browser, specifically session cookies like `JSESSIONID`).
+      - If a user visits `evil.com`, a malicious script can issue a background `POST https://mybank.com/transfer` request. The browser automatically attaches the user's `mybank.com` cookie, tricking the server into executing the transfer.
+    - **Stateless Bearer Tokens in Authorization Headers**:
+      - In a modern SPA or mobile backend, the JWT is stored in application memory and explicitly attached as a header:
+        ```http
+        Authorization: Bearer eyJhbGciOi...
+        ```
+      - Browsers **never** automatically attach custom headers to cross-origin requests. `evil.com` cannot force a browser to include the JWT.
+      - Therefore, CSRF attacks are technically impossible against token-based APIs using the `Authorization` header, and `csrf.disable()` is completely secure.
+    - **When CSRF Is Required**:
+      - If you store your JWT or Refresh Token inside an `HttpOnly` cookie for automatic transmission, CSRF protection (or `SameSite=Strict` cookie enforcement) is strictly mandatory.
+  </Accordion>
+
+  <Accordion title="3. How does method-level security with SpEL operate?">
+    - Enabled via `@EnableMethodSecurity`.
+    - Uses Spring AOP to intercept method executions and evaluate Spring Expression Language (SpEL) expressions against the `SecurityContextHolder`:
+    ```java
+    @PreAuthorize("hasRole('ADMIN') or #authorId == authentication.principal.id")
+    public void deleteArticle(Long authorId, Long articleId) {
+        articleRepository.deleteById(articleId);
+    }
+    ```
+    - **How It Evaluates**:
+      1. Before `deleteArticle` executes, the AOP method advisor intercepts the invocation.
+      2. It extracts the authenticated principal from `SecurityContextHolder.getContext().getAuthentication()`.
+      3. It evaluates `hasRole('ADMIN')`. If true, access is granted.
+      4. If false, it binds the method argument `#authorId` and checks if it equals `authentication.principal.id`.
+      5. If both conditions evaluate to `false`, it throws `AccessDeniedException`, which returns `403 Forbidden` to the caller.
+  </Accordion>
+</AccordionGroup>

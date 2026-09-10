@@ -1,0 +1,465 @@
+---
+title: "HTTP Internals, REST Architecture & JSON API Standards"
+description: "Master backend communication: TCP/TLS handshakes, HTTP/1.1 to HTTP/3 QUIC, Richardson Maturity Model, RFC 9457 Problem Details, and Jackson internals."
+---
+
+# HTTP Internals, REST Architecture & JSON API Standards
+
+Every modern backend system communicates over network protocols. Whether you are building internal microservices, external public APIs, or event webhooks, **HTTP and JSON form the universal lingua franca of backend engineering**.
+
+A superficial understanding of HTTP (treating it merely as URLs and JSON payloads) leads to fragile systems that suffer from connection pool exhaustion, lack proper caching, leak security headers, and break client backwards-compatibility.
+
+This guide provides an exhaustive, production-grade breakdown of the HTTP protocol stack, REST architectural constraints, RFC error standards, and JSON serialization mechanics.
+
+---
+
+## The Network Foundation: TCP and TLS Handshakes
+
+Before a single byte of HTTP data is transmitted, the client and server must establish reliable transport and cryptographic trust.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Client (Browser / Mobile / Service)
+    participant Server as Backend Server (Nginx / Spring Boot)
+
+    Note over Client,Server: Phase 1: TCP 3-Way Handshake (1 RTT)
+    Client->>Server: SYN (Sequence Number = X)
+    Server-->>Client: SYN-ACK (Ack = X+1, Seq = Y)
+    Client->>Server: ACK (Ack = Y+1)
+
+    Note over Client,Server: Phase 2: TLS 1.3 Cryptographic Handshake (1 RTT)
+    Client->>Server: ClientHello + Key Share (Diffie-Hellman Public Key) + Supported Ciphers
+    Server-->>Client: ServerHello + Key Share + Encrypted Certificate + Finished
+    
+    Note over Client,Server: Phase 3: Secure Encrypted HTTP Exchange (0.5 RTT)
+    Client->>Server: HTTP Request (Encrypted with Derived Session Keys)
+    Server-->>Client: HTTP Response (Encrypted)
+```
+
+### Handshake Latency Cost
+1. **TCP 3-Way Handshake**: Takes 1 Round Trip Time (RTT).
+2. **TLS 1.3 Handshake**: Takes 1 RTT (compared to TLS 1.2 which required 2 RTTs).
+3. **Total Connection Overhead**: 2 full RTTs before application data can travel. Across a cross-country 60ms link, establishing a fresh connection costs **120ms** of latency before the backend even parses the request!
+
+<Tip>
+**Production Takeaway: Connection Keep-Alive**:
+Always enable HTTP persistent connections (`Keep-Alive`). Reusing established TCP/TLS connections reduces request latency from 130ms to 10ms by eliminating redundant handshakes.
+</Tip>
+
+---
+
+## Evolution of HTTP: 1.1 vs HTTP/2 vs HTTP/3 QUIC
+
+Understanding the differences between HTTP versions explains why modern cloud gateways and CDNs optimize connection multiplexing:
+
+```mermaid
+graph TD
+    subgraph HTTP/1.1
+        H1["HTTP/1.1: Text-Based<br/>One request per TCP connection at a time<br/>Application Head-of-Line Blocking"]
+    end
+    subgraph HTTP/2
+        H2["HTTP/2: Binary Framing<br/>Multiple streams multiplexed over 1 TCP connection<br/>TCP Head-of-Line Blocking on packet loss"]
+    end
+    subgraph HTTP/3
+        H3["HTTP/3: UDP (QUIC Protocol)<br/>Independent streams over UDP<br/>Zero Head-of-Line Blocking + 0-RTT Reconnect"]
+    end
+    H1 -->|Multiplexing| H2
+    H2 -->|Eliminate TCP HoL| H3
+```
+
+### Protocol Comparison Matrix
+
+| Architectural Dimension | HTTP/1.1 | HTTP/2 | HTTP/3 (QUIC) |
+| :--- | :--- | :--- | :--- |
+| **Transport Layer** | TCP | TCP | UDP (via QUIC) |
+| **Framing** | Plain text (ASCII) | Binary frames | Binary frames |
+| **Multiplexing** | No (Sequential or Pipelined) | Yes (Multiplexed streams) | Yes (True independent streams) |
+| **Head-of-Line (HoL) Blocking** | Severe (at HTTP application layer) | Eliminated at HTTP layer; persists at TCP layer | Completely eliminated across all layers |
+| **Connection Handshake** | TCP (1 RTT) + TLS (1-2 RTT) | TCP (1 RTT) + TLS 1.3 (1 RTT) | QUIC (1 RTT combined transport + TLS 1.3) |
+| **Header Compression** | None (Repeated raw headers) | HPACK (Indexed table) | QPACK (Out-of-order dynamic table) |
+| **Connection Migration** | Impossible (IP/Port bound) | Impossible (IP/Port bound) | Seamless (Connection ID preserved across Wi-Fi/Cellular switches) |
+
+---
+
+## HTTP Anatomy: Requests and Responses
+
+### The Wire Anatomy of an HTTP Request
+HTTP/1.1 is human-readable on the wire. A raw request consists of three distinct blocks:
+
+```http
+POST /api/v1/orders HTTP/1.1
+Host: api.store.com
+User-Agent: iOS/17.4 PaymentClient/2.1
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsIn...
+Content-Type: application/json
+Content-Length: 54
+Idempotency-Key: 9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+Accept: application/json
+
+{"productId":"prod_991","quantity":2,"unitPrice":49.99}
+```
+
+```text
+[Method] [Request-URI] [HTTP-Version] \r\n  <-- Request Line
+[Header-Name]: [Header-Value] \r\n          <-- Request Headers
+...
+\r\n                                        <-- Empty Line (CRLF delimiter)
+[Message Body Payload]                      <-- Optional Body
+```
+
+### The Wire Anatomy of an HTTP Response
+
+```http
+HTTP/1.1 201 Created
+Date: Thu, 10 Sep 2026 15:30:00 GMT
+Content-Type: application/json; charset=UTF-8
+Content-Length: 82
+Location: /api/v1/orders/ord_55219
+ETag: W/"a8f12c-0912"
+Cache-Control: private, no-cache
+
+{"id":"ord_55219","status":"PENDING","totalAmount":99.98,"createdAt":"2026-09-10T15:30:00Z"}
+```
+
+---
+
+## Method Semantics: Safety, Idempotency & Cacheability
+
+HTTP methods are strictly categorized by formal RFC 9110 architectural properties:
+
+| Method | Primary Purpose | Safe? | Idempotent? | Cacheable? | Request Body? | Response Body? |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **GET** | Retrieve representation of resource | **Yes** | **Yes** | **Yes** | No | Yes |
+| **HEAD** | Retrieve headers only (metadata check) | **Yes** | **Yes** | **Yes** | No | No |
+| **OPTIONS** | Query supported methods / CORS preflight | **Yes** | **Yes** | No | No | Optional |
+| **POST** | Create child resource or trigger processing | No | **No** | Only with explicit headers | Yes | Yes |
+| **PUT** | Replace resource completely or create at URI | No | **Yes** | No | Yes | Yes |
+| **PATCH** | Apply partial modifications to resource | No | **No** (RFC standard) | No | Yes | Yes |
+| **DELETE** | Remove resource representation | No | **Yes** | No | Optional | Optional |
+
+### The Critical Distinctions
+
+#### 1. Safe vs Unsafe
+An operation is **Safe** if it does not alter server state. Clients can call `GET` or `HEAD` repeatedly without fear of mutating business records, making them safe for web crawlers, browser prefetching, and CDN edge caching.
+
+#### 2. Idempotent vs Non-Idempotent
+An operation is **Idempotent** if making $N$ identical requests produces the exact same server side-effects as making 1 request:
+$$f(f(x)) = f(x)$$
+
+```text
+Example: PUT vs POST
+PUT /users/42 {"name": "Alice"} -> Sets name to Alice. Repeating it 10 times leaves name as Alice.
+POST /users/42/charges {"amount": 100} -> Charges $100. Repeating it 10 times charges $1,000!
+```
+
+#### 3. PUT vs PATCH
+- **PUT**: Replaces the **entire resource**. Any field omitted in the request body is set to `null` or default values.
+- **PATCH**: Modifies **only the specified fields**, leaving omitted attributes untouched.
+
+---
+
+## HTTP Status Codes: The RFC Contract
+
+Status codes inform the client's network layer and application runtime how to handle the result:
+
+```mermaid
+graph LR
+    S["Status Codes"] --> C1["1xx Informational<br/>(Protocol switching)"]
+    S --> C2["2xx Success<br/>(Request understood and accepted)"]
+    S --> C3["3xx Redirection<br/>(Further action needed to complete)"]
+    S --> C4["4xx Client Error<br/>(Fault lies with caller)"]
+    S --> C5["5xx Server Error<br/>(Fault lies with backend)"]
+```
+
+### Production Status Codes Breakdown
+
+<Tabs>
+  <Tab title="2xx Success">
+    - **`200 OK`**: Standard success for `GET`, `PUT`, `PATCH`, or `DELETE` returning data.
+    - **`201 Created`**: Resource created successfully via `POST`. **Must** include a `Location` header pointing to the new resource URL.
+    - **`202 Accepted`**: Request accepted for asynchronous background processing (e.g., video transcoding, batch import). Status is not complete yet.
+    - **`204 No Content`**: Request succeeded with zero response body (standard for successful `DELETE` or empty `PUT`).
+  </Tab>
+  <Tab title="3xx Redirection & Caching">
+    - **`301 Moved Permanently`**: Target resource permanently assigned new URI. Browsers cache this redirect indefinitely.
+    - **`302 Found / 307 Temporary Redirect`**: Temporary redirect. `307` guarantees that the HTTP method (e.g., `POST`) will not be mutated to `GET` during redirect.
+    - **`304 Not Modified`**: Conditional request response (`If-None-Match`). Payload was not retransmitted because client cache is still valid.
+  </Tab>
+  <Tab title="4xx Client Errors">
+    - **`400 Bad Request`**: Malformed syntax, invalid JSON, or schema validation failure.
+    - **`401 Unauthorized`**: Authentication missing or token invalid/expired (misnamed; actually means *Unauthenticated*).
+    - **`403 Forbidden`**: Authenticated caller lacks permissions / RBAC roles for this specific resource.
+    - **`404 Not Found`**: Resource does not exist at this URI.
+    - **`409 Conflict`**: Request conflicts with current server state (e.g., unique email already registered, optimistic lock version mismatch).
+    - **`422 Unprocessable Content`**: Syntactically valid JSON, but semantic business rules failed (e.g., checkout with negative discount).
+    - **`429 Too Many Requests`**: Client crossed rate limit threshold. Should return `Retry-After` header.
+  </Tab>
+  <Tab title="5xx Server Errors">
+    - **`500 Internal Server Error`**: Unhandled exception, null pointer, or uncaught backend crash.
+    - **`502 Bad Gateway`**: Upstream reverse proxy (Nginx/Gateway) received an invalid response from backend microservice.
+    - **`503 Service Unavailable`**: Server temporarily overloaded or undergoing maintenance.
+    - **`504 Gateway Timeout`**: Upstream service failed to respond within reverse proxy's socket timeout window.
+  </Tab>
+</Tabs>
+
+---
+
+## Production Headers & Conditional Requests
+
+### 1. HTTP Caching with ETags and 304 Not Modified
+ETags (Entity Tags) eliminate redundant bandwidth consumption when querying resources that change infrequently:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client
+    participant Server as Spring Boot API
+
+    Note over Client,Server: Step 1: Initial Fetch
+    Client->>Server: GET /api/v1/products/8812
+    Server-->>Client: HTTP 200 OK<br/>ETag: "68b329da1"<br/>Cache-Control: max-age=3600, must-revalidate<br/>{"id":8812,"price":199.99}
+
+    Note over Client,Server: Step 2: Conditional Fetch (Cache Revalidation)
+    Client->>Server: GET /api/v1/products/8812<br/>If-None-Match: "68b329da1"
+    Server->>Server: Calculate current ETag for product 8812
+    alt Data has NOT changed
+        Server-->>Client: HTTP 304 Not Modified<br/>(Empty Body! Zero bandwidth wasted)
+    else Data HAS changed
+        Server-->>Client: HTTP 200 OK<br/>ETag: "79c430eb2"<br/>{"id":8812,"price":179.99}
+    end
+```
+
+### 2. Essential Security & Observability Headers
+
+```http
+# Security Headers
+Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+Content-Security-Policy: default-src 'self'
+
+# Distributed Tracing Headers (W3C Trace Context)
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+X-Correlation-ID: 7a82-f19b-4412-881a
+
+# Safe Retries
+Idempotency-Key: ord-chk-2026-09-10-88123
+```
+
+---
+
+## Standardized Error Handling: RFC 7807 & RFC 9457
+
+In the past, backend teams created arbitrary error payloads:
+```json
+// ANTI-PATTERN: Inconsistent, custom error JSON
+{"success": false, "err": "User not found", "code": 1042}
+```
+
+The Internet Engineering Task Force (IETF) standardized API error reporting in **RFC 7807** (updated in **RFC 9457** as `application/problem+json`).
+
+### Standard Problem Details Structure
+
+```json
+{
+  "type": "https://api.store.com/errors/insufficient-funds",
+  "title": "Insufficient Funds",
+  "status": 422,
+  "detail": "Your account balance of $42.50 is insufficient for this $100.00 debit.",
+  "instance": "/accounts/acc_9921/transfers/tx_551",
+  "invalidParams": [
+    {
+      "name": "amount",
+      "reason": "Must be less than or equal to current account balance"
+    }
+  ]
+}
+```
+
+### Spring Boot 3 Native ProblemDetail Support
+
+Spring Boot 3 introduces first-class support for RFC 7807 via `ProblemDetail` and `ResponseEntityExceptionHandler`:
+
+```java
+package com.example.demo.exception;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ProblemDetail;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+import java.net.URI;
+import java.time.Instant;
+
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(InsufficientFundsException.class)
+    public ProblemDetail handleInsufficientFunds(InsufficientFundsException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(
+                HttpStatus.UNPROCESSABLE_ENTITY, 
+                ex.getMessage()
+        );
+        problem.setTitle("Insufficient Account Balance");
+        problem.setType(URI.create("https://api.store.com/errors/insufficient-funds"));
+        problem.setProperty("accountId", ex.getAccountId());
+        problem.setProperty("currentBalance", ex.getCurrentBalance());
+        problem.setProperty("attemptedDebit", ex.getAttemptedDebit());
+        problem.setProperty("timestamp", Instant.now());
+        return problem;
+    }
+}
+```
+
+---
+
+## JSON Serialization Internals with Jackson
+
+Spring Boot uses **Jackson** (`ObjectMapper`) to serialize Java POJOs into JSON strings and deserialize HTTP JSON payloads into Java objects.
+
+```mermaid
+graph LR
+    subgraph Deserialization [HTTP Request -> Java Object]
+        JIN["JSON Stream"] --> TOKEN["Jackson Tokenizer / Parser"]
+        TOKEN --> REFL["Constructor / Setters / Field Reflection"]
+        REFL --> POJO["Java Domain Record / DTO"]
+    end
+    subgraph Serialization [Java Object -> HTTP Response]
+        POJO2["Java DTO"] --> GETTER["Getters & Field Inspection"]
+        GETTER --> GEN["Jackson JsonGenerator"]
+        GEN --> JOUT["JSON Response Stream"]
+    end
+```
+
+### 1. Java 21 Records as Production DTOs
+Records are immutable, thread-safe, and natively supported by Jackson 2.15+:
+
+```java
+package com.example.demo.dto;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Positive;
+
+import java.math.BigDecimal;
+
+public record CreateOrderRequest(
+    @NotBlank(message = "Customer ID is required")
+    String customerId,
+
+    @NotBlank(message = "Product ID is required")
+    String productId,
+
+    @Positive(message = "Quantity must be greater than zero")
+    int quantity,
+
+    @JsonProperty("unit_price") // Explicit JSON snake_case mapping
+    BigDecimal unitPrice
+) {}
+```
+
+### 2. Date/Time Serialization Best Practices
+By default, older Jackson configurations serialized `java.time.Instant` and `LocalDateTime` into numeric epoch timestamp arrays `[2026, 9, 10, 15, 30]`. In modern backends, **always enforce ISO-8601 strings**:
+
+```yaml
+# application.yml
+spring:
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+    date-format: yyyy-MM-dd'T'HH:mm:ss.SSSXXX
+    default-property-inclusion: non_null # Exclude null fields from JSON responses
+```
+
+### 3. Preventing Infinite Recursion in JPA Entities
+When serializing bidirectional JPA entity relationships, Jackson will loop infinitely until an `OutOfMemoryError` or `StackOverflowError` crashes the JVM:
+
+```mermaid
+graph LR
+    Order["Order Entity"] -->|getLines()| OrderLine["OrderLine Entity"]
+    OrderLine -->|getOrder()| Order
+    Order -.->|Infinite Loop!| OrderLine
+```
+
+```java
+// RESOLUTION: Never serialize JPA entities directly to HTTP clients!
+// Always map entities to decoupled DTO records before returning.
+```
+
+---
+
+## Richardson Maturity Model
+
+Leonard Richardson developed a model that measures the degree to which a web service embraces REST principles:
+
+```text
+Level 3: Hypermedia Controls (HATEOAS)
+         Responses contain URIs to discoverable next actions (_links).
+Level 2: HTTP Verbs & Status Codes
+         Correct use of GET, POST, PUT, DELETE, and HTTP 200, 201, 404, 409.
+Level 1: Resources
+         Individual URIs for separate entities (/orders/12, /users/4).
+Level 0: The Swamp of POX (Plain Old XML/JSON)
+         Single endpoint (e.g. POST /api/service) used for all operations (SOAP/RPC).
+```
+
+---
+
+## API Versioning Strategies
+
+When API contracts inevitably evolve, breaking changes must not disrupt legacy mobile apps or external integrations:
+
+| Strategy | Syntax Example | Pros | Cons |
+| :--- | :--- | :--- | :--- |
+| **URI Path** | `/api/v1/users` | Easiest for clients; clear routing in gateways; straightforward CDN caching | Pollutes URL namespace; forces URI changes on non-breaking updates |
+| **Custom Header** | `X-API-Version: 2` | Clean, persistent URIs; separation of resource identity from contract version | Difficult to test in standard browsers; breaks URL bookmarking/sharing |
+| **Accept Header (Content Negotiation)** | `Accept: application/vnd.store.v2+json` | Purest REST model; adheres to content negotiation standards | Steep client learning curve; complex proxy and cache configuration |
+
+---
+
+## Common API Anti-Patterns & Mistakes
+
+<Warning>
+### 1. The "Everything is 200 OK" Trap
+Returning `HTTP 200 OK` with a body like `{"status": 500, "error": "NullPointerException"}` breaks API gateway circuit breakers, prevents monitoring tools from tracking error budgets (SLOs), and forces client code to parse every JSON response manually.
+</Warning>
+
+<Warning>
+### 2. Verbs in URI Paths
+Designing endpoints like `POST /api/createUser` or `GET /api/deleteOrder?id=12` completely violates REST resource orientation. Use nouns for resources and verbs for methods:
+`POST /api/users` and `DELETE /api/orders/12`.
+</Warning>
+
+<Warning>
+### 3. Exposing Sensitive Credentials in Query Parameters
+Sending authentication tokens or passwords in URLs:
+`GET /api/users?auth_token=secret123`
+is a critical vulnerability. Query parameters are logged in plaintext across browser history, reverse proxy access logs, and CDN edge traces.
+</Warning>
+
+---
+
+## Active Recall & Interview Mastery
+
+<AccordionGroup>
+  <Accordion title="1. Explain the difference between HTTP Safe and Idempotent methods.">
+    A method is **Safe** if it does not modify server state (e.g., `GET`, `HEAD`, `OPTIONS`). A method is **Idempotent** if invoking it once produces the exact same server side-effect as invoking it multiple consecutive times with the same parameters (e.g., `PUT`, `DELETE`, `GET`). All safe methods are idempotent, but not all idempotent methods are safe (`DELETE` mutates state by removing a resource, but executing `DELETE /orders/5` multiple times leaves the system in the same final deleted state).
+  </Accordion>
+
+  <Accordion title="2. How does HTTP/2 eliminate Head-of-Line blocking, and why can it still suffer from it under packet loss?">
+    HTTP/1.1 suffers from application-level Head-of-Line blocking because requests on a TCP connection must be processed sequentially. HTTP/2 introduces binary framing and stream multiplexing, allowing multiple interleaved requests and responses over a single TCP connection. However, because HTTP/2 still relies on a single underlying TCP connection, if a single TCP packet drops on a congested network, the OS TCP stack pauses all streams until the missing packet is retransmitted. HTTP/3 solves this by replacing TCP with UDP (QUIC), isolating packet loss to individual streams.
+  </Accordion>
+
+  <Accordion title="3. What is the difference between PUT and PATCH in RESTful API design?">
+    `PUT` is a full replacement: the client sends a complete representation of the resource. Any attribute omitted from the request body is set to `null` or default values. `PATCH` is a partial update: the client sends only the fields that need modification, and the backend leaves all other existing entity attributes intact.
+  </Accordion>
+
+  <Accordion title="4. How does the ETag and If-None-Match conditional request flow save server bandwidth?">
+    When a server sends a response, it calculates a hash of the content and returns it in the `ETag` header. On subsequent requests for that resource, the client sends that hash back in the `If-None-Match` header. If the server's current resource hash matches the client's ETag, the server returns an empty `HTTP 304 Not Modified` header response without serializing or transmitting the full JSON payload over the network.
+  </Accordion>
+
+  <Accordion title="5. What is RFC 9457 / RFC 7807 Problem Details, and why is it preferred over custom error JSON?">
+    RFC 9457 defines a standardized HTTP error payload format (`application/problem+json`) consisting of `type` (URI reference), `title` (human-readable summary), `status` (HTTP status code), `detail` (specific error explanation), and `instance` (URI where error occurred). It provides a uniform error schema across microservices, enabling generic error-handling clients, standardized logging, and frontend error formatting without custom per-endpoint parsing logic.
+  </Accordion>
+</AccordionGroup>

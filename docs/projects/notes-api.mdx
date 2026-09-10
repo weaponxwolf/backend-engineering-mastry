@@ -1,0 +1,342 @@
+---
+title: "Project Specification: Notes API with JWT Authentication"
+description: "Production technical specification for the Notes API project covering authentication flows, multi-tenant ownership, JWT security, and IDOR prevention."
+---
+
+# Project Specification: Notes API with JWT Authentication
+
+The **Notes API** is the benchmark project for production backend engineering. It moves beyond simple CRUD into real-world architecture: **user identity, password hashing, stateless JWT authorization, multi-tenant ownership enforcement, and database-level IDOR protection**.
+
+<Tip>
+Ready to build this from scratch with over 900 lines of fully tested production code, Testcontainers integration tests, and Flyway migrations? Follow [Build Notes API From Zero](/projects/notes-api-full-build).
+</Tip>
+
+---
+
+## 1. Architectural Mental Model & Multi-Tenant Security
+
+Every note belongs to exactly one authenticated user. The primary engineering goal is ensuring that **User A can never read, modify, or delete a note belonging to User B**, even if User A guesses or tampers with the Note ID.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Alice as Legitimate User (Alice: ID 10)
+    actor Eve as Attacker (Eve: ID 99)
+    participant Gateway as SecurityFilterChain
+    participant NoteCtrl as NoteController
+    participant Repo as NoteRepository
+    participant DB as PostgreSQL Database
+
+    Note over Alice,DB: 1. Legitimate Creation
+    Alice->>Gateway: POST /api/v1/notes (Bearer Token Alice)
+    Gateway->>NoteCtrl: AuthenticatedPrincipal(id=10)
+    NoteCtrl->>Repo: save(Note(userId=10, title="My Secret"))
+    Repo->>DB: INSERT INTO notes (user_id, title) VALUES (10, 'My Secret') -> Note ID 405
+    NoteCtrl-->>Alice: 201 Created (Note ID 405)
+
+    Note over Eve,DB: 2. Malicious IDOR / BOLA Attack
+    Eve->>Gateway: GET /api/v1/notes/405 (Bearer Token Eve)
+    Gateway->>NoteCtrl: AuthenticatedPrincipal(id=99)
+    NoteCtrl->>Repo: findByIdAndUserId(405, 99)
+    Repo->>DB: SELECT * FROM notes WHERE id = 405 AND user_id = 99
+    DB-->>Repo: 0 rows returned!
+    NoteCtrl-->>Eve: 404 Not Found (Zero information leaked!)
+```
+
+### The 4 Non-Negotiable Security Rules
+1. **Never Store Plaintext Passwords**: Passwords must be hashed using BCrypt (`BCryptPasswordEncoder` with strength 10 to 12).
+2. **Stateless Request Authentication**: Protected endpoints accept an `Authorization: Bearer <jwt>` header verified on every request without database lookups.
+3. **Database-Level Tenancy Scoping**: Never fetch by ID alone (`findById(id)`). Always query with both identifiers: `findByIdAndUserId(noteId, authenticatedUserId)`.
+4. **IDOR Immunity**: If a user attempts to access a note they do not own, return `404 Not Found` rather than `403 Forbidden` to prevent object enumeration.
+
+---
+
+## 2. Database Schema & Entity Relationship Diagram (ERD)
+
+```mermaid
+erDiagram
+    USERS ||--o{ REFRESH_TOKENS : has
+    USERS ||--o{ NOTES : owns
+    
+    USERS {
+        BIGSERIAL id PK
+        VARCHAR(100) name "NOT NULL"
+        VARCHAR(150) email "NOT NULL UNIQUE"
+        VARCHAR(255) password_hash "NOT NULL"
+        TIMESTAMPTZ created_at "NOT NULL"
+    }
+
+    REFRESH_TOKENS {
+        BIGSERIAL id PK
+        BIGINT user_id FK "NOT NULL"
+        VARCHAR(64) token_hash "NOT NULL UNIQUE"
+        UUID family_id "NOT NULL"
+        BOOLEAN is_used "NOT NULL DEFAULT FALSE"
+        BOOLEAN is_revoked "NOT NULL DEFAULT FALSE"
+        TIMESTAMPTZ expires_at "NOT NULL"
+    }
+
+    NOTES {
+        BIGSERIAL id PK
+        BIGINT user_id FK "NOT NULL"
+        VARCHAR(200) title "NOT NULL"
+        TEXT content "NOT NULL"
+        TIMESTAMPTZ created_at "NOT NULL"
+        TIMESTAMPTZ updated_at "NOT NULL"
+    }
+```
+
+### PostgreSQL DDL (`V1__init_notes_auth.sql`)
+
+```sql
+-- Users Table
+CREATE TABLE users (
+    id BIGSERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    email VARCHAR(150) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_users_email ON users(email);
+
+-- Refresh Token Rotation Store
+CREATE TABLE refresh_tokens (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash VARCHAR(64) NOT NULL UNIQUE,
+    family_id UUID NOT NULL,
+    is_used BOOLEAN NOT NULL DEFAULT FALSE,
+    is_revoked BOOLEAN NOT NULL DEFAULT FALSE,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_refresh_hash ON refresh_tokens(token_hash);
+CREATE INDEX idx_refresh_family ON refresh_tokens(family_id);
+
+-- Notes Table (Scoped to User)
+CREATE TABLE notes (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title VARCHAR(200) NOT NULL,
+    content TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Crucial composite index for fast, filtered user queries
+CREATE INDEX idx_notes_user_created ON notes(user_id, created_at DESC);
+```
+
+---
+
+## 3. Comprehensive RESTful API Contract
+
+### 3.1 Authentication Endpoints (Public)
+
+| Method | Route | Request Body | Status | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `POST` | `/api/v1/auth/register` | `RegisterRequest` | `201 Created` | Registers user; hashes password with BCrypt. |
+| `POST` | `/api/v1/auth/login` | `LoginRequest` | `200 OK` | Validates credentials; returns Access Token + Refresh Cookie. |
+| `POST` | `/api/v1/auth/refresh` | *Cookie: refreshToken* | `200 OK` | Rotates refresh token; issues new access token. |
+| `POST` | `/api/v1/auth/logout` | *Cookie: refreshToken* | `204 No Content` | Revokes current token family; clears cookie. |
+
+### 3.2 Notes Management Endpoints (Protected by Bearer Token)
+
+| Method | Route | Request Body | Status | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `POST` | `/api/v1/notes` | `CreateNoteRequest` | `201 Created` | Creates note owned by authenticated user. |
+| `GET` | `/api/v1/notes` | *Query: page, size* | `200 OK` | Retrieves paginated notes for authenticated user. |
+| `GET` | `/api/v1/notes/{id}` | *None* | `200 OK` | Retrieves single note strictly owned by caller. |
+| `PUT` | `/api/v1/notes/{id}` | `UpdateNoteRequest` | `200 OK` | Updates note strictly owned by caller. |
+| `DELETE` | `/api/v1/notes/{id}` | *None* | `204 No Content` | Deletes note strictly owned by caller. |
+| `GET` | `/api/v1/notes/search` | *Query: q* | `200 OK` | Searches caller's notes by title or content. |
+
+---
+
+## 4. Request & Response Payload Specifications
+
+### 4.1 User Registration (`POST /api/v1/auth/register`)
+
+#### Request Body
+```json
+{
+  "name": "Sarah Connor",
+  "email": "sarah@resistance.org",
+  "password": "CorrectHorseBatteryStaple123!"
+}
+```
+
+#### Validation Invariants
+- `name`: Not blank, max 100 characters.
+- `email`: Valid RFC 5322 email syntax, unique across system (`@Email`, `@NotBlank`).
+- `password`: Minimum 8 characters, maximum 72 characters (BCrypt truncates at 72 bytes!).
+
+#### Response (`201 Created`)
+```json
+{
+  "id": 1,
+  "name": "Sarah Connor",
+  "email": "sarah@resistance.org",
+  "createdAt": "2026-09-10T15:00:00Z"
+}
+```
+
+---
+
+### 4.2 User Login (`POST /api/v1/auth/login`)
+
+#### Request Body
+```json
+{
+  "email": "sarah@resistance.org",
+  "password": "CorrectHorseBatteryStaple123!"
+}
+```
+
+#### Successful Response (`200 OK`)
+**Response Headers**:
+```http
+Set-Cookie: refreshToken=d8471...; Path=/api/v1/auth; HttpOnly; Secure; SameSite=Strict; Max-Age=604800
+```
+**Response Body**:
+```json
+{
+  "accessToken": "eyJhbGciOiJSUzI1NiIs...",
+  "tokenType": "Bearer",
+  "expiresInSeconds": 900
+}
+```
+
+---
+
+### 4.3 Create Note (`POST /api/v1/notes`)
+
+#### Request Headers
+```http
+Authorization: Bearer eyJhbGciOiJSUzI1NiIs...
+Content-Type: application/json
+```
+
+#### Request Body
+```json
+{
+  "title": "Skynet Infiltration Blueprint",
+  "content": "Focus on the secondary power grid junction at Sector 4."
+}
+```
+
+#### Response (`201 Created`)
+```json
+{
+  "id": 104,
+  "title": "Skynet Infiltration Blueprint",
+  "content": "Focus on the secondary power grid junction at Sector 4.",
+  "createdAt": "2026-09-10T15:05:00Z",
+  "updatedAt": "2026-09-10T15:05:00Z"
+}
+```
+
+---
+
+## 5. Verification Runbook (Complete `curl` Walkthrough)
+
+```bash
+# 1. Register Alice
+curl -i -X POST http://localhost:8080/api/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Alice","email":"alice@test.com","password":"Password123!"}'
+
+# 2. Login as Alice & capture Access Token
+LOGIN_RESPONSE=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"alice@test.com","password":"Password123!"}')
+
+TOKEN=$(echo $LOGIN_RESPONSE | grep -o '"accessToken":"[^"]*' | grep -o '[^"]*$')
+
+# 3. Create Note as Alice
+curl -i -X POST http://localhost:8080/api/v1/notes \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Alice Private Note","content":"Sensitive personal notes"}'
+
+# 4. List Alice's Notes
+curl -i -X GET http://localhost:8080/api/v1/notes \
+  -H "Authorization: Bearer $TOKEN"
+
+# 5. Simulate IDOR Attack: Register Eve, login, and attempt to fetch Alice's Note #1
+EVE_LOGIN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"eve@attacker.com","password":"Password123!"}')
+EVE_TOKEN=$(echo $EVE_LOGIN | grep -o '"accessToken":"[^"]*' | grep -o '[^"]*$')
+
+# Eve requests Alice's note (ID 1) -> Returns 404 Not Found!
+curl -i -X GET http://localhost:8080/api/v1/notes/1 \
+  -H "Authorization: Bearer $EVE_TOKEN"
+```
+
+---
+
+## 6. Acceptance Test Matrix
+
+| Test Case | Scenario | Expected Status | Validation Assertion |
+| :--- | :--- | :--- | :--- |
+| `TC-AUTH-01`| Register with valid email and password | `201 Created` | User saved in DB; password in DB starts with `$2a$` (BCrypt). |
+| `TC-AUTH-02`| Register with already registered email | `409 Conflict` | Clean RFC 9457 error; email collision message. |
+| `TC-AUTH-03`| Login with incorrect password | `401 Unauthorized`| Bad credentials error; no token returned. |
+| `TC-AUTH-04`| Access `/api/v1/notes` without Bearer token | `401 Unauthorized`| Filter chain rejects request before hitting controller. |
+| `TC-NOTE-01`| Create note with valid payload | `201 Created` | Note saved in DB with caller's `user_id`. |
+| `TC-NOTE-02`| User A fetches User A's note | `200 OK` | Returns note content. |
+| `TC-NOTE-03`| User B fetches User A's note (IDOR check) | `404 Not Found` | Zero rows returned; attacker cannot confirm existence of note. |
+| `TC-NOTE-04`| User B attempts to delete User A's note | `404 Not Found` | Note remains untouched in database. |
+| `TC-NOTE-05`| Search notes with keyword `Secret` | `200 OK` | Only returns notes belonging to caller matching keyword. |
+
+---
+
+## 7. Active Recall Mastery Questions
+
+<AccordionGroup>
+  <Accordion title="1. Why does BCrypt truncate passwords at 72 bytes? How does this impact security?">
+    The internal Blowfish encryption algorithm used by BCrypt processes input keys in 72-byte blocks. Any characters beyond 72 bytes are completely ignored! 
+    
+    If a user enters an 80-character password, the last 8 characters have zero cryptographic impact. Application backends should validate `@Size(min = 8, max = 72)` on registration requests to prevent users from believing passwords longer than 72 bytes provide extra security.
+  </Accordion>
+
+  <Accordion title="2. Why should an IDOR violation return HTTP 404 Not Found instead of HTTP 403 Forbidden?">
+    Returning `403 Forbidden` confirms to the attacker that the resource ID **actually exists** in your database and belongs to someone else (Object Enumeration). 
+    
+    By returning `404 Not Found`, the endpoint behaves identically whether the resource ID belongs to another tenant or does not exist at all, completely blinding the attacker from probing the system.
+  </Accordion>
+
+  <Accordion title="3. Why is the database query findByIdAndUserId superior to findById followed by an if-check in Java?">
+    Relying on an `if (note.getUserId().equals(currentUser.getId()))` check inside Java code introduces two critical vulnerabilities:
+    1. **Accidental Developer Omission**: If another developer implements a new endpoint (e.g. `deleteNote`) and forgets the `if` check, an instant IDOR vulnerability is born.
+    2. **Multi-Tenant Leakage in JPA Caches**: Fetching foreign records into the Hibernate first-level cache risks accidental dirty-checking modifications.
+    
+    Scoping the query directly in SQL (`WHERE id = :id AND user_id = :userId`) makes multi-tenant isolation an invariant enforced by the database engine itself.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## 8. Done Checklist
+
+<Check>
+Passwords are encrypted using BCrypt with work factor 10+; raw passwords are never logged or stored.
+</Check>
+<Check>
+Stateless JWT authentication protects all `/api/v1/notes/**` endpoints via Spring Security.
+</Check>
+<Check>
+All note retrieval, update, and delete queries strictly enforce `WHERE id = :id AND user_id = :userId`.
+</Check>
+<Check>
+IDOR attempts return HTTP 404 Not Found to eliminate object enumeration attacks.
+</Check>
+<Check>
+Composite index `notes(user_id, created_at DESC)` ensures $O(1)$ fast indexed pagination.
+</Check>
+<Check>
+All cases in the Acceptance Test Matrix are verified via automated integration tests.
+</Check>

@@ -1,0 +1,10 @@
+node_modules/
+.mintlify/
+docs/.mintlify/
+*.zip
+out/
+.env
+.env.*
+dist/
+build/
+.DS_Store

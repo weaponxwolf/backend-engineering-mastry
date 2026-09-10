@@ -1,0 +1,189 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "maple",
+  "name": "Spring Backend Mastery",
+  "description": "Learn backend engineering from beginner to advanced using Java, Spring Boot, databases, microservices, and system design.",
+  "appearance": {
+    "default": "dark",
+    "strict": false
+  },
+  "colors": {
+    "primary": "#22C55E",
+    "light": "#16A34A",
+    "dark": "#86EFAC"
+  },
+  "search": {
+    "prompt": "Search backend topic..."
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/"
+      }
+    ]
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Learn",
+        "groups": [
+          {
+            "group": "Start Here",
+            "icon": "rocket",
+            "pages": [
+              "index",
+              "getting-started/how-to-use",
+              "getting-started/backend-roadmap",
+              "getting-started/mastery-plan",
+              "getting-started/book-standard",
+              "getting-started/curriculum-audit",
+              "getting-started/simple-english-rule"
+            ]
+          },
+          {
+            "group": "Level 0: Backend Basics",
+            "icon": "server",
+            "pages": [
+              "backend-basics/what-is-backend",
+              "backend-basics/client-server",
+              "backend-basics/http-json-api"
+            ]
+          },
+          {
+            "group": "Level 1: Java Foundation",
+            "icon": "coffee",
+            "pages": [
+              "java/java-core",
+              "java/oop",
+              "java/collections-exceptions",
+              "java/generics-streams",
+              "java/concurrency-jvm",
+              "java/java-backend-mastery",
+              "java/jvm-performance-tuning",
+              "java/reactive-vs-virtual-threads"
+            ]
+          },
+          {
+            "group": "Level 2: Database",
+            "icon": "database",
+            "pages": [
+              "database/sql-basics",
+              "database/relationships-joins",
+              "database/indexes-transactions",
+              "database/query-design-migrations",
+              "database/locking-isolation",
+              "database/database-performance-mastery",
+              "database/schema-change-mastery",
+              "database/sharding-partitioning",
+              "database/search-indexing-cdc"
+            ]
+          },
+          {
+            "group": "Level 3: Spring Boot",
+            "icon": "leaf",
+            "pages": [
+              "spring-boot/project-structure",
+              "spring-boot/dependency-injection",
+              "spring-boot/config-profiles",
+              "spring-boot/rest-api",
+              "spring-boot/validation-errors",
+              "spring-boot/jpa-hibernate",
+              "spring-boot/transactions",
+              "spring-boot/spring-security-deep",
+              "spring-boot/spring-security-production"
+            ]
+          },
+          {
+            "group": "Level 4: Production Backend",
+            "icon": "shield-check",
+            "pages": [
+              "production/security-jwt",
+              "production/testing",
+              "production/testcontainers",
+              "production/logging-monitoring",
+              "production/observability",
+              "production/caching",
+              "production/deployment-ci-cd",
+              "production/incident-response",
+              "production/oauth2-zerotrust-mesh"
+            ]
+          },
+          {
+            "group": "Level 5: Advanced Backend",
+            "icon": "network",
+            "pages": [
+              "advanced/message-queues",
+              "advanced/microservices",
+              "advanced/microservices-from-monolith",
+              "advanced/resilience-patterns",
+              "advanced/docker-kubernetes",
+              "advanced/distributed-batch-scheduling",
+              "advanced/realtime-websockets"
+            ]
+          },
+          {
+            "group": "Level 6: System Design",
+            "icon": "blocks",
+            "pages": [
+              "system-design/fundamentals",
+              "system-design/capacity-estimation",
+              "system-design/rate-limiter",
+              "system-design/url-shortener",
+              "system-design/notification-system",
+              "system-design/consistency-failures",
+              "system-design/financial-ledger",
+              "system-design/distributed-locks-consensus",
+              "system-design/distributed-id-generation",
+              "system-design/multi-region-disaster-recovery",
+              "system-design/webhook-engine-workflows",
+              "system-design/search-autocomplete",
+              "system-design/distributed-kv-store"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Practice",
+        "groups": [
+          {
+            "group": "Projects",
+            "icon": "folder-code",
+            "pages": [
+              "projects/todo-api",
+              "projects/todo-api-full-build",
+              "projects/blog-api-full-build",
+              "projects/notes-api",
+              "projects/notes-api-full-build",
+              "projects/url-shortener-full-build",
+              "projects/rate-limiter-full-build",
+              "projects/notification-worker-full-build",
+              "projects/incident-debugging-lab",
+              "projects/deployment-lab",
+              "projects/ecommerce-backend",
+              "projects/ecommerce-full-build"
+            ]
+          },
+          {
+            "group": "Interview",
+            "icon": "messages-square",
+            "pages": [
+              "interview/backend-questions",
+              "interview/backend-answers",
+              "interview/spring-questions",
+              "interview/spring-answers",
+              "interview/system-design-questions",
+              "interview/system-design-answers",
+              "interview/senior-interview-playbook"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/"
+    }
+  }
+}

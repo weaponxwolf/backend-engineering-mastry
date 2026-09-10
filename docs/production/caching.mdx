@@ -1,0 +1,401 @@
+---
+title: "Distributed Caching & Redis Mastery"
+description: "Master distributed caching architectures, Redis event loop internals, clustering with 16,384 hash slots, Lua script atomicity, and multi-tier L1/L2 cache synchronization."
+---
+
+# Distributed Caching & Redis Mastery
+
+> "There are only two hard things in Computer Science: cache invalidation and naming things." — *Phil Karlton*
+
+Caching stores precomputed calculations and frequent database reads in ultra-fast in-memory storage (Redis) to deliver sub-millisecond API response times. 
+
+However, implementing caching without a rigorous invalidation strategy creates critical production bugs: **stale customer data, silent memory leaks, and cascading database crashes during cache stampedes**.
+
+---
+
+## 1. The Four Caching Topologies & Write Strategies
+
+How and when your backend reads and writes to the cache governs system consistency, read latency, and write throughput:
+
+```mermaid
+flowchart TD
+    subgraph Topologies["Enterprise Caching Topologies"]
+        CA["1. Cache-Aside (Lazy Loading)\nApp orchestrates Cache & DB\nStandard for REST & Microservices"]
+        WT["2. Write-Through\nApp writes to cache;\nCache synchronously writes DB"]
+        WB["3. Write-Behind (Write-Back)\nApp writes to cache;\nCache asynchronously flushes DB"]
+        RA["4. Refresh-Ahead\nBackground worker refreshes\nhot keys before TTL expiration"]
+    end
+```
+
+### Architectural Comparison Matrix
+
+| Pattern | Read Path | Write Path | Strengths | Trade-offs |
+| :--- | :--- | :--- | :--- | :--- |
+| **Cache-Aside** (Default) | Read Cache $\rightarrow$ On miss, read DB $\rightarrow$ Populate Cache | Write DB $\rightarrow$ Evict Cache (`DEL key`) | Only requested data is cached; cache downtime does not take down the app | Cache miss incurs 3 network hops; momentary eventual consistency window |
+| **Write-Through** | Read Cache $\rightarrow$ On miss, read DB | Write Cache $\rightarrow$ Cache synchronously writes DB | Cache is never stale; read hits are guaranteed | High write latency (waits for both cache and DB writes) |
+| **Write-Behind** | Read Cache | Write Cache $\rightarrow$ Async worker batch flushes to DB | Maximum write throughput (absorbs massive write spikes) | Cache node crash before flush causes **permanent data loss** |
+| **Refresh-Ahead** | Read Cache | Background scheduled job refreshes hot keys before TTL | Near-zero read latency; eliminates cache misses on hot data | Miscalculating access frequency wastes RAM on cold keys |
+
+### The Golden Rule: Invalidate (`DEL`), Never Update (`SET`)
+When mutating data in a Cache-Aside architecture, developers often make the mistake of updating the cache value directly:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor T1 as Thread 1 (Update to B)
+    actor T2 as Thread 2 (Update to C)
+    participant DB as PostgreSQL Database
+    participant Cache as Redis Cache
+
+    T1->>DB: 1. UPDATE products SET price = 200 (B)
+    T2->>DB: 2. UPDATE products SET price = 300 (C)
+    Note over T1,Cache: Network delay / thread scheduling stall
+    T2->>Cache: 3. SET product:42 price = 300 (C)
+    T1->>Cache: 4. SET product:42 price = 200 (B)
+    Note over DB,Cache: DISASTER: DB holds 300, but Cache permanently holds stale 200!
+```
+
+**The Solution**: Always **delete (evict)** the cache entry upon database mutation. If concurrent writes interleave, the next read will simply trigger a clean cache miss and fetch the latest committed database state.
+
+---
+
+## 2. Redis Internals: The Event Loop & Data Structures
+
+Redis is renowned for delivering 100,000+ operations per second per CPU core. Understanding its internal architecture explains why it is immune to race conditions within a single command.
+
+### 2.1 The Single-Threaded Event Loop
+Redis executes all core commands sequentially on a **single thread** using non-blocking I/O multiplexing (`epoll` on Linux, `kqueue` on macOS):
+
+```mermaid
+flowchart LR
+    C1["Client 1"] --> Mux["I/O Multiplexer (epoll)"]
+    C2["Client 2"] --> Mux
+    C3["Client 3"] --> Mux
+    
+    Mux --> EventQueue["Command Event Queue"]
+    EventQueue --> EventLoop["Single-Threaded Execution Engine\n(In-Memory Hash Table / SkipList)"]
+    EventLoop --> Res["Return Results"]
+```
+
+Because command execution is single-threaded:
+- Redis commands (`INCR`, `HSET`, `LPUSH`, `ZADD`) are **inherently atomic**.
+- You never need distributed mutex locks to increment a counter or push to a list.
+- **Danger**: Running long-running $O(N)$ commands (like `KEYS *`, `HGETALL` on a 100,000-field hash, or complex `FLUSHALL`) freezes the entire Redis server, blocking all other client requests!
+
+### 2.2 Redis In-Memory Data Structures
+
+| Redis Type | Underlying C Data Structure | Ideal Backend Use Case | Time Complexity |
+| :--- | :--- | :--- | :--- |
+| **String** | SDS (Simple Dynamic String) | JSON payloads, binary blobs, atomic distributed counters | $O(1)$ |
+| **Hash** | Dict (Hash Table) / Listpack | User profiles, product entities (saves up to 60% RAM vs JSON) | $O(1)$ per field |
+| **List** | Quicklist (Doubly linked list of zip lists) | Activity feeds, background job message queues (`BLPOP`) | $O(1)$ push/pop |
+| **Set** | Intset / Dict | Unique tags, follower IDs, mutual friend intersections (`SINTER`) | $O(1)$ add/check |
+| **Sorted Set (ZSET)** | SkipList + Hash Table | Real-time leaderboards, sliding window rate limiters | $O(\log N)$ |
+| **HyperLogLog** | Probabilistic Cardinality Register | Counting unique daily active users (1M items in only 12 KB RAM!) | $O(1)$ (0.81% error) |
+
+---
+
+## 3. The Three Classic Cache Disasters & Production Defenses
+
+### 3.1 Cache Stampede (Thundering Herd)
+When an ultra-popular hot key (e.g., flash sale item or homepage banner with 20,000 requests/sec) expires, all incoming threads simultaneously experience a cache miss. Thousands of concurrent database queries overwhelm PostgreSQL, causing connection pool exhaustion and CPU saturation.
+
+#### Mitigation: Single-Flight Distributed Mutex (Redisson)
+Ensure that **only one thread** queries the database and repopulates Redis, while all other concurrent requests wait and read the repopulated cache:
+
+```java
+package com.example.cache;
+
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.stereotype.Service;
+
+import java.time.Duration;
+import java.util.concurrent.TimeUnit;
+
+@Service
+public class ProductCacheService {
+
+    private final StringRedisTemplate redisTemplate;
+    private final RedissonClient redissonClient;
+    private final ProductDatabaseRepository productRepository;
+
+    public ProductCacheService(StringRedisTemplate redisTemplate, RedissonClient redissonClient, ProductDatabaseRepository productRepository) {
+        this.redisTemplate = redisTemplate;
+        this.redissonClient = redissonClient;
+        this.productRepository = productRepository;
+    }
+
+    public String getProductJson(Long productId) {
+        String cacheKey = "product:v1:" + productId;
+        
+        // 1. Fast Path: Cache Hit
+        String cachedJson = redisTemplate.opsForValue().get(cacheKey);
+        if (cachedJson != null) {
+            return cachedJson;
+        }
+
+        // 2. Slow Path: Prevent Stampede via Distributed Mutex
+        RLock lock = redissonClient.getLock("lock:" + cacheKey);
+        try {
+            // Wait up to 3 seconds for lock; lease lock for max 5 seconds
+            if (lock.tryLock(3, 5, TimeUnit.SECONDS)) {
+                try {
+                    // Double-check cache in case previous lock holder populated it
+                    cachedJson = redisTemplate.opsForValue().get(cacheKey);
+                    if (cachedJson != null) {
+                        return cachedJson;
+                    }
+
+                    // 3. Single thread queries the database
+                    String dbJson = productRepository.findProductAsJson(productId);
+                    if (dbJson == null) {
+                        // Negative caching against penetration attacks
+                        redisTemplate.opsForValue().set(cacheKey, "", Duration.ofSeconds(30));
+                        return null;
+                    }
+
+                    // 4. Cache with jitter (10 mins + random 0-60s)
+                    redisTemplate.opsForValue().set(cacheKey, dbJson, Duration.ofSeconds(600 + (long)(Math.random() * 60)));
+                    return dbJson;
+                } finally {
+                    lock.unlock();
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
+        // Fallback: If lock acquisition times out, read directly from DB as safety valve
+        return productRepository.findProductAsJson(productId);
+    }
+}
+```
+
+### 3.2 Cache Penetration
+An attacker maliciously requests millions of non-existent entity IDs (`GET /users/-99999` or random UUIDs). Because these records do not exist in the database, the cache never stores them, forcing every malicious request to hit PostgreSQL directly.
+
+#### Mitigations:
+1. **Bloom Filter**: A space-efficient probabilistic data structure placed in front of Redis. If the Bloom filter says the key does not exist, reject the request immediately without querying Redis or PostgreSQL.
+2. **Negative Caching (Null Sentinel)**: Cache the absence of data with a short TTL (30 seconds):
+   ```java
+   if (entity == null) {
+       redisTemplate.opsForValue().set(cacheKey, "__NULL__", Duration.ofSeconds(30));
+   }
+   ```
+
+### 3.3 Cache Avalanche
+If a batch job warms the cache with 500,000 catalog items at midnight with an exact 2-hour TTL (`TTL = 7200`), all 500,000 keys expire at the exact same millisecond (02:00:00). The subsequent traffic wave slams the database, knocking it offline.
+
+#### Mitigation: TTL Jitter
+Always add randomized jitter to cache expiration:
+
+$$\text{Final TTL} = \text{Base TTL} + \text{Random}(0, \text{Jitter Window})$$
+
+```java
+Duration baseTtl = Duration.ofHours(2);
+long jitterSeconds = ThreadLocalRandom.current().nextLong(0, 300); // 0 to 5 mins jitter
+redisTemplate.opsForValue().set(cacheKey, payload, baseTtl.plusSeconds(jitterSeconds));
+```
+
+---
+
+## 4. Atomic Operations with Redis Lua Scripts
+
+When an operation requires reading a key, making a decision, and writing a new value, individual Redis commands suffer from race conditions.
+
+**Lua Scripts execute atomically in the Redis event loop**. No other command or script can run while a Lua script is executing:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User1 as User 1 (Buy 1 Item)
+    actor User2 as User 2 (Buy 1 Item)
+    participant Redis as Redis Server (Lua Engine)
+
+    Note over Redis: Stock = 1 remaining
+    User1->>Redis: EVALSHA inventory_deduct (Stock: 1, Qty: 1)
+    Note over Redis: Lua script runs atomically on single thread!
+    Redis->>Redis: Checks stock (1 >= 1) -> Decrements stock to 0
+    Redis-->>User1: SUCCESS (1)
+    
+    User2->>Redis: EVALSHA inventory_deduct (Stock: 0, Qty: 1)
+    Redis->>Redis: Checks stock (0 < 1) -> Rejects deduction
+    Redis-->>User2: OUT_OF_STOCK (0)
+```
+
+### Production Spring Boot Lua Script Execution
+
+```java
+package com.example.cache;
+
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.scripting.support.ResourceScriptSource;
+import org.springframework.stereotype.Service;
+
+import java.util.Collections;
+
+@Service
+public class AtomicInventoryService {
+
+    private final StringRedisTemplate redisTemplate;
+    private final DefaultRedisScript<Long> inventoryScript;
+
+    public AtomicInventoryService(StringRedisTemplate redisTemplate) {
+        this.redisTemplate = redisTemplate;
+        this.inventoryScript = new DefaultRedisScript<>();
+        this.inventoryScript.setScriptSource(
+            new ResourceScriptSource(new ClassPathResource("scripts/deduct_stock.lua"))
+        );
+        this.inventoryScript.setResultType(Long.class);
+    }
+
+    public boolean deductStock(String itemKey, int quantity) {
+        // Returns 1 if deduction succeeded, 0 if insufficient stock
+        Long result = redisTemplate.execute(
+            inventoryScript,
+            Collections.singletonList(itemKey),
+            String.valueOf(quantity)
+        );
+        return result != null && result == 1L;
+    }
+}
+```
+
+#### `deduct_stock.lua` Script
+```lua
+-- KEYS[1]: Item stock key (e.g. 'inventory:item:42')
+-- ARGV[1]: Quantity to deduct (e.g. '1')
+
+local current_stock = tonumber(redis.call('GET', KEYS[1]))
+
+if not current_stock or current_stock < tonumber(ARGV[1]) then
+    return 0 -- Insufficient inventory
+else
+    redis.call('DECRBY', KEYS[1], ARGV[1])
+    return 1 -- Successfully deducted atomically
+end
+```
+
+---
+
+## 5. Redis High Availability: Sentinel vs Cluster
+
+```mermaid
+flowchart TD
+    subgraph SentinelMode["1. Redis Sentinel (High Availability Failover)"]
+        S_Master["Master Node (Read/Write)"] -->|Async Replication| S_Replica1["Replica 1 (Read-Only)"]
+        S_Master -->|Async Replication| S_Replica2["Replica 2 (Read-Only)"]
+        Sentinels["3x Sentinel Quorum Nodes\n(Monitor health & elect new master)"] -.-> S_Master
+    end
+
+    subgraph ClusterMode["2. Redis Cluster (Horizontal Partitioning)"]
+        Shard1["Shard 1 (Slots 0 - 5460)"]
+        Shard2["Shard 2 (Slots 5461 - 10922)"]
+        Shard3["Shard 3 (Slots 10923 - 16383)"]
+    end
+```
+
+### 5.1 Redis Sentinel (Active-Passive Failover)
+- A single master accepts writes and replicates asynchronously to one or more read replicas.
+- A cluster of at least 3 Sentinel processes monitors the master. If the master drops offline, sentinels vote to promote a replica to master automatically.
+- **Limitation**: All writes are constrained to a single server's memory and CPU capacity.
+
+### 5.2 Redis Cluster (Horizontal Sharding)
+- Shards dataset automatically across multiple master nodes using **16,384 Hash Slots**:
+
+$$\text{Slot} = \text{CRC16}(\text{key}) \pmod{16384}$$
+
+- **Hash Tags `{...}` for Multi-Key Operations**:
+  If an operation requires updating multiple keys in a single transaction (or Lua script), all keys must map to the **exact same hash slot**. Enforce this using curly braces:
+  ```text
+  user:{104}:profile  -> CRC16('104') % 16384 -> Slot 8192
+  user:{104}:orders   -> CRC16('104') % 16384 -> Slot 8192
+  ```
+
+---
+
+## 6. Two-Tier Caching (L1 Caffeine + L2 Redis)
+
+For extreme high-throughput architectures (e.g., 500,000 requests/sec), querying Redis over the network incurs 0.5 to 1.5 milliseconds of network latency and socket serialization overhead.
+
+A **Two-Tier Cache** combines in-process memory (L1) with distributed memory (L2):
+- **L1 Cache (Caffeine)**: Stored in JVM heap. Access time: **under 50 nanoseconds** ($O(1)$ RAM lookup, zero network hops).
+- **L2 Cache (Redis)**: Shared distributed cache across all microservice instances. Access time: **1 millisecond**.
+
+```mermaid
+flowchart TD
+    Req["Incoming API Request"] --> L1["L1: Caffeine In-JVM Cache\n(50 Nanoseconds)"]
+    L1 -->|Hit| Res1["Return Cached Response"]
+    L1 -->|Miss| L2["L2: Redis Distributed Cache\n(1 Millisecond)"]
+    L2 -->|Hit| Res2["Populate L1 & Return"]
+    L2 -->|Miss| DB[(PostgreSQL Database)]
+    DB --> Res3["Populate L2, Populate L1 & Return"]
+
+    Mutation["Write Mutation"] --> DB_Write["Update DB"]
+    DB_Write --> Redis_Evict["DEL key in Redis"]
+    Redis_Evict --> PubSub["Publish Invalidation via Redis Pub/Sub"]
+    PubSub --> Worker1["Worker 1 (Evict L1)"]
+    PubSub --> Worker2["Worker 2 (Evict L1)"]
+```
+
+---
+
+## 7. Active Recall Interview Mastery
+
+<AccordionGroup>
+  <Accordion title="1. Why is Redis single-threaded for command execution? How does it handle 100k+ QPS?">
+    Redis avoids the high overhead of multi-threaded programming: thread context switches, CPU cache invalidation, and lock contention (mutex/spinlocks). 
+    
+    Because its dataset resides completely in RAM, memory lookups are nanosecond-fast. CPU processing is almost never the bottleneck—network I/O is. Redis uses non-blocking I/O multiplexing (`epoll`) to handle thousands of concurrent client sockets on a single thread. In Redis 6+, multithreading was added strictly for reading and writing network socket buffers, while core state mutations remain single-threaded.
+  </Accordion>
+
+  <Accordion title="2. Why should you delete (evict) a cache key on database update instead of updating the cached value?">
+    Updating the cache on write creates severe race conditions when multiple concurrent writes occur. 
+    
+    If Thread 1 updates the database to $V_1$ and Thread 2 updates the database to $V_2$, network jitter can cause Thread 2's cache write to land before Thread 1's cache write. The cache ends up storing $V_1$ while the database holds $V_2$, creating permanent data corruption. Deleting the key ensures that subsequent reads fetch the authoritative committed state from the database.
+  </Accordion>
+
+  <Accordion title="3. What is the difference between Cache Stampede, Cache Penetration, and Cache Avalanche?">
+    - **Cache Stampede (Thundering Herd)**: A single hot key expires, and thousands of concurrent requests simultaneously miss the cache and overwhelm the database. Mitigation: Distributed mutex locking (Redisson).
+    - **Cache Penetration**: An attacker queries non-existent keys, causing all requests to bypass the cache and hit the database. Mitigation: Bloom Filters or caching null sentinels.
+    - **Cache Avalanche**: Many keys expire at the exact same moment (e.g. fixed 1-hour TTLs set during a midnight batch job), causing a spike of simultaneous database queries. Mitigation: TTL Jitter.
+  </Accordion>
+
+  <Accordion title="4. How does Redis Cluster partition data, and what are hash tags used for?">
+    Redis Cluster divides the key space into **16,384 logical Hash Slots**. Every key is assigned to a slot using the formula:
+    $$\text{Slot} = \text{CRC16}(\text{key}) \pmod{16384}$$
+    
+    Multi-key commands (transactions or Lua scripts) fail in Redis Cluster if the keys reside on different shards. **Hash Tags** (`{...}`) force multiple keys to hash only the substring inside the braces. For example, `{user:10}:profile` and `{user:10}:orders` both hash the string `"user:10"`, guaranteeing they land on the exact same shard and slot.
+  </Accordion>
+
+  <Accordion title="5. How do Lua scripts ensure atomicity in Redis?">
+    Redis executes Lua scripts as a single atomic unit directly inside its single-threaded event loop. While a Lua script is running, Redis pauses execution of all other incoming client commands until the script completes. This prevents interleaving, race conditions, and phantom reads without requiring complex distributed locking protocols.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## 8. Done Checklist
+
+<Check>
+Cache-Aside pattern strictly deletes (`DEL`) cache keys on database updates rather than attempting to update them in place.
+</Check>
+<Check>
+Hot keys protect against Cache Stampedes using Redisson distributed mutex locks.
+</Check>
+<Check>
+Cache penetration attacks are neutralized using Bloom filters or negative caching with short TTL sentinels.
+</Check>
+<Check>
+All cache expirations apply randomized TTL jitter to prevent synchronized cache avalanches.
+</Check>
+<Check>
+Compound check-and-set operations use atomic Redis Lua scripts to eliminate concurrency race conditions.
+</Check>
+<Check>
+Redis Cluster multi-key operations utilize hash tags (`{...}`) to ensure slot co-location.
+</Check>

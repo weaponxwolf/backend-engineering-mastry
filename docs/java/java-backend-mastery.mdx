@@ -1,0 +1,285 @@
+---
+title: "Java Backend Mastery"
+description: "Deep Java knowledge needed for serious Spring Boot backend development."
+---
+
+# Java Backend Mastery
+
+Spring Boot is built on Java.
+
+If Java is weak, Spring code becomes copy-paste.
+
+This chapter connects Java fundamentals to backend work.
+
+## Type Safety
+
+Java is strongly typed.
+
+The compiler checks many mistakes before the app runs.
+
+```java
+long priceCents = 4999L;
+String email = "amit@example.com";
+boolean active = true;
+```
+
+Use types to make invalid code harder to write.
+
+Bad:
+
+```java
+public void pay(long amount, String currency, String userId) {
+}
+```
+
+Better:
+
+```java
+public void pay(Money amount, UserId userId) {
+}
+```
+
+Small value objects can make serious domains safer.
+
+## Generics
+
+Generics tell Java what type a collection or class uses.
+
+```java
+List<User> users = userRepository.findAll();
+```
+
+Without generics, type mistakes move to runtime.
+
+With generics, compiler catches them earlier.
+
+Repository example:
+
+```java
+public interface NoteRepository extends JpaRepository<Note, Long> {
+}
+```
+
+This means:
+
+```text
+Repository manages Note entities.
+Note primary key is Long.
+```
+
+## Streams
+
+Streams are good for transformations.
+
+```java
+List<NoteResponse> responses = notes.stream()
+    .map(NoteResponse::from)
+    .toList();
+```
+
+Do not use streams to hide complex business logic.
+
+Bad:
+
+```java
+orders.stream()
+    .filter(...)
+    .flatMap(...)
+    .collect(...)
+    .entrySet()
+    .stream()
+    .map(...)
+```
+
+If it takes effort to read, write normal loops or extract methods.
+
+## Optional
+
+Optional makes missing value explicit.
+
+```java
+Optional<User> findByEmail(String email);
+```
+
+Good:
+
+```java
+User user = userRepository.findByEmail(email)
+    .orElseThrow(UserNotFoundException::new);
+```
+
+Bad:
+
+```java
+User user = userRepository.findByEmail(email).get();
+```
+
+Use Optional mostly for return values.
+
+Avoid Optional fields in entities and DTOs.
+
+## Equality
+
+Understand `==` and `.equals`.
+
+`==` compares object references for objects.
+
+`.equals` compares meaning when implemented.
+
+```java
+if (email.equals(otherEmail)) {
+}
+```
+
+For strings, use `.equals`.
+
+Be careful implementing `equals` and `hashCode` on JPA entities.
+
+Entity IDs may be null before save.
+
+Bad equality can break sets and maps.
+
+## Immutability
+
+Immutable objects are easier to reason about.
+
+```java
+public record Money(long cents, String currency) {
+    public Money {
+        if (cents < 0) {
+            throw new IllegalArgumentException("Money cannot be negative");
+        }
+    }
+}
+```
+
+Records are useful for:
+
+- request DTOs
+- response DTOs
+- value objects
+- event payloads
+
+JPA entities are usually mutable, but their mutation should be controlled by methods.
+
+## Exceptions
+
+Use specific exceptions.
+
+```java
+throw new NotEnoughStockException(productId);
+```
+
+This is better than:
+
+```java
+throw new RuntimeException("error");
+```
+
+Specific exceptions help:
+
+- global error handling
+- tests
+- logs
+- code readability
+
+## Threads
+
+Spring Boot handles many requests using threads.
+
+Avoid shared mutable state in singleton services.
+
+Bad:
+
+```java
+@Service
+public class ReportService {
+    private Long currentUserId;
+}
+```
+
+This can leak data between requests.
+
+Good:
+
+```java
+public Report generate(Long currentUserId) {
+}
+```
+
+Keep request data in method parameters and local variables.
+
+## JVM Memory
+
+Important areas:
+
+```text
+Heap    objects
+Stack   method calls and local variables
+Metaspace class metadata
+```
+
+Garbage collector removes unused objects.
+
+Too many allocations can hurt latency.
+
+Memory leaks happen when objects stay referenced forever.
+
+Common backend leak:
+
+```text
+static map keeps growing
+cache without max size
+listener not removed
+large file loaded fully into memory
+```
+
+## Date And Time
+
+Use `java.time`.
+
+```java
+Instant now = Instant.now();
+LocalDate birthday = LocalDate.parse("2000-01-01");
+ZonedDateTime time = ZonedDateTime.now(ZoneId.of("Asia/Kolkata"));
+```
+
+Store important timestamps in UTC.
+
+Use `Instant` for createdAt and updatedAt.
+
+Convert to user timezone at edge.
+
+## Backend Java Checklist
+
+- use private fields
+- validate constructors
+- avoid null surprises
+- use records for DTOs
+- use generics
+- use streams for simple transformations
+- avoid shared mutable service state
+- use `Instant` for timestamps
+- use specific exceptions
+- test business rules
+
+## Practice Project
+
+Build a small pure Java order model:
+
+- `Money`
+- `Product`
+- `CartItem`
+- `Cart`
+- `Order`
+
+Rules:
+
+- price cannot be negative
+- quantity must be positive
+- order total must be correct
+- submitted order cannot change
+
+Write unit tests without Spring.
+
+If this is hard, Spring will only hide the confusion.

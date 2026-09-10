@@ -1,0 +1,140 @@
+---
+title: "Curriculum Audit"
+description: "Track whether this guide is strong enough to replace scattered books and tutorials."
+---
+
+# Curriculum Audit
+
+This page keeps the guide honest.
+
+If a topic is marked mastery-level, it must teach enough to build, test, debug, and explain real systems.
+
+## Current Standard
+
+A topic is not complete when it has only:
+
+- definition
+- small snippet
+- list of common tools
+- interview question list
+
+A topic is complete when it has:
+
+- mental model
+- real backend example
+- code shape
+- data model when needed
+- failure cases
+- common mistakes
+- tests
+- production notes
+- practice task
+- interview answers
+
+## Strongest Chapters
+
+These are currently the strongest book-replacement chapters:
+
+- [Build Notes API From Zero](/projects/notes-api-full-build)
+- [Build E-commerce Backend](/projects/ecommerce-full-build)
+- [REST API](/spring-boot/rest-api)
+- [JPA And Hibernate](/spring-boot/jpa-hibernate)
+- [Testing](/production/testing)
+- [Spring Security Production Guide](/spring-boot/spring-security-production)
+- [Database Performance Mastery](/database/database-performance-mastery)
+- [SQL Basics](/database/sql-basics)
+- [Validation And Errors](/spring-boot/validation-errors)
+- [Transactions](/spring-boot/transactions)
+- [Message Queues](/advanced/message-queues)
+- [Docker And Kubernetes](/advanced/docker-kubernetes)
+- [Rate Limiter](/system-design/rate-limiter)
+- [URL Shortener](/system-design/url-shortener)
+- [Notification System](/system-design/notification-system)
+- [Build Todo API From Zero](/projects/todo-api-full-build)
+- [Blog API Full Build](/projects/blog-api-full-build)
+- [URL Shortener Full Build](/projects/url-shortener-full-build)
+- [Rate Limiter Full Build](/projects/rate-limiter-full-build)
+- [Notification Worker Full Build](/projects/notification-worker-full-build)
+- [Deployment Lab](/projects/deployment-lab)
+- [Incident Debugging Lab](/projects/incident-debugging-lab)
+- [Consistency And Failures](/system-design/consistency-failures)
+- [Java Backend Mastery](/java/java-backend-mastery)
+- [Schema Change Mastery](/database/schema-change-mastery)
+
+
+## Extension Roadmap
+
+These areas are good enough for the main curriculum, but can keep growing into advanced reference material:
+
+- advanced JVM tuning
+- reactive Spring WebFlux
+- OAuth2 and OpenID Connect
+- multi-region systems
+- Kubernetes operators and service mesh
+- advanced PostgreSQL internals
+- event sourcing and CQRS
+- high-scale search systems
+- cloud-specific deployment guides
+
+## Capstone Coverage
+
+The core capstone path now includes:
+
+```text
+Todo API
+Blog API
+Notes API
+URL Shortener
+Rate Limiter
+Notification Worker
+E-commerce Backend
+Deployment Lab
+Incident Debugging Lab
+```
+
+These projects cover CRUD, validation, authentication, authorization, ownership, database modeling, transactions, caching, queues, idempotency, deployment, and production debugging.
+
+## Required Labs
+
+Labs should force learners to solve real problems.
+
+Examples:
+
+- fix N plus one query
+- add missing ownership check
+- recover failed migration
+- debug slow API with logs and metrics
+- handle duplicate payment callback
+- add idempotency key to checkout
+- prevent inventory race condition
+- add Testcontainers to repository tests
+- deploy Dockerized app with environment config
+
+## Book Replacement Rule
+
+The guide should reduce the need for books by combining:
+
+```text
+concept explanation
+project implementation
+production failure
+testing
+interview answer
+```
+
+Books are still useful for extra depth and different viewpoints.
+
+But this guide should be enough to build serious backend skill without jumping across many disconnected resources.
+
+## Maintenance Rule
+
+Every new page should answer:
+
+- What problem does this solve?
+- Where does it appear in a real backend?
+- How do I implement it?
+- How does it fail?
+- How do I test it?
+- How do I explain it in interview?
+
+If a page cannot answer these, it is not finished.

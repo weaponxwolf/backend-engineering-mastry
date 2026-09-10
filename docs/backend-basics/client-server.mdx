@@ -1,0 +1,524 @@
+---
+title: "The Client-Server Architecture, Networking Stack & Edge Gateways"
+description: "Master networking fundamentals: OSI vs TCP/IP models, TCP 3-way handshake, TIME_WAIT socket exhaustion, raw Java sockets, DNS Anycast, and NGINX reverse proxies."
+---
+
+# The Client-Server Architecture, Networking Stack & Edge Gateways
+
+In distributed computing, no backend exists in isolation.
+Every business interaction begins with an external **client** initiating a communication channel across public internet infrastructure to reach an authoritative **server**.
+
+Misunderstanding this fundamental physical boundary causes critical architecture flaws:
+- Hardcoding server IP addresses instead of leveraging DNS routing and Anycast load balancing.
+- Relying on stateful in-memory sessions (`HttpSession`) that break cloud autoscaling and failover.
+- Conflating Forward Proxies with Reverse Proxies.
+- Suffering from the **`TIME_WAIT` Socket Exhaustion Disaster**, where high-throughput microservices exhaust all 65,000 ephemeral operating system ports in seconds.
+- Setting socket timeouts improperly, allowing slow clients to tie up server worker threads indefinitely.
+
+This masterclass provides an exhaustive, production-grade manual for the Client-Server paradigm, the TCP/IP stack, Linux socket mechanics, raw Java network sockets, DNS resolution, and edge Reverse Proxy gateways.
+
+---
+
+## The Client-Server Paradigm & Separation of Concerns
+
+```mermaid
+graph LR
+    subgraph Clients ["Untrusted Clients (Edge)"]
+        Browser["Web Browser (React / Vue SPA)"]
+        Mobile["Mobile App (iOS / Android)"]
+        ThirdParty["External Webhook / Microservice"]
+    end
+
+    subgraph ServerPerimeter ["Secure Server Perimeter (VPC)"]
+        Gateway["Reverse Proxy / API Gateway (NGINX / Envoy)"]
+        App["Spring Boot Backend Cluster (Tomcat)"]
+        DB[(PostgreSQL Primary)]
+    end
+
+    Clients -->|HTTPS Requests over Public Internet| Gateway
+    Gateway -->|Internal VPC Routing| App
+    App -->|Secure TCP Sockets| DB
+```
+
+### Core Architectural Principles
+
+1. **Clients Initiate; Servers Listen**:
+   In standard client-server protocols (HTTP/1.1 and HTTP/2), communication is strictly **unidirectional**: the client initiates a connection, sends a request, and the server returns a response. The server cannot arbitrarily open a connection to a client behind a residential NAT/firewall without a persistent duplex connection (e.g., WebSockets, Server-Sent Events, or push notification services like APNs/FCM).
+2. **Thick Clients vs Thin Clients**:
+   - **Thin Clients (Server-Side Rendering - SSR)**: The backend renders complete HTML markup (Thymeleaf, Next.js SSR) and streams it to the browser. The client has minimal compute logic. Ideal for public, content-heavy SEO websites.
+   - **Thick Clients (Single Page Applications & Native Mobile)**: The client downloads compiled JavaScript or native Swift/Kotlin binaries and exchanges pure structured data (JSON/Protobuf) with the backend over REST or gRPC APIs. The client handles presentation, local animations, and navigation.
+
+---
+
+## The Practical 4-Layer TCP/IP Stack
+
+While computer science textbooks teach the conceptual 7-layer OSI model, real-world backend engineering and operating system kernels execute the **4-layer TCP/IP stack**:
+
+```mermaid
+graph TD
+    subgraph TCPIP ["TCP/IP 4-Layer Architecture"]
+        L4["4. Application Layer<br/>Protocols: HTTP/1.1, HTTP/2, HTTP/3, WebSocket, gRPC, DNS<br/>Data Unit: Message / Payload (JSON, Protobuf, HTML)"]
+        L3["3. Transport Layer<br/>Protocols: TCP (Reliable byte streams), UDP (Low-latency datagrams)<br/>Data Unit: Segment / Datagram (Adds Port Numbers: e.g. :443, :8080)"]
+        L2["2. Internet / Network Layer<br/>Protocols: IPv4, IPv6, ICMP, BGP Routing<br/>Data Unit: Packet (Adds Source & Destination IP Addresses)"]
+        L1["1. Network Access / Link Layer<br/>Protocols: Ethernet, Fiber Optic, Wi-Fi 6<br/>Data Unit: Frame (Adds Source & Destination MAC Addresses)"]
+    end
+    L4 -->|Encapsulation (Adds Header)| L3
+    L3 -->|Encapsulation (Adds Header)| L2
+    L2 -->|Encapsulation (Adds Header & Trailer)| L1
+```
+
+### Transport Protocols: TCP vs UDP
+
+| Feature | TCP (Transmission Control Protocol) | UDP (User Datagram Protocol) |
+| :--- | :--- | :--- |
+| **Connection State** | Connection-oriented (3-way handshake required) | Connectionless (Fire and forget, zero handshake) |
+| **Reliability** | **Guaranteed**: Automatic retransmissions on packet loss | Unreliable: Packets may drop silently without notification |
+| **Ordering** | Strict sequential stream ordering (reorders out-of-order packets) | Out-of-order delivery (application must handle ordering) |
+| **Congestion Control**| Sliding window scaling, AIMD backpressure, slow start | None: Floods pipe at application rate |
+| **Header Overhead** | $20\text{ to }60\text{ bytes}$ per segment | $8\text{ bytes}$ per datagram |
+| **Backend Use Case** | REST APIs, database connections, message queues | DNS queries, live video streaming, HTTP/3 QUIC |
+
+---
+
+## TCP Connection Lifecycle: Handshake, Flow Control & Termination
+
+To diagnose network latency and timeouts, you must understand the physical packet sequence of a TCP connection:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client
+    participant Server
+
+    Note over Client,Server: Phase 1: TCP 3-Way Handshake (1 RTT)
+    Client->>Server: 1. SYN (Seq = 100, MSS = 1460, Window = 65535)
+    Note over Server: Server allocates TCB (Transmission Control Block)<br/>Places socket in SYN_RECEIVED state
+    Server-->>Client: 2. SYN-ACK (Seq = 300, Ack = 101, Window = 65535)
+    Note over Client: Client enters ESTABLISHED state
+    Client->>Server: 3. ACK (Seq = 101, Ack = 301)
+    Note over Server: Server enters ESTABLISHED state<br/>Moves connection to accept queue (ready for app)
+
+    Note over Client,Server: Phase 2: Reliable Data Transfer & Sliding Window
+    Client->>Server: Data Segment (Seq = 101, Length = 500)
+    Server-->>Client: ACK (Ack = 601, Window = 65035)
+
+    Note over Client,Server: Phase 3: TCP 4-Way Connection Termination
+    Client->>Server: 4. FIN (Seq = 601)
+    Note over Client: Client enters FIN_WAIT_1
+    Server-->>Client: 5. ACK (Ack = 602)
+    Note over Server: Server enters CLOSE_WAIT; Client enters FIN_WAIT_2
+    Server->>Client: 6. FIN (Seq = 301)
+    Note over Server: Server enters LAST_ACK
+    Client-->>Server: 7. ACK (Ack = 302)
+    Note over Client: Client enters TIME_WAIT state (Holds for 2 x MSL = 60s!)
+    Note over Server: Server enters CLOSED (Socket freed)
+```
+
+### The 3 Core TCP Mechanics
+1. **Initial Sequence Numbers (ISN)**: Generated cryptographically to prevent packet spoofing and cross-connection packet collisions.
+2. **Maximum Segment Size (MSS)**: Typically $1,460\text{ bytes}$ (derived from standard Ethernet Maximum Transmission Unit MTU of $1,500\text{ bytes} - 20\text{b IP header} - 20\text{b TCP header}$).
+3. **Sliding Window Flow Control**: The receiver advertises its available buffer capacity (`Window = 65535`). If the receiver buffer fills up, it advertises a Zero Window, instructing the sender to stop transmitting bytes immediately.
+
+---
+
+## The `TIME_WAIT` Socket Exhaustion Disaster
+
+In microservices architectures where Service A calls Service B thousands of times per second, the most common network crash is **Ephemeral Port Exhaustion** caused by `TIME_WAIT`:
+
+```mermaid
+graph TD
+    App["High-Throughput Microservice (5,000 req/s)"] -->|Opens new TCP socket per request| Kernel["Linux OS Kernel"]
+    Kernel -->|Allocates Ephemeral Port: e.g. :42190| Remote["Downstream Service (:8080)"]
+    App -->|Closes connection immediately| Close["Sends TCP FIN"]
+    Close --> TW["Socket enters TIME_WAIT state (Locked for 60 seconds)"]
+    TW --> Exhaustion["After 60s: All ~60,000 ephemeral ports are trapped in TIME_WAIT!<br/>Kernel throws: java.net.NoRouteToHostException: Cannot assign requested address"]
+```
+
+### The Root Cause
+When the party that initiates the connection close (usually the client/calling service) sends the final `ACK`, it must remain in the `TIME_WAIT` state for **$2 \times \text{MSL}$ (Maximum Segment Lifetime = 60 seconds)**.
+- **Why `TIME_WAIT` exists**:
+  1. To ensure the final `ACK` reaches the remote server (if the `ACK` is lost, the server retransmits `FIN`, and the client in `TIME_WAIT` can re-acknowledge it).
+  2. To allow delayed duplicate packets from old connections to expire in the internet without corrupting newly opened connections on the same port.
+- **The Disaster**: Linux provides $\sim 28,000$ to $60,000$ ephemeral ports (`cat /proc/sys/net/ipv4/ip_local_port_range`). If an application makes 1,000 new HTTP connections per second without connection pooling, after 30 seconds it exhausts all available ports:
+  ```text
+  java.net.NoRouteToHostException: Cannot assign requested address (Address already in use)
+  ```
+
+### Production Mitigations
+
+1. **Mandatory HTTP Connection Pooling (The Golden Solution)**:
+   Never create a new HTTP client per request. Use a pooled `RestClient` or Apache HttpClient with `Keep-Alive`. Reusing 50 persistent connections eliminates socket churn entirely.
+2. **Kernel Parameter Tuning**:
+   In high-throughput gateway nodes, tune Linux kernel socket parameters in `/etc/sysctl.conf`:
+   ```bash
+   # Expand ephemeral port range
+   net.ipv4.ip_local_port_range = 1024 65535
+
+   # Allow kernel to reuse TIME_WAIT sockets for outgoing connections safely
+   net.ipv4.tcp_tw_reuse = 1
+
+   # Increase max connection backlog queue
+   net.core.somaxconn = 4096
+   ```
+
+---
+
+## Linux Socket Internals: Buffers & Backpressure
+
+At the operating system level, a network socket is represented as a **file descriptor** linked to two kernel ring buffers:
+
+```mermaid
+graph LR
+    subgraph SenderHost ["Sender (Client)"]
+        AppSend["App Writes to Socket OutputStream"] --> SendBuf["Kernel SO_SNDBUF (Send Buffer)"]
+        SendBuf --> NICSend["Network Card (NIC TX Queue)"]
+    end
+
+    NICSend -->|Ethernet / Fiber Cable| NICRecv
+
+    subgraph ReceiverHost ["Receiver (Spring Boot / Tomcat)"]
+        NICRecv["Network Card (NIC RX Queue)"] --> RecvBuf["Kernel SO_RCVBUF (Receive Buffer)"]
+        RecvBuf --> AcceptQueue["Kernel accept() Backlog (somaxconn)"]
+        AcceptQueue --> TomcatWorker["Tomcat Worker Thread (App reads InputStream)"]
+    end
+```
+
+### How Kernel Backpressure Works
+1. When your Spring Boot app reads from `InputStream`, it consumes bytes from `SO_RCVBUF`.
+2. If your application thread slows down (e.g., waiting for database lock), `SO_RCVBUF` fills up.
+3. The Linux kernel automatically shrinks the TCP Window Size in its `ACK` packets to the sender.
+4. When the buffer is full, the receiver sends a `Window = 0` packet.
+5. The sender kernel halts transmission immediately, causing the sender application's `write()` call to block. This is **Hardware/Kernel Level Backpressure**.
+
+---
+
+## Raw Java Network Socket Implementation
+
+To understand what Spring Boot's Tomcat server does under the hood, here is a complete, runnable Java 21 multi-threaded HTTP server and client using raw TCP sockets:
+
+### 1. The Minimal Multi-Threaded Socket Server
+
+```java
+package com.example.networking;
+
+import java.io.*;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public class RawHttpServer {
+
+    private static final int PORT = 8085;
+    // Using Java 21 Virtual Threads to handle 10,000+ concurrent socket connections
+    private static final ExecutorService EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
+
+    public static void main(String[] args) throws IOException {
+        try (ServerSocket serverSocket = new ServerSocket(PORT, 1024)) {
+            System.out.println("Raw TCP HTTP Server listening on port " + PORT + "...");
+
+            while (true) {
+                // Blocks until a client completes the TCP 3-way handshake
+                Socket clientSocket = serverSocket.accept();
+                EXECUTOR.submit(() -> handleClient(clientSocket));
+            }
+        }
+    }
+
+    private static void handleClient(Socket socket) {
+        try (socket;
+             BufferedReader reader = new BufferedReader(
+                     new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+             OutputStream output = socket.getOutputStream()) {
+
+            // Read the HTTP request line (e.g., "GET /hello HTTP/1.1")
+            String requestLine = reader.readLine();
+            if (requestLine == null || requestLine.isBlank()) {
+                return;
+            }
+            System.out.println("Incoming Request: " + requestLine);
+
+            // Drain headers
+            String header;
+            while ((header = reader.readLine()) != null && !header.isEmpty()) {
+                // Reading headers until empty line "\r\n"
+            }
+
+            // Construct HTTP/1.1 response bytes
+            String body = "{\"status\":\"UP\",\"engine\":\"Raw Java Sockets\"}";
+            byte[] bodyBytes = body.getBytes(StandardCharsets.UTF_8);
+
+            String httpResponse = "HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Content-Length: " + bodyBytes.length + "\r\n" +
+                    "Connection: close\r\n" +
+                    "\r\n";
+
+            output.write(httpResponse.getBytes(StandardCharsets.UTF_8));
+            output.write(bodyBytes);
+            output.flush();
+
+        } catch (IOException e) {
+            System.err.println("Socket handling error: " + e.getMessage());
+        }
+    }
+}
+```
+
+### 2. The Raw Socket Client
+
+```java
+package com.example.networking;
+
+import java.io.*;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+
+public class RawHttpClient {
+
+    public static void main(String[] args) throws IOException {
+        String host = "127.0.0.1";
+        int port = 8085;
+
+        // Opens raw TCP socket (initiates 3-way handshake)
+        try (Socket socket = new Socket(host, port);
+             OutputStream out = socket.getOutputStream();
+             BufferedReader in = new BufferedReader(
+                     new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8))) {
+
+            // Write raw HTTP request stream
+            String rawRequest = "GET /hello HTTP/1.1\r\n" +
+                    "Host: " + host + "\r\n" +
+                    "Accept: application/json\r\n" +
+                    "Connection: close\r\n" +
+                    "\r\n";
+
+            out.write(rawRequest.getBytes(StandardCharsets.UTF_8));
+            out.flush();
+
+            // Read raw HTTP response stream
+            String line;
+            while ((line = in.readLine()) != null) {
+                System.out.println("< " + line);
+            }
+        }
+    }
+}
+```
+
+---
+
+## DNS Resolution Hierarchy & Anycast Routing
+
+When a client makes a request to `https://api.store.com`, the operating system must resolve the human-readable domain name into an IP address:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client
+    participant OS as OS Resolver & Local Cache
+    participant Rec as Recursive Resolver (8.8.8.8 / ISP)
+    participant Root as Root DNS Server (.)
+    participant TLD as TLD Nameserver (.com)
+    participant Auth as Authoritative Nameserver (Cloudflare / Route53)
+
+    Client->>OS: Resolve api.store.com
+    Note over OS: Cache Miss!
+    OS->>Rec: Resolve api.store.com
+    Note over Rec: 1. Queries Root DNS
+    Rec->>Root: Where is .com?
+    Root-->>Rec: Refer to .com TLD (192.5.6.30)
+    Note over Rec: 2. Queries TLD DNS
+    Rec->>TLD: Where is store.com?
+    TLD-->>Rec: Refer to Authoritative NS (108.162.192.1)
+    Note over Rec: 3. Queries Authoritative DNS
+    Rec->>Auth: What is A record of api.store.com?
+    Auth-->>Rec: 104.16.12.34 (TTL = 300s)
+    Rec-->>OS: 104.16.12.34
+    OS-->>Client: 104.16.12.34
+```
+
+### DNS Record Types Every Backend Engineer Must Know
+
+| Record Type | Name | Purpose | Example |
+| :--- | :--- | :--- | :--- |
+| **`A`** | Address Record | Maps a domain name directly to a 32-bit IPv4 address | `api.store.com -> 104.16.12.34` |
+| **`AAAA`** | IPv6 Address Record | Maps a domain name to a 128-bit IPv6 address | `api.store.com -> 2606:4700::6810:c22` |
+| **`CNAME`** | Canonical Name | Creates an alias pointing to another domain name (never use on root apex) | `www.store.com -> store.com` |
+| **`TXT`** | Text Record | Carries arbitrary text; used for SPF/DKIM email validation & domain ownership | `v=spf1 include:_spf.google.com ~all` |
+| **`MX`** | Mail Exchange | Directs emails to designated mail servers | `10 mail.store.com` |
+
+### Anycast BGP Routing
+In traditional Unicast DNS, an IP address belongs to a single physical computer. In **Anycast DNS**, multiple data centers worldwide advertise the exact same IP address to the internet's core routing fabric (BGP - Border Gateway Protocol).
+When a user in London resolves `104.16.12.34`, BGP routes packets to the London edge router. When a user in Tokyo resolves the same IP, BGP routes to the Tokyo edge router, minimizing latency to $\le 10\text{ ms}$.
+
+---
+
+## Forward Proxies vs Reverse Proxies & CDNs
+
+```mermaid
+graph LR
+    subgraph ForwardProxyTopology ["Forward Proxy (Protects Clients)"]
+        C1[Client 1] & C2[Client 2] --> FP["Forward Proxy<br/>(Corporate VPN / Squid)"]
+        FP --> Internet["Public Internet"]
+    end
+
+    subgraph ReverseProxyTopology ["Reverse Proxy (Protects Servers)"]
+        PublicClients["Public Internet Clients"] --> RP["Reverse Proxy / API Gateway<br/>(NGINX / Envoy / Cloudflare)"]
+        RP --> S1["App Pod 1"]
+        RP --> S2["App Pod 2"]
+    end
+```
+
+### The Fundamental Distinction
+- **Forward Proxy**: Sits in front of **clients**. It acts on behalf of clients to access the external internet. Used in enterprise networks to monitor outbound employee traffic, enforce firewall policies, and hide internal client IP addresses.
+- **Reverse Proxy**: Sits in front of **backend servers**. It intercepts incoming requests from the public internet, terminates TLS encryption, routes traffic across internal backend pods, and shields internal server IP addresses.
+
+---
+
+## Production NGINX Reverse Proxy Configuration
+
+Below is a battle-tested production NGINX reverse proxy configuration demonstrating connection pooling, TLS 1.3 termination, buffer sizing, and rate limiting:
+
+```nginx
+# /etc/nginx/nginx.conf
+
+user nginx;
+worker_processes auto;
+worker_rlimit_nofile 65535;
+
+events {
+    worker_connections 8192;
+    use epoll;
+    multi_accept on;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    # Rate Limiting Zone: 100 requests per second per client IP
+    limit_req_zone $binary_remote_addr zone=api_rate_limit:20m rate=100r/s;
+
+    # Upstream backend pool with connection keepalive pooling
+    upstream spring_boot_backend {
+        zone backend_cluster 64k;
+        server 10.0.1.10:8080 max_fails=3 fail_timeout=10s;
+        server 10.0.1.11:8080 max_fails=3 fail_timeout=10s;
+
+        # CRITICAL: Keeps 32 idle connections open per worker to eliminate TIME_WAIT churn!
+        keepalive 32;
+    }
+
+    server {
+        listen 443 ssl http2;
+        server_name api.store.com;
+
+        # TLS 1.3 Modern Encryption Standards
+        ssl_certificate /etc/ssl/certs/api_store.crt;
+        ssl_certificate_key /etc/ssl/private/api_store.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
+        ssl_session_cache shared:SSL:20m;
+        ssl_session_timeout 4h;
+
+        # Security Headers
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+
+        location /api/ {
+            # Apply rate limiting with burst queue of 20 requests
+            limit_req zone=api_rate_limit burst=20 nodelay;
+
+            proxy_pass http://spring_boot_backend;
+            proxy_http_version 1.1;
+
+            # Mandatory for connection keepalive to upstream
+            proxy_set_header Connection "";
+
+            # Forward real client identity to Spring Boot
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+
+            # Strict socket timeout boundaries
+            proxy_connect_timeout 2s;
+            proxy_read_timeout 5s;
+            proxy_send_timeout 5s;
+        }
+    }
+}
+```
+
+---
+
+## Network Timeouts: The 3 Critical Socket Boundaries
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client
+    participant Server
+
+    Note over Client,Server: 1. Connection Timeout Boundary (1 - 2 seconds)
+    Client->>Server: TCP SYN Packet
+    Note over Client: If SYN-ACK is not received within connectionTimeout,<br/>abort immediately! (Host is dead or packet dropped)
+    Server-->>Client: TCP SYN-ACK
+    Client->>Server: HTTP Request Header + Body
+    
+    Note over Client,Server: 2. Read / Socket Timeout Boundary (3 - 5 seconds)
+    Server->>Server: Server executes database query...
+    Note over Client: If no byte is received within readTimeout,<br/>close socket! (Prevents thread from hanging indefinitely)
+    Server-->>Client: HTTP Response Stream
+
+    Note over Client,Server: 3. Execution Timeout / TimeLimiter (Total lifecycle limit)
+```
+
+1. **Connection Timeout**: The maximum duration allowed to complete the TCP 3-way handshake. If the remote host is offline, packet routing fails, or a firewall drops packets, this timeout triggers. **Set short: 1 to 2 seconds**.
+2. **Read Timeout (Socket Timeout)**: The maximum duration allowed between receiving two consecutive data packets after the connection is established. If the remote server accepts the connection but hangs processing a query, this timeout triggers. **Set to 3 to 10 seconds**.
+3. **Execution Timeout (TimeLimiter)**: The maximum end-to-end duration for the entire HTTP transaction from start to finish.
+
+---
+
+## Active Recall & Interview Mastery
+
+<AccordionGroup>
+  <Accordion title="1. Explain the fundamental difference between a Forward Proxy and a Reverse Proxy.">
+    A **Forward Proxy** sits in front of clients and acts on behalf of the clients to access the external internet. It hides client IP addresses, logs outbound traffic, and applies corporate filtering. A **Reverse Proxy** sits in front of backend servers and acts on behalf of the servers to receive requests from the public internet. It terminates TLS/SSL encryption, load balances traffic across internal application pods, applies rate limiting, and protects internal backend IP addresses from public exposure.
+  </Accordion>
+
+  <Accordion title="2. What is the TIME_WAIT state in TCP, and how does it cause ephemeral port exhaustion in microservices?">
+    When a TCP connection is closed, the party that initiates the active close enters the `TIME_WAIT` state for $2 \times \text{MSL}$ (Maximum Segment Lifetime = 60 seconds). This state ensures the final `ACK` packet was received and prevents late-arriving duplicate packets from corrupting future connections on the same port.
+    
+    In high-throughput microservices that open a new TCP connection for every outbound HTTP request, thousands of closed sockets accumulate in `TIME_WAIT`. Because an operating system has a finite range of ephemeral ports ($\sim 60,000$), all available ports are exhausted within seconds, causing the application to crash with `java.net.NoRouteToHostException: Cannot assign requested address`. The fix is connection pooling (`Keep-Alive`).
+  </Accordion>
+
+  <Accordion title="3. Walk through the packet steps of the TCP 3-way handshake and 4-way connection termination.">
+    **3-Way Handshake**:
+    1. `Client -> Server: SYN (Seq=X)`: Client requests connection with an Initial Sequence Number.
+    2. `Server -> Client: SYN-ACK (Seq=Y, Ack=X+1)`: Server confirms client's sequence number and offers its own.
+    3. `Client -> Server: ACK (Ack=Y+1)`: Client acknowledges server's sequence number. Connection is now ESTABLISHED.
+    
+    **4-Way Termination**:
+    1. `Active Closer -> Receiver: FIN`: Initiator signals it has finished sending data.
+    2. `Receiver -> Active Closer: ACK`: Receiver acknowledges the close request.
+    3. `Receiver -> Active Closer: FIN`: Receiver finishes its remaining transmission and signals its own close.
+    4. `Active Closer -> Receiver: ACK`: Initiator acknowledges receiver's FIN and enters `TIME_WAIT` for 60s before fully closing.
+  </Accordion>
+
+  <Accordion title="4. Explain the difference between Connection Timeout and Read Timeout in backend networking.">
+    A **Connection Timeout** measures the time allowed to establish the initial network connection (TCP 3-way handshake) with the target server. If the target server is powered off or a firewall silently drops packets, this timeout fires to fail fast (typically 1–2s).
+    
+    A **Read Timeout** (Socket Timeout) measures the maximum idle time allowed between receiving consecutive bytes of data once the connection is already established. If the target server accepts the connection but hangs indefinitely executing a slow SQL query, the read timeout closes the socket to prevent client worker threads from starving.
+  </Accordion>
+
+  <Accordion title="5. How does Anycast DNS route users to the nearest CDN Edge PoP?">
+    In standard Unicast DNS, an IP address maps to a single physical server in one geographical location. In **Anycast DNS**, multiple edge data centers across the world announce the exact same IP address to the internet's core Border Gateway Protocol (BGP) routing mesh. When a client performs a DNS query or HTTPS request to that IP, internet routers automatically direct the packets along the shortest topological BGP path, seamlessly terminating the connection at the geographically closest CDN Point of Presence (PoP).
+  </Accordion>
+
+  <Accordion title="6. How does kernel-level TCP backpressure protect a slow backend application?">
+    Each TCP socket maintains a kernel receive buffer (`SO_RCVBUF`). When an application thread is slow to read from the socket's `InputStream`, the receive buffer fills up. The receiver's operating system kernel automatically reduces the advertised Window Size in outgoing TCP header acknowledgments. If the buffer completely fills, it advertises a Window Size of 0. Upon receiving this, the sender's kernel immediately stops transmitting packets, causing the sender's `OutputStream.write()` call to block until the receiver's application frees buffer space.
+  </Accordion>
+</AccordionGroup>

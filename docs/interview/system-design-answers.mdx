@@ -1,0 +1,273 @@
+---
+title: "System Design Answer Style"
+description: "Answer system design interviews with structure and tradeoffs."
+---
+
+# System Design Answer Style
+
+System design interviews test thinking.
+
+They are not only about drawing boxes.
+
+Your answer should show structure, numbers, tradeoffs, and failure handling.
+
+## Golden Format
+
+```text
+1. Clarify requirements
+2. Define functional requirements
+3. Define non-functional requirements
+4. Estimate scale
+5. Design APIs
+6. Design data model
+7. Explain high-level architecture
+8. Walk through read/write flows
+9. Identify bottlenecks
+10. Add scaling and reliability
+11. Discuss failures
+12. Explain tradeoffs
+```
+
+## Requirement Questions
+
+Ask before designing:
+
+```text
+How many users?
+Read-heavy or write-heavy?
+What latency is acceptable?
+Does data need strong consistency?
+Do we need analytics?
+Do we need authentication?
+What is out of scope?
+What happens when a dependency fails?
+```
+
+## How To Use Numbers
+
+Say rough estimates out loud.
+
+Example:
+
+```text
+If we have 100 million redirects per day, average RPS is 100 million divided by 86,400, about 1,160 RPS. Peak may be 10x, around 11,600 RPS.
+```
+
+Then use the number:
+
+```text
+Because redirect is read-heavy, I will cache popular short codes in Redis.
+```
+
+Numbers should affect design.
+
+## URL Shortener Model Answer
+
+Requirements:
+
+```text
+Create short URL, redirect, custom alias, click analytics, low latency redirect.
+```
+
+APIs:
+
+```text
+POST /api/urls
+GET /{shortCode}
+```
+
+Data:
+
+```text
+short_urls(id, short_code, long_url, user_id, expires_at, created_at)
+click_events(id, short_code, clicked_at, ip, user_agent)
+```
+
+Design:
+
+```text
+Create API writes to database with unique short_code.
+Redirect API checks Redis first, database on miss, then returns 302.
+Analytics event goes to queue so redirect stays fast.
+```
+
+Failure:
+
+```text
+If Redis is down, fallback to database.
+If analytics queue is down, redirect still works but log and alert.
+```
+
+Tradeoff:
+
+```text
+Cache improves latency but needs expiry and invalidation for disabled links.
+```
+
+## Rate Limiter Model Answer
+
+Requirements:
+
+```text
+Limit by user or IP. Return 429. Work across multiple servers.
+```
+
+Design:
+
+```text
+Use Redis because all API servers can share counters.
+Use atomic Lua script to increment and check count.
+Key includes route, identity, and time window.
+```
+
+Response:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 30
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 0
+```
+
+Failure:
+
+```text
+For normal read APIs, fail open if Redis is down.
+For login, fail closed or use stricter fallback because abuse risk is high.
+```
+
+Tradeoff:
+
+```text
+Fixed window is simple but allows boundary bursts. Sliding window is more accurate but costs more memory and work.
+```
+
+## Notification System Model Answer
+
+Requirements:
+
+```text
+Send email, SMS, push. Use templates. Respect preferences. Retry failures. Store delivery status.
+```
+
+Design:
+
+```text
+Main API publishes event to queue.
+Worker consumes event, checks idempotency, loads preferences, renders template, calls provider, stores status.
+```
+
+Failure:
+
+```text
+Temporary provider failure retries with backoff.
+Permanent failure goes to DLQ.
+Duplicate event is ignored using event_id unique constraint.
+```
+
+Tradeoff:
+
+```text
+Queue adds delay but improves reliability and keeps main API fast.
+```
+
+## E-commerce Checkout Model Answer
+
+Requirements:
+
+```text
+User can place order from cart. Inventory cannot go below zero. Payment callback can repeat. Order history must be secure.
+```
+
+Design:
+
+```text
+Checkout validates cart, creates order, creates order items, reserves inventory, and creates pending payment in a transaction.
+Payment callback verifies provider signature and updates payment/order idempotently.
+```
+
+Data:
+
+```text
+orders
+order_items
+inventory
+payments
+cart_items
+```
+
+Failure:
+
+```text
+If payment fails, order moves to PAYMENT_FAILED and inventory may be released.
+If notification fails, order still remains paid and notification retries async.
+```
+
+Tradeoff:
+
+```text
+Keeping it as modular monolith first simplifies transactions. Microservices can come later when team and scale justify the complexity.
+```
+
+## Strong Tradeoff Language
+
+Use sentences like:
+
+```text
+I would start simple with PostgreSQL because current write scale is low.
+```
+
+```text
+I would add Redis only for the read-heavy redirect path.
+```
+
+```text
+I would make analytics asynchronous because it should not slow user-facing redirect.
+```
+
+```text
+I would avoid microservices at first because distributed transactions and observability add complexity.
+```
+
+## Common Mistakes
+
+- Starting with tools before requirements
+- No numbers
+- No data model
+- No API design
+- No failure handling
+- No tradeoffs
+- Saying "use cache" without invalidation plan
+- Saying "use queue" without idempotency
+- Saying "use microservices" without data ownership
+
+## Practice
+
+For every system design answer, write:
+
+- one scale estimate
+- two APIs
+- three tables
+- one cache decision
+- one queue decision
+- two failure cases
+- two tradeoffs
+
+If your answer cannot do this, it is not ready.
+
+## Explore System Design Case Studies
+
+<CardGroup cols={2}>
+  <Card title="URL Shortener" icon="link" href="/system-design/url-shortener">
+    Deep dive into Base62 encoding, Redis caching, and low-latency redirect flows.
+  </Card>
+  <Card title="Rate Limiter" icon="shield-halved" href="/system-design/rate-limiter">
+    Token Bucket, Sliding Window Log, and distributed Redis Lua scripts.
+  </Card>
+  <Card title="Notification System" icon="bell" href="/system-design/notification-system">
+    Idempotent async message queues, worker groups, and retry DLQ pipelines.
+  </Card>
+  <Card title="System Design Questions" icon="messages-square" href="/interview/system-design-questions">
+    Practice answering structured system design questions.
+  </Card>
+</CardGroup>

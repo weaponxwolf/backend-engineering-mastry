@@ -1,0 +1,919 @@
+---
+title: "Build Notes API From Zero"
+description: "Build a complete Spring Boot Notes API with PostgreSQL, validation, errors, ownership, and tests."
+---
+
+# Build Notes API From Zero
+
+This is the serious build path.
+
+<Info>
+For project requirements, entity tables, API contracts, and testing criteria, see [Project: Notes API](/projects/notes-api).
+</Info>
+
+Do not only read this page.
+
+Build it step by step.
+
+The goal is not to memorize Spring annotations.
+
+The goal is to understand how a real backend feature moves from request to database and back.
+
+## What You Will Build
+
+You will build a Notes API where users can:
+
+- Register
+- Login
+- Create notes
+- Read only their own notes
+- Update only their own notes
+- Delete only their own notes
+- Search notes
+- Get clean validation errors
+- Get correct HTTP status codes
+
+## Tech Stack
+
+```text
+Java 21
+Spring Boot
+Spring Web
+Spring Data JPA
+Spring Validation
+Spring Security
+PostgreSQL
+Flyway
+JUnit
+MockMvc
+Testcontainers
+```
+
+## Project Structure
+
+Keep the structure boring and clear.
+
+```text
+com.example.notes
+  auth
+  config
+  note
+  user
+  common
+    error
+    security
+```
+
+Feature-based packages are easier to grow than giant technical packages.
+
+For a small Todo API, technical packages are fine.
+
+For a serious app, keep related feature code together.
+
+---
+
+<Steps>
+  <Step title="Step 1: Dependencies & Configuration">
+    Initialize your project with Java 21 and Spring Boot 3.x. Select your build tool:
+
+    <Tabs>
+      <Tab title="Maven (pom.xml)">
+        ```xml
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-starter-web</artifactId>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-starter-data-jpa</artifactId>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-starter-validation</artifactId>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-starter-security</artifactId>
+            </dependency>
+            <dependency>
+                <groupId>org.flywaydb</groupId>
+                <artifactId>flyway-core</artifactId>
+            </dependency>
+            <dependency>
+                <groupId>org.flywaydb</groupId>
+                <artifactId>flyway-database-postgresql</artifactId>
+            </dependency>
+            <dependency>
+                <groupId>org.postgresql</groupId>
+                <artifactId>postgresql</artifactId>
+                <scope>runtime</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-starter-test</artifactId>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-testcontainers</artifactId>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.testcontainers</groupId>
+                <artifactId>postgresql</artifactId>
+                <scope>test</scope>
+            </dependency>
+        </dependencies>
+        ```
+      </Tab>
+      <Tab title="Gradle (build.gradle)">
+        ```groovy
+        dependencies {
+            implementation 'org.springframework.boot:spring-boot-starter-web'
+            implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+            implementation 'org.springframework.boot:spring-boot-starter-validation'
+            implementation 'org.springframework.boot:spring-boot-starter-security'
+            implementation 'org.flywaydb:flyway-core'
+            implementation 'org.flywaydb:flyway-database-postgresql'
+            runtimeOnly 'org.postgresql:postgresql'
+            testImplementation 'org.springframework.boot:spring-boot-starter-test'
+            testImplementation 'org.springframework.boot:spring-boot-testcontainers'
+            testImplementation 'org.testcontainers:postgresql'
+        }
+        ```
+      </Tab>
+    </Tabs>
+
+    ### Configuration
+
+    Use environment variables for production secrets. Never commit plaintext passwords:
+
+    ```yaml application.yml
+    spring:
+      datasource:
+        url: jdbc:postgresql://localhost:5432/notes
+        username: notes_user
+        password: ${DB_PASSWORD}
+
+      jpa:
+        hibernate:
+          ddl-auto: validate
+        properties:
+          hibernate:
+            format_sql: true
+
+      flyway:
+        enabled: true
+
+    server:
+      error:
+        include-stacktrace: never
+    ```
+
+    <Tip>
+    Always use `ddl-auto: validate` in production environments. Let Flyway manage versioned schema migrations rather than allowing Hibernate to modify tables at runtime.
+    </Tip>
+  </Step>
+
+  <Step title="Step 2: Database Migrations with Flyway">
+    Create versioned schema migration file:
+    `src/main/resources/db/migration/V1__create_users_and_notes.sql`
+
+    ```sql
+    CREATE TABLE users (
+      id BIGSERIAL PRIMARY KEY,
+      name VARCHAR(100) NOT NULL,
+      email VARCHAR(150) NOT NULL UNIQUE,
+      password_hash VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE notes (
+      id BIGSERIAL PRIMARY KEY,
+      user_id BIGINT NOT NULL REFERENCES users(id),
+      title VARCHAR(200) NOT NULL,
+      content TEXT NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Composite index to support "order by created_at desc" for a user
+    CREATE INDEX idx_notes_user_created_at
+    ON notes(user_id, created_at DESC);
+
+    CREATE INDEX idx_notes_user_title
+    ON notes(user_id, title);
+    ```
+
+    <Info>
+    Indexes should directly match your query access patterns. Most note queries filter by `user_id` and paginate ordered by `created_at DESC`.
+    </Info>
+  </Step>
+
+  <Step title="Step 3: JPA Entities & Data Modeling">
+    Create the `User` entity in `user/User.java`:
+
+    ```java
+    package com.example.notes.user;
+
+    import jakarta.persistence.*;
+    import java.time.Instant;
+
+    @Entity
+    @Table(name = "users")
+    public class User {
+        @Id
+        @GeneratedValue(strategy = GenerationType.IDENTITY)
+        private Long id;
+
+        @Column(nullable = false, length = 100)
+        private String name;
+
+        @Column(nullable = false, unique = true, length = 150)
+        private String email;
+
+        @Column(name = "password_hash", nullable = false)
+        private String passwordHash;
+
+        @Column(name = "created_at", nullable = false)
+        private Instant createdAt = Instant.now();
+
+        protected User() {
+            // Required by JPA
+        }
+
+        public User(String name, String email, String passwordHash) {
+            this.name = name;
+            this.email = email;
+            this.passwordHash = passwordHash;
+        }
+
+        public Long getId() { return id; }
+        public String getName() { return name; }
+        public String getEmail() { return email; }
+        public String getPasswordHash() { return passwordHash; }
+    }
+    ```
+
+    Create the `Note` entity in `note/Note.java`:
+
+    ```java
+    package com.example.notes.note;
+
+    import com.example.notes.user.User;
+    import jakarta.persistence.*;
+    import java.time.Instant;
+
+    @Entity
+    @Table(name = "notes")
+    public class Note {
+        @Id
+        @GeneratedValue(strategy = GenerationType.IDENTITY)
+        private Long id;
+
+        @ManyToOne(fetch = FetchType.LAZY, optional = false)
+        @JoinColumn(name = "user_id")
+        private User owner;
+
+        @Column(nullable = false, length = 200)
+        private String title;
+
+        @Column(nullable = false, columnDefinition = "TEXT")
+        private String content;
+
+        @Column(name = "created_at", nullable = false)
+        private Instant createdAt = Instant.now();
+
+        @Column(name = "updated_at", nullable = false)
+        private Instant updatedAt = Instant.now();
+
+        protected Note() {
+            // Required by JPA
+        }
+
+        public Note(User owner, String title, String content) {
+            this.owner = owner;
+            this.title = title;
+            this.content = content;
+        }
+
+        public void update(String title, String content) {
+            this.title = title;
+            this.content = content;
+            this.updatedAt = Instant.now();
+        }
+
+        public Long getId() { return id; }
+        public User getOwner() { return owner; }
+        public String getTitle() { return title; }
+        public String getContent() { return content; }
+        public Instant getCreatedAt() { return createdAt; }
+        public Instant getUpdatedAt() { return updatedAt; }
+    }
+    ```
+  </Step>
+
+  <Step title="Step 4: Spring Data Repositories">
+    Enforce ownership at the database query level:
+
+    ```java com/example/notes/user/UserRepository.java
+    package com.example.notes.user;
+
+    import org.springframework.data.jpa.repository.JpaRepository;
+    import java.util.Optional;
+
+    public interface UserRepository extends JpaRepository<User, Long> {
+        Optional<User> findByEmail(String email);
+        boolean existsByEmail(String email);
+    }
+    ```
+
+```java com/example/notes/note/NoteRepository.java
+    package com.example.notes.note;
+
+    import org.springframework.data.domain.Page;
+    import org.springframework.data.domain.Pageable;
+    import org.springframework.data.jpa.repository.JpaRepository;
+    import java.util.Optional;
+
+    public interface NoteRepository extends JpaRepository<Note, Long> {
+        Page<Note> findByOwnerId(Long ownerId, Pageable pageable);
+
+        Optional<Note> findByIdAndOwnerId(Long id, Long ownerId);
+
+        Page<Note> findByOwnerIdAndTitleContainingIgnoreCase(
+            Long ownerId,
+            String title,
+            Pageable pageable
+        );
+    }
+    ```
+
+    <Warning>
+    Never query notes by `id` alone and check ownership afterwards in memory. Always enforce ownership directly at the SQL level via `findByIdAndOwnerId(noteId, currentUserId)`.
+    </Warning>
+  </Step>
+
+  <Step title="Step 5: Request & Response DTOs">
+    Create immutable DTO records with Jakarta Validation constraints:
+
+    ```java com/example/notes/auth/RegisterRequest.java
+    package com.example.notes.auth;
+
+    import jakarta.validation.constraints.Email;
+    import jakarta.validation.constraints.NotBlank;
+    import jakarta.validation.constraints.Size;
+
+    public record RegisterRequest(
+        @NotBlank @Size(max = 100) String name,
+        @NotBlank @Email @Size(max = 150) String email,
+        @NotBlank @Size(min = 8, max = 100) String password
+    ) {}
+    ```
+
+    ```java com/example/notes/auth/LoginRequest.java
+    package com.example.notes.auth;
+
+    import jakarta.validation.constraints.Email;
+    import jakarta.validation.constraints.NotBlank;
+
+    public record LoginRequest(
+        @NotBlank @Email String email,
+        @NotBlank String password
+    ) {}
+    ```
+
+    ```java com/example/notes/note/CreateNoteRequest.java
+    package com.example.notes.note;
+
+    import jakarta.validation.constraints.NotBlank;
+    import jakarta.validation.constraints.Size;
+
+    public record CreateNoteRequest(
+        @NotBlank @Size(max = 200) String title,
+        @NotBlank String content
+    ) {}
+    ```
+
+    ```java com/example/notes/note/UpdateNoteRequest.java
+    package com.example.notes.note;
+
+    import jakarta.validation.constraints.NotBlank;
+    import jakarta.validation.constraints.Size;
+
+    public record UpdateNoteRequest(
+        @NotBlank @Size(max = 200) String title,
+        @NotBlank String content
+    ) {}
+    ```
+
+    ### Response Records
+
+    ```java com/example/notes/auth/AuthResponse.java
+    package com.example.notes.auth;
+
+    public record AuthResponse(
+        String token,
+        String tokenType
+    ) {}
+    ```
+
+    ```java com/example/notes/note/NoteResponse.java
+    package com.example.notes.note;
+
+    import java.time.Instant;
+
+    public record NoteResponse(
+        Long id,
+        String title,
+        String content,
+        Instant createdAt,
+        Instant updatedAt
+    ) {
+        public static NoteResponse from(Note note) {
+            return new NoteResponse(
+                note.getId(),
+                note.getTitle(),
+                note.getContent(),
+                note.getCreatedAt(),
+                note.getUpdatedAt()
+            );
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Step 6: Error Model & Global Exception Handler">
+    Standardize the error response body:
+
+    ```java com/example/notes/common/error/ErrorResponse.java
+    package com.example.notes.common.error;
+
+    import java.util.Map;
+
+    public record ErrorResponse(
+        String message,
+        Map<String, String> errors
+    ) {
+        public static ErrorResponse message(String message) {
+            return new ErrorResponse(message, Map.of());
+        }
+    }
+    ```
+
+    Define domain exceptions:
+
+    ```java com/example/notes/common/error/NoteNotFoundException.java
+    package com.example.notes.common.error;
+
+    public class NoteNotFoundException extends RuntimeException {
+        public NoteNotFoundException() {
+            super("Note not found");
+        }
+    }
+    ```
+
+    ```java com/example/notes/common/error/EmailAlreadyUsedException.java
+    package com.example.notes.common.error;
+
+    public class EmailAlreadyUsedException extends RuntimeException {
+        public EmailAlreadyUsedException() {
+            super("Email already used");
+        }
+    }
+    ```
+
+    Create the central `@RestControllerAdvice`:
+
+    ```java com/example/notes/common/error/GlobalExceptionHandler.java
+    package com.example.notes.common.error;
+
+    import org.springframework.http.HttpStatus;
+    import org.springframework.validation.FieldError;
+    import org.springframework.web.bind.MethodArgumentNotValidException;
+    import org.springframework.web.bind.annotation.*;
+
+    import java.util.LinkedHashMap;
+    import java.util.Map;
+
+    @RestControllerAdvice
+    public class GlobalExceptionHandler {
+
+        @ExceptionHandler(MethodArgumentNotValidException.class)
+        @ResponseStatus(HttpStatus.BAD_REQUEST)
+        public ErrorResponse handleValidation(MethodArgumentNotValidException ex) {
+            Map<String, String> errors = new LinkedHashMap<>();
+            for (FieldError fieldError : ex.getBindingResult().getFieldErrors()) {
+                errors.put(fieldError.getField(), fieldError.getDefaultMessage());
+            }
+            return new ErrorResponse("Validation failed", errors);
+        }
+
+        @ExceptionHandler(NoteNotFoundException.class)
+        @ResponseStatus(HttpStatus.NOT_FOUND)
+        public ErrorResponse handleNoteNotFound(NoteNotFoundException ex) {
+            return ErrorResponse.message(ex.getMessage());
+        }
+
+        @ExceptionHandler(EmailAlreadyUsedException.class)
+        @ResponseStatus(HttpStatus.CONFLICT)
+        public ErrorResponse handleEmailAlreadyUsed(EmailAlreadyUsedException ex) {
+            return ErrorResponse.message(ex.getMessage());
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Step 7: Service Layer & Business Logic">
+    Implement business rules inside services:
+
+    ```java com/example/notes/auth/AuthService.java
+    package com.example.notes.auth;
+
+    import com.example.notes.common.error.EmailAlreadyUsedException;
+    import com.example.notes.common.security.JwtService;
+    import com.example.notes.user.User;
+    import com.example.notes.user.UserRepository;
+    import org.springframework.security.authentication.BadCredentialsException;
+    import org.springframework.security.crypto.password.PasswordEncoder;
+    import org.springframework.stereotype.Service;
+    import org.springframework.transaction.annotation.Transactional;
+
+    @Service
+    public class AuthService {
+        private final UserRepository userRepository;
+        private final PasswordEncoder passwordEncoder;
+        private final JwtService jwtService;
+
+        public AuthService(
+            UserRepository userRepository,
+            PasswordEncoder passwordEncoder,
+            JwtService jwtService
+        ) {
+            this.userRepository = userRepository;
+            this.passwordEncoder = passwordEncoder;
+            this.jwtService = jwtService;
+        }
+
+        @Transactional
+        public void register(RegisterRequest request) {
+            if (userRepository.existsByEmail(request.email())) {
+                throw new EmailAlreadyUsedException();
+            }
+
+            String passwordHash = passwordEncoder.encode(request.password());
+            User user = new User(request.name(), request.email(), passwordHash);
+            userRepository.save(user);
+        }
+
+        @Transactional(readOnly = true)
+        public AuthResponse login(LoginRequest request) {
+            User user = userRepository.findByEmail(request.email())
+                .orElseThrow(() -> new BadCredentialsException("Invalid email or password"));
+
+            if (!passwordEncoder.matches(request.password(), user.getPasswordHash())) {
+                throw new BadCredentialsException("Invalid email or password");
+            }
+
+            String token = jwtService.createToken(user.getId(), user.getEmail());
+            return new AuthResponse(token, "Bearer");
+        }
+    }
+    ```
+
+    ```java com/example/notes/note/NoteService.java
+    package com.example.notes.note;
+
+    import com.example.notes.common.error.NoteNotFoundException;
+    import com.example.notes.user.User;
+    import com.example.notes.user.UserRepository;
+    import org.springframework.data.domain.Page;
+    import org.springframework.data.domain.Pageable;
+    import org.springframework.security.access.AccessDeniedException;
+    import org.springframework.stereotype.Service;
+    import org.springframework.transaction.annotation.Transactional;
+
+    @Service
+    public class NoteService {
+        private final NoteRepository noteRepository;
+        private final UserRepository userRepository;
+
+        public NoteService(NoteRepository noteRepository, UserRepository userRepository) {
+            this.noteRepository = noteRepository;
+            this.userRepository = userRepository;
+        }
+
+        @Transactional
+        public NoteResponse create(Long currentUserId, CreateNoteRequest request) {
+            User owner = userRepository.findById(currentUserId)
+                .orElseThrow(() -> new AccessDeniedException("User not found"));
+
+            Note note = new Note(owner, request.title(), request.content());
+            return NoteResponse.from(noteRepository.save(note));
+        }
+
+        @Transactional(readOnly = true)
+        public Page<NoteResponse> findMine(Long currentUserId, Pageable pageable) {
+            return noteRepository.findByOwnerId(currentUserId, pageable)
+                .map(NoteResponse::from);
+        }
+
+        @Transactional(readOnly = true)
+        public NoteResponse findOne(Long currentUserId, Long noteId) {
+            Note note = noteRepository.findByIdAndOwnerId(noteId, currentUserId)
+                .orElseThrow(NoteNotFoundException::new);
+            return NoteResponse.from(note);
+        }
+
+        @Transactional
+        public NoteResponse update(Long currentUserId, Long noteId, UpdateNoteRequest request) {
+            Note note = noteRepository.findByIdAndOwnerId(noteId, currentUserId)
+                .orElseThrow(NoteNotFoundException::new);
+            note.update(request.title(), request.content());
+            return NoteResponse.from(note);
+        }
+
+        @Transactional
+        public void delete(Long currentUserId, Long noteId) {
+            Note note = noteRepository.findByIdAndOwnerId(noteId, currentUserId)
+                .orElseThrow(NoteNotFoundException::new);
+            noteRepository.delete(note);
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Step 8: REST Controllers">
+    Expose HTTP endpoints with clean parameter mapping:
+
+    ```java com/example/notes/auth/AuthController.java
+    package com.example.notes.auth;
+
+    import jakarta.validation.Valid;
+    import org.springframework.http.HttpStatus;
+    import org.springframework.web.bind.annotation.*;
+
+    @RestController
+    @RequestMapping("/api/auth")
+    public class AuthController {
+        private final AuthService authService;
+
+        public AuthController(AuthService authService) {
+            this.authService = authService;
+        }
+
+        @PostMapping("/register")
+        @ResponseStatus(HttpStatus.CREATED)
+        public void register(@Valid @RequestBody RegisterRequest request) {
+            authService.register(request);
+        }
+
+        @PostMapping("/login")
+        public AuthResponse login(@Valid @RequestBody LoginRequest request) {
+            return authService.login(request);
+        }
+    }
+    ```
+
+    ```java com/example/notes/note/NoteController.java
+    package com.example.notes.note;
+
+    import com.example.notes.common.security.CurrentUser;
+    import jakarta.validation.Valid;
+    import org.springframework.data.domain.Page;
+    import org.springframework.data.domain.Pageable;
+    import org.springframework.http.HttpStatus;
+    import org.springframework.security.core.annotation.AuthenticationPrincipal;
+    import org.springframework.web.bind.annotation.*;
+
+    @RestController
+    @RequestMapping("/api/notes")
+    public class NoteController {
+        private final NoteService noteService;
+
+        public NoteController(NoteService noteService) {
+            this.noteService = noteService;
+        }
+
+        @PostMapping
+        @ResponseStatus(HttpStatus.CREATED)
+        public NoteResponse create(
+            @AuthenticationPrincipal CurrentUser currentUser,
+            @Valid @RequestBody CreateNoteRequest request
+        ) {
+            return noteService.create(currentUser.id(), request);
+        }
+
+        @GetMapping
+        public Page<NoteResponse> findMine(
+            @AuthenticationPrincipal CurrentUser currentUser,
+            Pageable pageable
+        ) {
+            return noteService.findMine(currentUser.id(), pageable);
+        }
+
+        @GetMapping("/{id}")
+        public NoteResponse findOne(
+            @AuthenticationPrincipal CurrentUser currentUser,
+            @PathVariable Long id
+        ) {
+            return noteService.findOne(currentUser.id(), id);
+        }
+
+        @PutMapping("/{id}")
+        public NoteResponse update(
+            @AuthenticationPrincipal CurrentUser currentUser,
+            @PathVariable Long id,
+            @Valid @RequestBody UpdateNoteRequest request
+        ) {
+            return noteService.update(currentUser.id(), id, request);
+        }
+
+        @DeleteMapping("/{id}")
+        @ResponseStatus(HttpStatus.NO_CONTENT)
+        public void delete(
+            @AuthenticationPrincipal CurrentUser currentUser,
+            @PathVariable Long id
+        ) {
+            noteService.delete(currentUser.id(), id);
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Step 9: Spring Security Configuration & JWT Filter">
+    Configure stateless security filter chain in `config/SecurityConfig.java`:
+
+    ```java
+    package com.example.notes.config;
+
+    import org.springframework.context.annotation.Bean;
+    import org.springframework.context.annotation.Configuration;
+    import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+    import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+    import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
+    import org.springframework.security.config.http.SessionCreationPolicy;
+    import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+    import org.springframework.security.crypto.password.PasswordEncoder;
+    import org.springframework.security.web.SecurityFilterChain;
+
+    @Configuration
+    @EnableWebSecurity
+    public class SecurityConfig {
+
+        @Bean
+        SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+            return http
+                .csrf(AbstractHttpConfigurer::disable)
+                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .authorizeHttpRequests(auth -> auth
+                    .requestMatchers("/api/auth/**").permitAll()
+                    .anyRequest().authenticated()
+                )
+                .build();
+        }
+
+        @Bean
+        PasswordEncoder passwordEncoder() {
+            return new BCryptPasswordEncoder();
+        }
+    }
+    ```
+
+    <Note>
+    Your custom JWT authentication filter will extract the `Bearer <token>` header, validate the token using your secret key, construct a `CurrentUser` principal, and store it into the `SecurityContextHolder`.
+    </Note>
+  </Step>
+
+  <Step title="Step 10: Automated Testing & Testcontainers">
+    ### Unit Test Example
+
+    ```java src/test/java/com/example/notes/NoteServiceTest.java
+    package com.example.notes;
+
+    import com.example.notes.note.*;
+    import com.example.notes.user.*;
+    import org.junit.jupiter.api.Test;
+    import org.junit.jupiter.api.extension.ExtendWith;
+    import org.mockito.InjectMocks;
+    import org.mockito.Mock;
+    import org.mockito.junit.jupiter.MockitoExtension;
+
+    import java.util.Optional;
+
+    import static org.junit.jupiter.api.Assertions.assertEquals;
+    import static org.mockito.ArgumentMatchers.any;
+    import static org.mockito.Mockito.*;
+
+    @ExtendWith(MockitoExtension.class)
+    class NoteServiceTest {
+
+        @Mock NoteRepository noteRepository;
+        @Mock UserRepository userRepository;
+        @InjectMocks NoteService noteService;
+
+        @Test
+        void shouldCreateNoteForCurrentUser() {
+            User user = new User("Amit", "amit@example.com", "hash");
+            CreateNoteRequest request = new CreateNoteRequest("Title", "Content");
+
+            when(userRepository.findById(10L)).thenReturn(Optional.of(user));
+            when(noteRepository.save(any(Note.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            NoteResponse response = noteService.create(10L, request);
+
+            assertEquals("Title", response.title());
+            verify(noteRepository).save(any(Note.class));
+        }
+    }
+    ```
+
+    ### Repository Test with Testcontainers (@ServiceConnection)
+
+    Spring Boot 3.1+ includes `@ServiceConnection` which automatically discovers and configures PostgreSQL database credentials without `@DynamicPropertySource`:
+
+    ```java src/test/java/com/example/notes/NoteRepositoryTest.java
+    package com.example.notes;
+
+    import com.example.notes.note.*;
+    import com.example.notes.user.*;
+    import org.junit.jupiter.api.Test;
+    import org.springframework.beans.factory.annotation.Autowired;
+    import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
+    import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+    import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+    import org.testcontainers.containers.PostgreSQLContainer;
+    import org.testcontainers.junit.jupiter.Container;
+    import org.testcontainers.junit.jupiter.Testcontainers;
+
+    import java.util.Optional;
+
+    import static org.junit.jupiter.api.Assertions.assertTrue;
+
+    @DataJpaTest
+    @Testcontainers
+    @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
+    class NoteRepositoryTest {
+
+        @Container
+        @ServiceConnection
+        static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16");
+
+        @Autowired NoteRepository noteRepository;
+        @Autowired UserRepository userRepository;
+
+        @Test
+        void shouldFindOnlyCurrentUsersNote() {
+            User amit = userRepository.save(new User("Amit", "amit@example.com", "hash"));
+            User neha = userRepository.save(new User("Neha", "neha@example.com", "hash"));
+
+            Note amitsNote = noteRepository.save(new Note(amit, "Amit note", "Content"));
+            noteRepository.save(new Note(neha, "Neha note", "Content"));
+
+            Optional<Note> found = noteRepository.findByIdAndOwnerId(amitsNote.getId(), amit.getId());
+            assertTrue(found.isPresent());
+        }
+    }
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Production Hardening
+
+Before shipping to production:
+
+- Pass secrets via environment variables
+- Enable Flyway migration validation on startup
+- Add request correlation IDs in MDC logging
+- Ensure actuator health and readiness probes are exposed
+- Include database connection pool metrics (HikariCP)
+
+## Completion Checklist
+
+<Check>User registration and login return JWT access tokens</Check>
+<Check>Passwords are hashed with BCrypt using adequate work factor</Check>
+<Check>Notes endpoints enforce ownership filtering at the SQL level</Check>
+<Check>All invalid requests return `400 Bad Request` with field-level details</Check>
+<Check>Resource misses return `404 Not Found` without stack traces</Check>
+<Check>Delete requests return `204 No Content`</Check>
+<Check>Collection queries are paginated with `Pageable`</Check>
+<Check>Repository integration tests pass against real PostgreSQL via Testcontainers</Check>
+
+
+## Mastery Questions
+
+Answer these without looking:
+
+1. Why should note queries include `ownerId`?
+2. Why should passwords be hashed?
+3. Why use Flyway instead of relying on Hibernate schema update?
+4. Why should controllers stay thin?
+5. Why should delete return `204`?
+6. What should happen when token is missing?
+7. Why is H2 not always enough for database tests?
+8. What index helps `GET /api/notes?page=0&size=20`?
+9. Why can duplicate email still need a database unique constraint?
+10. What production logs would help debug failed note creation?

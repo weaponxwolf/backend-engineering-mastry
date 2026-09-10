@@ -1,0 +1,125 @@
+---
+title: "Spring Interview Questions"
+description: "The definitive technical question bank: deep Spring Boot framework and runtime internals questions asked by senior and staff interviewers."
+---
+
+# Spring Interview Questions
+
+Senior and Staff interviewers test whether you truly understand how Spring Boot operates at runtime—from dynamic bytecode proxy generation and bean lifecycles to transaction propagation deadlocks and Hibernate persistence contexts.
+
+<Tip>
+Looking for complete, production-tested answers, architectural sequence diagrams, and code snippets for every question below? Review [Spring Interview Answers](/interview/spring-answers).
+</Tip>
+
+---
+
+## 1. Spring IoC Container, Bean Lifecycle & Dynamic Proxies
+
+1. **`BeanFactory` vs `ApplicationContext`**:
+   - What architectural differences exist between `BeanFactory` and `ApplicationContext`?
+   - Why does `BeanFactory` perform lazy bean instantiation while `ApplicationContext` performs eager pre-instantiation of singletons on startup?
+   - What enterprise capabilities (AOP, `MessageSource`, `ApplicationEventPublisher`, `EnvironmentCapable`) does `ApplicationContext` add?
+2. **The 12-Step Spring Bean Lifecycle**:
+   - Walk through the exact lifecycle of a Spring Bean from bytecode loading to destruction:
+     1. Bean definition loading & instantiation via reflection.
+     2. Dependency injection & property population.
+     3. Aware interfaces (`BeanNameAware`, `BeanFactoryAware`, `ApplicationContextAware`).
+     4. `BeanPostProcessor.postProcessBeforeInitialization()`.
+     5. Initialization callbacks (`@PostConstruct`, `InitializingBean.afterPropertiesSet()`, custom `initMethod`).
+     6. `BeanPostProcessor.postProcessAfterInitialization()` (proxy generation).
+     7. Active singleton usage.
+     8. Destruction callbacks (`@PreDestroy`, `DisposableBean.destroy()`).
+3. **Dynamic Proxy Mechanics: JDK Dynamic Proxy vs CGLIB**:
+   - How does Spring implement Aspect-Oriented Programming (AOP) for `@Transactional`, `@Async`, `@Cacheable`, and `@Observed`?
+   - What is the difference between JDK Dynamic Proxies (`java.lang.reflect.Proxy`) and CGLIB (subclass bytecode generation via ASM)?
+   - Why did Spring Boot 2 and 3 switch to CGLIB by default (`spring.aop.proxy-target-class=true`), and what are the implications for `final` classes or `final` methods?
+4. **The Self-Invocation Proxy Trap**:
+   - Why does calling a `@Transactional` or `@Async` method internally from another method within the same bean class completely bypass the proxy and silently fail to open a transaction or run asynchronously?
+   - What are the two production architectural solutions to resolve self-invocation (collaborator bean extraction vs programmatic `TransactionTemplate`)?
+5. **The Scoped Proxy Hazard**:
+   - What happens when a singleton-scoped bean injects a request-scoped or prototype-scoped bean directly?
+   - How does `ScopedProxyMode.TARGET_CLASS` solve this by injecting a dynamic CGLIB proxy that resolves the actual instance dynamically from the current HTTP request?
+
+---
+
+## 2. Transaction Boundaries, Propagation & Connection Pooling
+
+1. **`@Transactional` Propagation Mechanics**:
+   - Compare the behavior of:
+     - `REQUIRED` (default)
+     - `REQUIRES_NEW`
+     - `MANDATORY`
+     - `SUPPORTS`
+   - What happens when an exception is thrown inside a nested `REQUIRES_NEW` transaction? Does the outer transaction roll back, and under what conditions?
+2. **The HikariCP Connection Pool Deadlock Trap**:
+   - How can nested `@Transactional(propagation = Propagation.REQUIRES_NEW)` transactions cause total connection pool exhaustion and deadlocks under concurrent load?
+   - If HikariCP maximum pool size is set to 10, and 10 concurrent HTTP requests call Method A (`REQUIRED`) which calls Method B (`REQUIRES_NEW`), explain why all 10 threads block permanently until `connectionTimeout` fires.
+3. **Rollback Rules: Checked vs Unchecked Exceptions**:
+   - Why do checked exceptions (`IOException`, `Exception`) **not** trigger a transaction rollback by default in Spring?
+   - What is the historical rationale, and why should every production service specify `@Transactional(rollbackFor = Exception.class)`?
+   - What is the "Catch-and-Swallow" anti-pattern in service methods, and why does it cause silent transaction commits?
+4. **`readOnly = true` Optimizations**:
+   - What physical optimizations occur in Hibernate and the JDBC driver when you mark a transaction `@Transactional(readOnly = true)`?
+   - Why does Hibernate skip creating entity snapshot copies in the First-Level Cache during read-only transactions, and how does this save 50% CPU and heap memory?
+   - How can Spring route read-only transactions to PostgreSQL read-replicas using an `AbstractRoutingDataSource`?
+
+---
+
+## 3. Spring Data JPA & Hibernate 6 Internals
+
+1. **The 4 Persistence Context Entity States**:
+   - Define and trace the transitions between:
+     - `Transient`
+     - `Managed`
+     - `Detached`
+     - `Removed`
+   - What is the First-Level Cache, and why is an entity deduplicated within a single transaction even when queried multiple times?
+2. **Automatic Dirty Checking Mechanics**:
+   - Why is calling `repository.save(entity)` completely redundant and unnecessary when modifying an already managed entity inside a `@Transactional` method?
+   - How does Hibernate take an initial snapshot array upon entity loading and compare it during flush to generate minimal `UPDATE` statements?
+3. **The N+1 Query Problem & 4 Concrete Solutions**:
+   - Why does fetching 50 blog posts with their associated authors generate 51 SQL queries by default?
+   - Compare the 4 production solutions:
+     1. `JOIN FETCH` in JPQL
+     2. `@EntityGraph(attributePaths = {"author"})`
+     3. Batch fetching via `spring.jpa.properties.hibernate.default_batch_fetch_size: 25`
+     4. Read-only DTO constructor projections
+   - When does `JOIN FETCH` cause a Cartesian explosion when fetching multiple `@OneToMany` collections (`MultipleBagFetchException`), and why does batch fetching solve it?
+4. **Entity Domain Rules: Lombok `@Data` & Equals/HashCode**:
+   - Why is using Lombok `@Data` on JPA entities considered a major antipattern (infinite recursion, broken `hashCode` contracts in sets)?
+   - How should `equals()` and `hashCode()` be implemented for JPA entities with generated primary keys?
+
+---
+
+## 4. Spring MVC Architecture & Modern Client Calling
+
+1. **The `DispatcherServlet` Internal Pipeline**:
+   - Trace the internal execution pipeline of an incoming HTTP request through `DispatcherServlet`:
+     - `HandlerMapping`
+     - `HandlerInterceptor` (`preHandle`)
+     - `HandlerAdapter`
+     - `HandlerMethodArgumentResolver`
+     - `HttpMessageConverter` (Jackson)
+     - `HandlerInterceptor` (`postHandle`, `afterCompletion`)
+     - `HandlerExceptionResolver` (`@RestControllerAdvice`)
+2. **Modern HTTP Clients: `RestClient` vs `WebClient` vs `RestTemplate`**:
+   - Why did Spring Boot 3.2 introduce `RestClient`?
+   - How does `RestClient` provide a modern, fluent synchronous API while leveraging connection pooling and Micrometer tracing interceptors?
+   - When would you choose `WebClient` over `RestClient`?
+3. **Pagination Performance: `Page<T>` vs `Slice<T>`**:
+   - Why does returning `Page<T>` execute an expensive `SELECT COUNT(*)` query on every request, and why does this degrade severely on million-row PostgreSQL tables?
+   - When should you use `Slice<T>` (`LIMIT N + 1`) to eliminate count queries entirely for infinite scrolling?
+
+---
+
+## 5. Spring Security & Production Filter Chains
+
+1. **`SecurityFilterChain` Architecture & Order of Execution**:
+   - Why does Spring Security execute inside a servlet filter (`DelegatingFilterProxy`) **before** requests reach `DispatcherServlet`?
+   - Trace the difference between an unauthenticated request (`401 Unauthorized` / `AuthenticationEntryPoint`) vs an unauthorized request (`403 Forbidden` / `AccessDeniedHandler`).
+2. **Stateless JWT vs CSRF Tokens**:
+   - Why can CSRF protection be safely disabled (`csrf.disable()`) for stateless REST APIs using bearer tokens in the `Authorization` header?
+   - When is CSRF protection strictly mandatory (e.g., when authentication tokens are stored in browser cookies)?
+3. **Method-Level Authorization with SpEL**:
+   - How does Spring Security intercept method invocations using `@EnableMethodSecurity` and `@PreAuthorize`?
+   - Write a SpEL expression that allows access if the user has role `ADMIN` or if the resource's `ownerId` matches the authenticated user's ID.
