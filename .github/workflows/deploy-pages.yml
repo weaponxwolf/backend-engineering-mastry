@@ -36,6 +36,7 @@ jobs:
         run: |
           npm run export
           unzip -q docs/export.zip -d ./out
+          node scripts/prepare-github-pages.mjs
 
       - name: Upload GitHub Pages Artifact
         uses: actions/upload-pages-artifact@v3

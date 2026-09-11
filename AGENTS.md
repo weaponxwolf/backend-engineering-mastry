@@ -740,7 +740,8 @@ All phases of the comprehensive documentation overhaul and book-replacement dept
       - Generated production static distribution via `npm run export` into `out/` (88 HTML pages, CSS/JS chunks in `_next/`, and assets), packaged in `docs/export.zip`.
       - Zero runtime server requirements; fully compatible with global static CDNs (GitHub Pages, Netlify, Vercel, Cloudflare Pages, Surge).
     - **Automated GitHub Pages CI/CD Pipeline** (`.github/workflows/deploy-pages.yml`):
-      - Workflow automates `npm install`, `npm run check` (test:audit, audit, validate, links), `npm run export`, and `actions/deploy-pages@v4` on every push to `main`.
+      - Workflow automates `npm install`, `npm run check` (test:audit, audit, validate, links), `npm run export`, subpath prefixing via `scripts/prepare-github-pages.mjs`, and `actions/deploy-pages@v4` on every push to `main`.
+      - **Subpath Asset Resolution & Jekyll Bypass**: Generates `.nojekyll` to prevent GitHub from ignoring `_next/` directories, prefixes all relative asset URLs and navigation routes with `/${repo}`, and configures Mintlify's client router with `var b="/${repo}"`.
     - **Alternative 10-Second Drag-and-Drop Hosting**:
       - Standalone `./out` directory is fully prepared for instant upload to Netlify Drop (`app.netlify.com/drop`) or Cloudflare Pages.
 
