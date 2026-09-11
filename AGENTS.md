@@ -733,6 +733,17 @@ All phases of the comprehensive documentation overhaul and book-replacement dept
     - **Financial Ledger & Concurrency Systems** (`docs/system-design/financial-ledger.mdx` & `docs/system-design/rate-limiter.mdx`):
       - Added prerequisites, deferred constraint triggers for double-entry zero-sum balance invariants, multi-threaded `CountDownLatch` concurrency test suites with Redis Testcontainers.
 
+13. **Independent Cloud Hosting & Static Production Distribution (September 2026)**:
+    - **Local Tunnel / Proxy Discontinuation**:
+      - Completely terminated all ephemeral local development proxies (e.g. quick tunnels proxying to `localhost:3000`), ensuring the site operates with 100% cloud autonomy without relying on a running local computer or daemon.
+    - **Pre-Rendered Static Distribution Bundle**:
+      - Generated production static distribution via `npm run export` into `out/` (88 HTML pages, CSS/JS chunks in `_next/`, and assets), packaged in `docs/export.zip`.
+      - Zero runtime server requirements; fully compatible with global static CDNs (GitHub Pages, Netlify, Vercel, Cloudflare Pages, Surge).
+    - **Automated GitHub Pages CI/CD Pipeline** (`.github/workflows/deploy-pages.yml`):
+      - Workflow automates `npm ci`, `npm run check` (test:audit, audit, validate, links), `npm run export`, and `actions/deploy-pages@v4` on every push to `main`.
+    - **Alternative 10-Second Drag-and-Drop Hosting**:
+      - Standalone `./out` directory is fully prepared for instant upload to Netlify Drop (`app.netlify.com/drop`) or Cloudflare Pages.
+
 ---
 
 ## Final Verification Summary
@@ -744,3 +755,4 @@ All phases of the comprehensive documentation overhaul and book-replacement dept
 - `npm run test:examples` (`npm run test:java` + `npm run test:todo`):
   - **Java Foundations**: 12/12 automated assertion checks passing with zero external dependencies.
   - **Todo API**: 12/12 Spring Boot 3.5 + Spring Data JPA + Flyway integration tests passing on Java 21 with zero Mockito dynamic agent loading warnings.
+
