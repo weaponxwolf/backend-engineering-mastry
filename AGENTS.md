@@ -232,24 +232,51 @@ All phases of the comprehensive documentation overhaul and book-replacement dept
      - Stream pipeline architecture: Stateless vs Stateful intermediate operations and memory buffer limits.
      - `Spliterator` optimization characteristics; avoiding primitive boxing with `LongStream`/`IntStream`.
      - `parallelStream()` thread pool hazards in web workers, and custom high-throughput batch collectors.
-   - **Production Query Design, Index Tuning & Flyway Migrations** (`docs/database/query-design-migrations.mdx`):
-     - Covering indexes with `INCLUDE` clause for zero-heap Index-Only Scans.
-     - Flyway migration engine internals: `flyway_schema_history`, CRC32 checksums, and `pg_advisory_lock` concurrency controls.
-     - The fatal dangers of Hibernate `ddl-auto: update` in production.
-     - Chunked cursor backfills for multi-million row tables without WAL bloat or lock contention.
-     - Slow query profiling with `log_min_duration_statement` and `pg_stat_user_tables`.
-   - **SQL Query Lifecycle, Execution Order & Window Functions** (`docs/database/sql-basics.mdx`):
-     - Logical query processing order (`FROM -> WHERE -> GROUP BY -> HAVING -> WINDOW -> SELECT -> DISTINCT -> ORDER BY -> LIMIT`).
-     - PostgreSQL storage internals: `NUMERIC` vs floating-point currency, `TIMESTAMPTZ` UTC storage.
-     - Analytical Window Functions: `ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`, `LAG()`, `LEAD()`, and sliding frames.
-     - Common Table Expressions (CTEs) and Recursive CTEs for hierarchical comment trees.
-     - SQL Injection Abstract Syntax Tree (AST) manipulation and Prepared Statement compilation.
-   - **System Design Fundamentals: Architecture Patterns & Trade-Offs** (`docs/system-design/fundamentals.mdx`):
-     - The 4-phase 45-minute interview playbook (Requirements, Capacity, High-Level Design, Deep Dive).
-     - Vertical vs Horizontal scaling cost curves and single points of failure.
-     - Layer 4 (TCP) vs Layer 7 (HTTP) Load Balancing architectures and routing algorithms.
-     - Consistent Hashing with Virtual Nodes (Vnodes) and data migration mathematics ($1/N$).
-     - The Celebrity / Hot Partition problem and key salting mitigations.
+    - **Production Query Design, Index Tuning & Flyway Migrations** (`docs/database/query-design-migrations.mdx`):
+      - 8KB PostgreSQL disk page anatomy (line pointers, tuple headers, ctid lookups, and NVMe random I/O).
+      - Visibility Map (`_vm`) bitmasks (`all-visible`, `all-frozen`) and why Index-Only Scans require clean visibility to achieve `Heap Fetches: 0`.
+      - Covering indexes with `INCLUDE` clause isolating payload attributes from the B-Tree search key.
+      - The Giant `UPDATE` disaster on 15M rows (35GB WAL explosion, 45-minute replica lag, and table bloat) mitigated via Chunked Keyset Cursor Backfills in Java 21 with defensive rate-limiting pauses.
+      - Flyway migration engine internals (`flyway_schema_history`, CRC32 checksums, `pg_advisory_lock(int8)`), and dedicated Kubernetes Pre-Install Migration Jobs with `backoffLimit: 0`.
+      - `CREATE INDEX CONCURRENTLY` two-phase table scans with sibling `.sql.conf` files, and `indisvalid = false` index cleanup.
+    - **SQL Query Lifecycle, Execution Order & Window Functions** (`docs/database/sql-basics.mdx`):
+      - Logical query processing order (`FROM -> WHERE -> GROUP BY -> HAVING -> WINDOW -> SELECT -> DISTINCT -> ORDER BY -> LIMIT`).
+      - PostgreSQL storage internals: `NUMERIC` vs floating-point currency, `TIMESTAMPTZ` UTC storage.
+      - Analytical Window Functions: `ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`, `LAG()`, `LEAD()`, and sliding frames.
+      - Common Table Expressions (CTEs) and Recursive CTEs for hierarchical comment trees.
+      - SQL Injection Abstract Syntax Tree (AST) manipulation and Prepared Statement compilation.
+    - **System Design Fundamentals: Architecture Patterns & Trade-Offs** (`docs/system-design/fundamentals.mdx`):
+      - Physical foundations of distributed systems: Speed of light in fiber optics ($200,000\text{ km/s}$), Einstein's cross-continental latency floor ($91\text{ms}$ SF-Frankfurt), and CPU cache line coherency.
+      - Amdahl's Law mathematical ceiling: $\text{Speedup} = 1 / ((1 - P) + P/N)$, proving why a 5% serial lock caps theoretical speedup to $20\times$ regardless of cluster size.
+      - Layer 4 (eBPF / IPVS Direct Server Return wire speed) vs Layer 7 (Envoy / ALB TLS termination and HTTP parsing).
+      - Naive Modulo Hashing cache avalanche crash sequence ($100\%$ key invalidation upon node failure).
+      - Complete thread-safe Java 21 Consistent Hash Ring with 200 Virtual Nodes per server using `ConcurrentSkipListMap` and Murmur3-128.
+      - Celebrity / Hot Partition problem resolved via random Hot Key Salting ($M$ buckets) and scatter-gather parallel aggregation.
+    - **Zero-Downtime Deployment & CI/CD Pipelines** (`docs/production/deployment-ci-cd.mdx`):
+      - Physical socket lifecycle in the Linux kernel: `sk_buff`, accept queue (`SO_BACKLOG`), and the packet discard/`RST` catastrophe of ungraceful `SIGKILL`.
+      - The Zero-Downtime Graceful Termination Triangle: Kubernetes `preStop: sleep 15` hook overcoming the 5-10s `EndpointSlice` propagation delay, paired with Spring Boot 3 `server.shutdown=graceful` and 30s phase timeouts.
+      - Automated Canary analysis: Argo Rollouts `AnalysisTemplate` monitoring Prometheus HTTP 5xx error rates and p99 latency gates.
+      - Production GitHub Actions pipeline (`.github/workflows/deploy.yml`) with Testcontainers and Trivy container CVE security gates.
+      - Declarative GitOps with ArgoCD: In-cluster reconciliation, drift detection, and single-command `git revert` rollbacks.
+    - **Production SRE & Incident Response** (`docs/production/incident-response.mdx`):
+      - The physics of cascading failures and Little's Law ($L = \lambda \times W$): how a 100x latency spike in a downstream dependency explodes concurrency, exhausts Tomcat thread pools, holds database connections hostage, and causes cluster blackout.
+      - Naive HTTP client hazards: missing connect/read timeouts, unbounded retries, and calling external APIs inside database transactions.
+      - Standardized severity framework: SEV-1 to SEV-4 definitions, response SLAs, and the Incident Commander (IC) protocol ("Mitigate First, Debug Later").
+      - Emergency production runbooks: PostgreSQL recursive blocking lock diagnosis (`pg_stat_activity`, `pg_blocking_pids`), JVM Heap OOM vs Linux cgroup OOMKill (Exit Code 137), dynamic Resilience4j circuit breaker tripping, and Kafka consumer lag triage.
+      - Complete Blameless Postmortem (PMR) template with 5 Whys analysis and tracked corrective action items.
+    - **Zero-Downtime Schema Migrations & PostgreSQL Lock Mastery** (`docs/database/schema-change-mastery.mdx`):
+      - PostgreSQL Shared Memory Lock Manager (`LockMethodData`) and the FIFO Lock Queue Trap: why an `ALTER TABLE` behind a slow query blocks all subsequent incoming `SELECT` statements.
+      - Physical disk page rewrites ($O(N)$ table rewrites creating new `relfilenode` files) vs $O(1)$ catalog metadata updates.
+      - Production DDL circuit breakers: explicit `SET lock_timeout = '2s'` and `SET statement_timeout = '5s'`.
+      - The Expand and Contract pattern: 4-phase backward-compatible column lifecycle with dual-write Java 21 entities and chunked keyset cursor backfills.
+      - Safe DDL operations: $O(1)$ defaults in PG 11+, two-step foreign keys (`NOT VALID` + `VALIDATE CONSTRAINT`), and 3-step safe `NOT NULL` constraints.
+      - Concurrent indexing rules (`CREATE INDEX CONCURRENTLY`), sibling `.sql.conf` configuration in Flyway, and automated detection/cleanup of `INVALID` indexes (`indisvalid = false`).
+    - **Distributed Unique ID Generation & Clock Skew** (`docs/system-design/distributed-id-generation.mdx`):
+      - Quartz crystal oscillator physics: 32.768 kHz tuning fork vibrations, thermal drift (1-5 ppm), accumulated clock drift, and NTP backwards time-step hazards.
+      - B-Tree 8KB page split physics: random UUIDv4 keys causing 50% fill factors and buffer pool cache thrashing vs sequential Snowflake IDs appending to rightmost leaf blocks.
+      - Twitter Snowflake 64-bit architecture: 1b sign, 41b timestamp (custom epoch covering 69.7 years), 10b worker ID (1,024 nodes), and 12b sequence counter (4,096 IDs/ms).
+      - Production Java 21 Snowflake generator with defensive NTP backwards clock drift detection, spin-waiting via `Thread.onSpinWait()`, and dynamic Kubernetes worker ID allocation via Redis leases with TTL heartbeats.
+      - UUIDv7 standard (RFC 9562) structure (48b timestamp + 74b entropy) compared against Snowflake.
    - **Modern Backend Architecture & Request Lifecycles** (`docs/backend-basics/what-is-backend.mdx`):
      - The 4 backend pillars (Compute, State, Integration, Security).
      - Complete end-to-end checkout request lifecycle across Anycast DNS, CDN/WAF, API Gateway, Tomcat, Security Filters, DispatcherServlet, Service, JPA, Postgres, Outbox, and Kafka.

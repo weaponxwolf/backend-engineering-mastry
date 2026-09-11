@@ -1,120 +1,235 @@
 ---
 title: "Design a High-Scale Multi-Channel Notification System"
 sidebarTitle: "Notification System"
-description: "Master enterprise notification system design. Deep dive into priority queue isolation, Head-of-Line blocking mitigation, Redis atomic deduplication, quiet hours timezone math, and provider circuit breakers."
+description: "Master enterprise notification system design from first principles: gateway protocols (APNs, FCM, SMPP, SMTP), Head-of-Line blocking elimination, Redis atomic deduplication, quiet hours timezone scheduling, and circuit breaker failover."
 ---
 
-## 1. Mental Model: The Two Extremes of Notification Delivery
+# Design a High-Scale Multi-Channel Notification System
 
-A high-scale notification platform delivers hundreds of millions of messages daily across multiple channels: Mobile Push (Apple APNs, Google FCM), SMS (Twilio, AWS SNS), Email (SendGrid, AWS SES), and In-App WebSockets.
+A global notification platform is one of the most deceptive distributed systems in software engineering.
 
-In production architectures, notifications span two vastly different operational extremes:
+On the surface, sending a notification seems trivial: make an HTTP call to Apple APNs, Google FCM, Twilio, or SendGrid. In production at scale (handling 500 million messages daily), the system must reconcile two fundamentally opposing forces:
+1. **Ultra-Low Latency Transactional Traffic**: Two-Factor Authentication (2FA) OTP codes and real-time fraud alerts where delivery delay beyond 3 seconds breaks user authentication.
+2. **Massive Throughput Marketing Blasts**: Promotional campaigns pushing 50 million messages simultaneously, capable of saturating queues, triggering downstream rate limits, and starving critical alerts for hours.
+
+---
+
+## Phase 1: Ground Floor (Physical First Principles & Network Protocols)
+
+To architect a notification engine, you must understand the underlying networking protocols and mechanical constraints of external gateway providers.
 
 ```mermaid
-flowchart TD
-    subgraph Operational Extremes
-        E1["Extreme 1: Critical Transactional Alerts<br/>- 2FA Login OTPs, Fraud Alerts, Password Resets<br/>- Requirement: Must deliver in under 2 seconds<br/>- SLA: 99.999% Zero Message Loss"]
-        E2["Extreme 2: High-Volume Marketing Blasts<br/>- Flash Sale Newsletters, Weekly Digests<br/>- Volume: 50,000,000 messages sent at 09:00 AM<br/>- Requirement: Bulk throughput over minutes/hours"]
+graph TD
+    subgraph Gateways ["External Gateway Protocol Landscape"]
+        APNS["Apple APNs<br/>• Protocol: HTTP/2 over TLS (Port 443 / 2197)<br/>• Multiplexing: Hundreds of streams per TCP conn<br/>• Payload: Max 4 KB JSON<br/>• Feedback: 410 BadDeviceToken"]
+        FCM["Google FCM<br/>• Protocol: HTTP v1 / JSON REST over TLS<br/>• Auth: OAuth 2.0 Short-Lived Bearer Tokens<br/>• Payload: Max 4 KB Display / 16 KB Data<br/>• Error: UNREGISTERED"]
+        SMPP["SMS Carriers (Twilio / Sinch)<br/>• Protocol: SMPP v3.4 over raw TCP sockets<br/>• Signaling: SS7 Cellular Network<br/>• Rate Limits: 1 TPS (10DLC) vs 100+ TPS (Shortcode)<br/>• Encoding: GSM 7-bit (160 chars) vs UCS-2 (70 chars)"]
+        SMTP["Email Relays (SES / SendGrid)<br/>• Protocol: SMTP (RFC 5321) over TLS (Port 587)<br/>• Reputation: Dedicated IP warming & DKIM/SPF<br/>• Throttling: Max 500 msgs/conn, bounce webhooks"]
     end
 ```
 
-<Warning>
-**The Head-of-Line Blocking Disaster**:
-If you publish marketing newsletters and 2FA authentication codes into the same shared message queue, the 50-million marketing blast will fill the queue. A user attempting to log in will wait 4 hours for their two-factor OTP SMS to reach the front of the queue, completely paralyzing customer logins!
-</Warning>
+### 1. Apple Push Notification service (APNs) Internals
+- **Protocol**: HTTP/2 binary framing over persistent TLS connections.
+- **Multiplexing**: APNs requires long-lived connections. Establishing a TLS handshake for every notification destroys throughput. A single HTTP/2 connection can multiplex hundreds of concurrent notification streams over one TCP socket.
+- **Device Token Lifecycle**: When a user uninstalls your app or wipes their iPhone, APNs rejects the push with an HTTP status `410 Unregistered` (`BadDeviceToken`). Continuing to send pushes to dead tokens triggers Apple's spam detection and throttles the entire developer account.
+
+### 2. Cellular SMS Carrier Protocols (SMPP & SS7)
+- **Protocol**: Short Message Peer-to-Peer (SMPP) over raw TCP sockets, connecting your aggregator (e.g., Twilio, AWS SNS) to Mobile Network Operators (Verizon, AT&T, Vodafone).
+- **Physical Bandwidth & Throughput Limits**:
+  - **10-Digit Long Code (10DLC)**: Standard virtual phone numbers are restricted by US carrier consortiums (The Campaign Registry) to **1 message per second (1 TPS)** to prevent spam.
+  - **Toll-Free Numbers**: 3 to 25 TPS.
+  - **Short Codes (5-6 digits)**: 100 to 500+ TPS (costs $1,000+/month).
+- **Character Encoding Traps**: Standard text uses **GSM 03.38 7-bit encoding** (up to 160 characters per SMS segment). The moment a user pastes a single emoji (e.g., 👋 or 🚀), the carrier switches the entire message to **UCS-2 16-bit encoding**, slashing the segment limit from 160 to **70 characters** and doubling carrier billing costs.
+
+### 3. Email Infrastructure (SMTP, SPF, DKIM & DMARC)
+- **Protocol**: Simple Mail Transfer Protocol (SMTP) over TCP port 587/465.
+- **Deliverability Physics**: Outbound IP addresses have a "reputation score." Blasting 1,000,000 emails from a brand-new IP address will cause Gmail and Microsoft Outlook to immediately drop 98% of your emails into the Spam quarantine. New IP addresses must follow an automated **IP Warmup Ramp** (sending 500 emails on Day 1, 1,000 on Day 2, doubling daily over 30 days).
 
 ---
 
-## 2. End-to-End Distributed Architecture
+## Phase 2: The Naive Code (The Production Crash)
 
-```mermaid
-flowchart TD
-    Producers["Upstream Services<br/>(Auth, Checkout, Marketing)"] -->|Publish Event| Kafka["Kafka Topic: notification-events<br/>(Partitioned by userId)"]
-    
-    subgraph RouterEngine ["Notification Router Tier"]
-        Router["Router Consumer Pods"]
-        PrefCache[("Redis Preference Cache<br/>(Opt-Outs & Quiet Hours)")]
-        DedupCache[("Redis Dedup Cache<br/>(Idempotency Keys)")]
-        Router <--> PrefCache
-        Router <--> DedupCache
-    end
-    Kafka --> Router
+An e-commerce company built a unified notification service. The engineering team created a single Spring Boot service that subscribed to an `orders-and-notifications` Kafka topic and dispatched alerts through a common worker pool.
 
-    subgraph PriorityQueues ["Channel-Dedicated Priority Queues (RabbitMQ / SQS)"]
-        Q_High_SMS["Queue: High-Priority SMS (OTPs)"]
-        Q_Low_SMS["Queue: Low-Priority SMS (Marketing)"]
-        Q_Push["Queue: Mobile Push (APNs / FCM)"]
-        Q_Email["Queue: Email (SES / SendGrid)"]
-    end
-    Router -->|Transactional OTP| Q_High_SMS
-    Router -->|Marketing SMS| Q_Low_SMS
-    Router -->|Push Notification| Q_Push
-    Router -->|Transactional Email| Q_Email
+During a Black Friday promotional event, the marketing team scheduled a 40-million flash sale push blast for 10:00 AM. Simultaneously, real-time checkout volume surged to 2,000 orders/sec.
 
-    subgraph Workers ["Dedicated Channel Worker Pools"]
-        W_SMS_High["High-Priority SMS Workers"]
-        W_Push["Push Workers (HTTP/2 Multiplexing)"]
-        W_Email["Email Workers (SMTP / REST API)"]
-    end
-    Q_High_SMS --> W_SMS_High
-    Q_Push --> W_Push
-    Q_Email --> W_Email
+Within 4 minutes of the marketing blast launch:
+1. Customers attempting to log in never received their Two-Factor Authentication (2FA) SMS codes. The login window timed out after 60 seconds.
+2. Checkout customers received between 15 and 40 identical credit card charge confirmation SMS messages.
+3. Apple APNs returned `429 Too Many Requests`, and Twilio throttled the long code phone numbers.
+4. The service suffered a catastrophic thread pool lockup and crashed with `OutOfMemoryError: Java heap space`.
 
-    subgraph Providers ["External Gateways"]
-        W_SMS_High --> Twilio["Primary: Twilio"]
-        Twilio -.->|Circuit Breaker Open| SNS["Fallback: AWS SNS"]
-        W_Push --> APNs["Apple APNs & Google FCM"]
-        W_Email --> SES["Primary: AWS SES / SendGrid"]
-    end
+### The Naive Implementation
+
+```java
+@Service
+public class NaiveNotificationDispatcher {
+
+    private final TwilioClient twilioClient;
+    private final ApnsClient apnsClient;
+    private final EmailClient emailClient;
+
+    public NaiveNotificationDispatcher(TwilioClient twilioClient, ApnsClient apnsClient, EmailClient emailClient) {
+        this.twilioClient = twilioClient;
+        this.apnsClient = apnsClient;
+        this.emailClient = emailClient;
+    }
+
+    // NAIVE: Consumes from a single shared topic with no priority separation, no dedup, and synchronous blocking I/O!
+    @KafkaListener(topics = "notifications-all", groupId = "notification-workers", concurrency = "10")
+    public void onNotificationReceived(NotificationMessage msg) {
+        // DISASTER 1: Synchronous network call blocks the Kafka consumer thread for up to 3-5 seconds!
+        if ("SMS".equals(msg.getChannel())) {
+            // Naive retry loop: On network glitch, retries without idempotency!
+            twilioClient.sendSms(msg.getPhoneNumber(), msg.getBody());
+        } else if ("PUSH".equals(msg.getChannel())) {
+            apnsClient.sendPush(msg.getDeviceToken(), msg.getTitle(), msg.getBody());
+        } else if ("EMAIL".equals(msg.getChannel())) {
+            emailClient.sendEmail(msg.getEmail(), msg.getSubject(), msg.getBody());
+        }
+    }
+}
 ```
 
-### Channel Rate Mismatches:
-- **Mobile Push (APNs / FCM)**: Can ingest up to **10,000+ requests/sec** over long-lived HTTP/2 multiplexed sockets.
-- **SMS Gateways (Twilio / AWS SNS)**: Enforce strict carrier limits (e.g., standard US 10-Digit Long Code numbers are throttled to **1 SMS/sec** per number; dedicated Short Codes allow 100 SMS/sec).
-- **Email Providers (SES / SendGrid)**: Require warming up IP addresses to prevent spam filters from rejecting bulk email blasts.
-
----
-
-## 3. Distributed Deduplication & Idempotency
-
-In distributed systems, network timeouts and producer retries mean upstream microservices will inevitably publish duplicate events (e.g., the checkout service retrying an order confirmation):
+### Why the System Collapsed
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant App as Checkout Service
-    participant Kafka as Notification Kafka Topic
-    participant Router as Notification Router Worker
-    participant Redis as Redis Deduplication Cache
+    participant Marketer as Marketing Campaign (40M)
+    participant User as Login User (2FA)
+    participant Kafka as Shared Kafka Topic
+    participant Consumer as Naive Worker Pool (10 Threads)
+    participant Twilio as Twilio SMS API
 
-    App->>Kafka: Publish OrderConfirmed (Idempotency Key: ord_101)
-    Kafka->>Router: Deliver Event (Attempt 1)
-    Router->>Redis: SET dedup:ord_101:SMS "PROCESSING" NX EX 86400
-    Note over Redis: Returns OK (Lock Acquired!)
-    Router->>Router: Renders template & dispatches SMS
-    Router->>Redis: SET dedup:ord_101:SMS "SENT" EX 86400
+    Marketer->>Kafka: Publish 40,000,000 Marketing Notifications
+    User->>Kafka: Publish 2FA Login OTP (Event #40,000,001)
+    Note over Kafka: The 2FA OTP is placed at the very back of the 40M queue!<br/>Head-of-Line Blocking!
     
-    Note over Kafka,Router: Network glitch causes Kafka to re-deliver same event!
-    Kafka->>Router: Re-deliver Event (Attempt 2)
-    Router->>Redis: SET dedup:ord_101:SMS "PROCESSING" NX EX 86400
-    Note over Redis: Returns NULL! (Key already exists!)
-    Router->>Router: Log duplicate detected; safely ack message and discard!
-    Note over Router: Customer is never spammed twice!
+    Consumer->>Kafka: Poll batch of 500 messages (All Marketing SMS)
+    Consumer->>Twilio: Synchronous send SMS (10DLC throttled to 1 msg/sec)
+    Note over Consumer: 10 threads * 1 msg/sec = 10 msgs/sec throughput!<br/>Time to reach message #40,000,001: 46 DAYS!
+    
+    User->>User: 2FA Login Window Times Out (HTTP 408)
+    Note over User: Customer cannot log in to make purchases!
+```
+
+1. **Head-of-Line (HoL) Blocking**:
+   Both low-priority marketing blasts and high-priority 2FA OTPs were published to the same shared Kafka topic. The 40-million promotional batch sat in front of the login OTPs. Processing at carrier throughput rates meant a user's 2FA code would not dequeue for hours.
+2. **The Duplicate SMS Bombardment**:
+   When Twilio took 4 seconds to respond under heavy load, the naive consumer thread timed out and threw an exception. Kafka considered the message unprocessed and redelivered the same partition batch. Because there was **no distributed deduplication key**, the worker re-dispatched the SMS. One angry customer received 37 duplicate SMS alerts within 15 minutes!
+3. **The 3:00 AM Timezone Scandal**:
+   The marketing batch was triggered at 10:00 AM UTC. Customers living in Los Angeles and Seattle were woken up at 2:00 AM local time by loud push notifications promoting winter coats. The mobile app suffered an immediate 14% uninstallation rate.
+
+---
+
+## Phase 3: Under the Hood (Mechanics, Mathematical Framework & System Blueprints)
+
+To handle hundreds of millions of notifications reliably, a production engine must decouple ingestion, priority routing, deduplication, user preferences, and gateway dispatching.
+
+```mermaid
+flowchart TD
+    Upstream["Upstream Services<br/>(Auth, Checkout, Marketing)"] -->|gRPC / HTTP| IngestionAPI["Notification Ingestion Gateway<br/>(Validation & Token Allocation)"]
+    
+    IngestionAPI --> Kafka["Kafka Cluster: notification-events<br/>(Partitioned by userId)"]
+
+    subgraph RouterTier ["Notification Routing & Rules Engine"]
+        Router["Router Consumer Pods"]
+        PrefCache[("Redis Preference Cache<br/>(Opt-Outs & Quiet Hours)")]
+        DedupCache[("Redis Dedup Cache<br/>(SETNX Idempotency)")]
+        DelayZSet[("Redis ZSET Delay Queue<br/>(Score: Local Epoch Morning)")]
+        
+        Router <--> DedupCache
+        Router <--> PrefCache
+        Router -->|In Quiet Hours| DelayZSet
+    end
+    Kafka --> Router
+
+    subgraph ChannelQueues ["Channel-Dedicated Priority Queues (RabbitMQ / SQS)"]
+        Q_High_SMS["SMS: High-Priority (2FA / Fraud)"]
+        Q_Low_SMS["SMS: Low-Priority (Promos)"]
+        Q_High_Push["Push: High-Priority (Order Tracking)"]
+        Q_Low_Push["Push: Low-Priority (News / Recommendations)"]
+        Q_Email["Email: Transactional & Marketing"]
+    end
+
+    Router -->|P0: 2FA OTP| Q_High_SMS
+    Router -->|P2: Promo SMS| Q_Low_SMS
+    Router -->|P0: Urgent Push| Q_High_Push
+    Router -->|P2: Feed Push| Q_Low_Push
+    Router -->|Email| Q_Email
+
+    subgraph Workers ["Dedicated Channel Worker Pools"]
+        W_SMS["SMS Workers<br/>(Token Bucket Rate Limiter)"]
+        W_Push["Push Workers<br/>(HTTP/2 Multiplexed Netty)"]
+        W_Email["Email Workers<br/>(Batch SMTP Relay)"]
+    end
+
+    Q_High_SMS -->|Priority Dequeue| W_SMS
+    Q_Low_SMS -->|Rate-Limited Dequeue| W_SMS
+    Q_High_Push --> W_Push
+    Q_Low_Push --> W_Push
+    Q_Email --> W_Email
+
+    subgraph Gateways ["External Gateway Tier with Circuit Breakers"]
+        W_SMS --> CB_SMS{Resilience4j CB}
+        CB_SMS -->|Closed| Twilio["Primary: Twilio"]
+        CB_SMS -.->|Open / Degraded| AWS_SNS["Fallback: AWS SNS"]
+        
+        W_Push --> APNs["Apple APNs (HTTP/2)"]
+        W_Push --> FCM["Google FCM (HTTP v1)"]
+        
+        W_Email --> SES["AWS SES / SendGrid"]
+    end
 ```
 
 ---
 
-## 4. User Preferences & Quiet Hours Timezone Engine
+### 1. The Distributed Deduplication Engine (Two-Phase Redis Guard)
 
-Never send promotional marketing alerts at 3:00 AM in the user's local timezone.
+Network interruptions between the worker and external providers mean upstream services will retry. To guarantee that a recipient is never messaged twice for the same event, we implement an atomic **Two-Phase Idempotency Protocol** in Redis:
 
-### The Algorithm:
-1. If the message priority is **TRANSACTIONAL (HIGH)** (e.g., OTP or fraud alert): **Bypass quiet hours** and send immediately.
-2. If the message priority is **MARKETING (LOW)**:
-   - Fetch the user's registered timezone (e.g., `America/New_York`).
-   - Convert current UTC time to user local time using `java.time.ZonedDateTime`.
-   - Check if the local time falls between the quiet hours window (e.g., 22:00 to 08:00).
-   - If within quiet hours: Reschedule the notification message for 08:00 AM local time the next morning.
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Worker as Channel Dispatcher Worker
+    participant Redis as Redis Cache Cluster
+    participant Gateway as External Provider (Twilio / APNs)
+
+    Worker->>Redis: SET dedup:{eventId}:{channel} "PROCESSING" NX EX 86400
+    alt Key Already Exists (Lock Denied)
+        Redis-->>Worker: nil (False)
+        Note over Worker: Duplicate event detected! Safely ACK message & drop.
+    else Key Acquired (Lock Granted)
+        Redis-->>Worker: OK (True)
+        Worker->>Gateway: Dispatch Notification (HTTP/2 or SMPP)
+        alt Gateway Succeeded (200 OK)
+            Worker->>Redis: SET dedup:{eventId}:{channel} "SENT" EX 86400
+            Worker->>Worker: Commit Message Offset
+        else Gateway Transient Failure (503 / Timeout)
+            Worker->>Redis: DEL dedup:{eventId}:{channel}
+            Worker->>Worker: Route to Non-Blocking Retry Topic (.retry-1m)
+        end
+    end
+```
+
+---
+
+### 2. Quiet Hours Timezone Scheduling with Redis Sorted Sets (ZSET)
+
+Marketing messages must never disturb users during nighttime hours (default: 22:00 to 08:00 user local time).
+
+When a low-priority notification is evaluated:
+1. Read the recipient's IANA timezone (`ZoneId`, e.g., `America/Chicago`).
+2. Convert UTC to `ZonedDateTime.now(userZone)`.
+3. If current time is between 22:00 and 08:00:
+   - Compute the upcoming 08:00 AM timestamp in that local timezone.
+   - Convert that local 08:00 AM into UTC epoch milliseconds.
+   - Enqueue the message into a Redis Sorted Set (`ZSET`) where **score = target UTC epoch millisecond**:
+     ```bash
+     ZADD delayed:notifications:marketing <target_epoch_ms> <serialized_event_json>
+     ```
+4. A dedicated background poller evaluates `ZRANGEBYSCORE delayed:notifications:marketing 0 <current_utc_epoch_ms>` every 5 seconds, popping and routing matured messages to the active queues.
 
 ```java
 package com.backend.mastery.systemdesign.notification;
@@ -123,35 +238,49 @@ import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 
-public final class QuietHoursEvaluator {
+public final class QuietHoursScheduler {
 
-    private static final LocalTime QUIET_HOURS_START = LocalTime.of(22, 0); // 10:00 PM
-    private static final LocalTime QUIET_HOURS_END = LocalTime.of(8, 0);   // 08:00 AM
+    private static final LocalTime QUIET_START = LocalTime.of(22, 0); // 10:00 PM
+    private static final LocalTime QUIET_END = LocalTime.of(8, 0);    // 08:00 AM
 
-    private QuietHoursEvaluator() {}
+    private QuietHoursScheduler() {}
 
     /**
-     * Evaluates if a notification should be muted based on user local time.
+     * Determines if the current instant falls inside user quiet hours.
      */
-    public static boolean isInQuietHours(ZoneId userZoneId) {
-        ZonedDateTime userLocalTime = ZonedDateTime.now(userZoneId);
-        LocalTime time = userLocalTime.toLocalTime();
+    public static boolean isQuietHours(ZoneId userZone) {
+        ZonedDateTime now = ZonedDateTime.now(userZone);
+        LocalTime time = now.toLocalTime();
 
-        // Quiet hours cross midnight: 22:00 to 08:00
-        if (QUIET_HOURS_START.isAfter(QUIET_HOURS_END)) {
-            return time.isAfter(QUIET_HOURS_START) || time.isBefore(QUIET_HOURS_END);
-        } else {
-            return time.isAfter(QUIET_HOURS_START) && time.isBefore(QUIET_HOURS_END);
+        // 22:00 to 08:00 spans across midnight
+        if (QUIET_START.isAfter(QUIET_END)) {
+            return time.isAfter(QUIET_START) || time.isBefore(QUIET_END);
         }
+        return time.isAfter(QUIET_START) && time.isBefore(QUIET_END);
+    }
+
+    /**
+     * Calculates the exact UTC epoch millisecond for the upcoming 08:00 AM local morning.
+     */
+    public static long calculateMorningEpochMillis(ZoneId userZone) {
+        ZonedDateTime now = ZonedDateTime.now(userZone);
+        ZonedDateTime targetMorning = now.toLocalDate().atTime(QUIET_END).atZone(userZone);
+
+        // If it's already past 22:00, the upcoming 08:00 AM is tomorrow morning
+        if (now.toLocalTime().isAfter(QUIET_START) || now.isEqual(targetMorning) || now.isAfter(targetMorning)) {
+            targetMorning = targetMorning.plusDays(1);
+        }
+
+        return targetMorning.toInstant().toEpochMilli();
     }
 }
 ```
 
 ---
 
-## 5. Complete Working Code: Spring Boot 3.3 Notification Consumer
+### 3. Complete Production Worker Implementation (Spring Boot 3.3)
 
-Below is the complete production Kafka consumer implementing manual offset acknowledgment (`AckMode.MANUAL_IMMEDIATE`), atomic Redis deduplication, quiet hours evaluation, dynamic parameter template substitution, and multi-channel routing:
+Below is the production-grade Kafka consumer implementing priority routing, atomic Redis deduplication, quiet hours deferral, template interpolation, and circuit-breaker protected gateway dispatching:
 
 ```java
 package com.backend.mastery.systemdesign.notification;
@@ -168,172 +297,173 @@ import java.time.ZoneId;
 import java.util.Map;
 
 @Service
-public class NotificationConsumerWorker {
+public class ProductionNotificationRouter {
 
-    private static final Logger log = LoggerFactory.getLogger(NotificationConsumerWorker.class);
+    private static final Logger log = LoggerFactory.getLogger(ProductionNotificationRouter.class);
 
     private final StringRedisTemplate redisTemplate;
-    private final NotificationChannelDispatcher channelDispatcher;
+    private final NotificationPriorityDispatcher priorityDispatcher;
 
-    public NotificationConsumerWorker(
+    public ProductionNotificationRouter(
             StringRedisTemplate redisTemplate,
-            NotificationChannelDispatcher channelDispatcher) {
+            NotificationPriorityDispatcher priorityDispatcher) {
         this.redisTemplate = redisTemplate;
-        this.channelDispatcher = channelDispatcher;
+        this.priorityDispatcher = priorityDispatcher;
     }
 
     @KafkaListener(
             topics = "notification-events",
-            groupId = "notification-router-group",
-            concurrency = "6"
+            groupId = "notification-router-tier",
+            concurrency = "8"
     )
-    public void consumeNotificationEvent(NotificationEvent event, Acknowledgment ack) {
-        try {
-            String dedupKey = "dedup:" + event.eventId() + ":" + event.channel();
+    public void routeNotification(NotificationEvent event, Acknowledgment ack) {
+        String dedupKey = "dedup:" + event.eventId() + ":" + event.channel();
 
-            // 1. Atomic Redis Deduplication Guard (24-hour TTL)
-            Boolean isNewEvent = redisTemplate.opsForValue()
+        try {
+            // Step 1: Atomic Deduplication Guard (24-hour retention)
+            Boolean isNew = redisTemplate.opsForValue()
                     .setIfAbsent(dedupKey, "PROCESSING", Duration.ofHours(24));
 
-            if (Boolean.FALSE.equals(isNewEvent)) {
-                log.info("Duplicate notification detected for key {}. Safely dropping.", dedupKey);
+            if (Boolean.FALSE.equals(isNew)) {
+                log.warn("Duplicate detected for event {}. Dropping silently.", event.eventId());
                 ack.acknowledge();
                 return;
             }
 
-            // 2. Quiet Hours Evaluation for Non-Transactional Messages
-            if (event.priority() == NotificationPriority.MARKETING) {
+            // Step 2: Check User Opt-Out Preferences in Cache
+            String optOutKey = "user:optout:" + event.userId() + ":" + event.channel();
+            if (Boolean.TRUE.equals(redisTemplate.hasKey(optOutKey))) {
+                log.info("User {} has opted out of channel {}. Suppressing.", event.userId(), event.channel());
+                redisTemplate.opsForValue().set(dedupKey, "SUPPRESSED", Duration.ofHours(24));
+                ack.acknowledge();
+                return;
+            }
+
+            // Step 3: Quiet Hours Evaluation for Non-Urgent Marketing
+            if (event.priority() == Priority.MARKETING) {
                 ZoneId userZone = ZoneId.of(event.userTimezone());
-                if (QuietHoursEvaluator.isInQuietHours(userZone)) {
-                    log.info("User {} is currently in quiet hours. Rescheduling message.", event.userId());
-                    rescheduleForMorning(event);
+                if (QuietHoursScheduler.isQuietHours(userZone)) {
+                    long morningEpoch = QuietHoursScheduler.calculateMorningEpochMillis(userZone);
+                    log.info("Deferring marketing message {} for user {} until local morning (epoch: {})",
+                            event.eventId(), event.userId(), morningEpoch);
+
+                    // Add to Redis Delayed ZSET for next morning release
+                    redisTemplate.opsForZSet().add("delayed:notifications:marketing", event.toJson(), morningEpoch);
+                    redisTemplate.opsForValue().set(dedupKey, "DEFERRED", Duration.ofHours(24));
                     ack.acknowledge();
                     return;
                 }
             }
 
-            // 3. Render Dynamic Template
-            String renderedBody = renderTemplate(event.templateBody(), event.parameters());
+            // Step 4: Template Hydration
+            String renderedMessage = renderTemplate(event.templateBody(), event.placeholders());
 
-            // 4. Dispatch to Dedicated Channel Queue / External Provider
-            channelDispatcher.dispatch(event.channel(), event.recipient(), renderedBody);
+            // Step 5: Route to Priority-Isolated Queue
+            priorityDispatcher.dispatchToChannelQueue(
+                    event.channel(),
+                    event.priority(),
+                    event.recipient(),
+                    renderedMessage
+            );
 
-            // 5. Mark Deduplication as SENT
+            // Step 6: Mark Deduplication as SENT
             redisTemplate.opsForValue().set(dedupKey, "SENT", Duration.ofHours(24));
-
-            // 6. Manually Acknowledge Kafka Offset
             ack.acknowledge();
-            log.info("Successfully processed notification {}", event.eventId());
 
         } catch (Exception ex) {
-            log.error("Failed to process notification {}: {}", event.eventId(), ex.getMessage());
-            // Do not acknowledge offset; Kafka will redeliver or route to Dead-Letter Topic (.DLT)
-            throw new RuntimeException("Notification processing failed", ex);
+            log.error("Fatal error routing notification {}: {}", event.eventId(), ex.getMessage(), ex);
+            // Delete processing key so retry topics can process if transient
+            redisTemplate.delete(dedupKey);
+            throw new RuntimeException("Routing failed, triggering Kafka redelivery/DLT", ex);
         }
     }
 
-    private String renderTemplate(String template, Map<String, String> params) {
+    private String renderTemplate(String template, Map<String, String> variables) {
         String result = template;
-        for (Map.Entry<String, String> entry : params.entrySet()) {
+        for (Map.Entry<String, String> entry : variables.entrySet()) {
             result = result.replace("{" + entry.getKey() + "}", entry.getValue());
         }
         return result;
     }
 
-    private void rescheduleForMorning(NotificationEvent event) {
-        // Enqueue into a delay worker or scheduled Redis ZSET for 08:00 AM local time dispatch
-        log.info("Notification {} placed in morning delay queue", event.eventId());
-    }
-
     public record NotificationEvent(
             String eventId,
             Long userId,
-            String channel, // SMS, EMAIL, PUSH
-            NotificationPriority priority,
-            String recipient,
+            String channel,       // SMS, PUSH, EMAIL
+            Priority priority,    // TRANSACTIONAL, MARKETING
+            String recipient,     // Phone number, Device Token, or Email
             String templateBody,
-            Map<String, String> parameters,
-            String userTimezone
+            Map<String, String> placeholders,
+            String userTimezone,
+            String toJson
     ) {}
 
-    public enum NotificationPriority {
-        TRANSACTIONAL, // Bypasses quiet hours
-        MARKETING      // Subject to quiet hours
+    public enum Priority {
+        TRANSACTIONAL, // Bypasses quiet hours, routed to P0 queue
+        MARKETING      // Respects quiet hours, routed to P2 queue
     }
 }
 ```
 
 ---
 
-## 6. Provider Resilience & Automated Failover
+### 4. Apple APNs & Google FCM Device Token Lifecycle Loop
 
-What happens when an external provider (e.g., Twilio) suffers a cloud outage?
+One of the largest hidden operational costs in push notification architectures is transmitting payloads to unregistered device tokens. 
 
 ```mermaid
-flowchart LR
-    Worker[SMS Worker] --> CB{Resilience4j Circuit Breaker}
-    CB -->|State: Closed| Twilio["Primary: Twilio API"]
-    Twilio -->|Success (200 OK)| Done[Message Sent]
+sequenceDiagram
+    autonumber
+    participant Worker as Push Worker Pod
+    participant APNs as Apple APNs Gateway
+    participant EventQueue as Kafka (dead-token-events)
+    participant DB as PostgreSQL (user_devices)
+
+    Worker->>APNs: HTTP/2 POST /3/device/{token}
+    APNs-->>Worker: HTTP 410 Gone (Reason: Unregistered)
+    Worker->>EventQueue: Publish DeadTokenEvent(userId, token, "APNS")
+    Worker->>Worker: Discard push payload
     
-    Twilio -.->|Rate Limit 429 or 5xx Outage| Trip["Trip Circuit Breaker to OPEN"]
-    CB -->|State: Open| Fallback["Fallback: AWS SNS Gateway"]
-    Fallback --> Done
-```
-
-### Multi-Provider Circuit Breaker Configuration (`application.yml`)
-```yaml
-resilience4j.circuitbreaker:
-  instances:
-    smsProvider:
-      slidingWindowSize: 20
-      failureRateThreshold: 50.0
-      waitDurationInOpenState: 60s
-      permittedNumberOfCallsInHalfOpenState: 5
+    EventQueue->>DB: UPDATE user_devices SET is_active = FALSE WHERE device_token = :token
+    Note over DB: Token deactivated!<br/>Subsequent campaigns will not waste network cycles!
 ```
 
 ---
 
-## 7. Failure Modes & Edge Case Matrix
+## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
-| Failure Mode | Root Cause | Impact | Production Defense |
-| :--- | :--- | :--- | :--- |
-| **Head-of-Line Blocking** | Shared queue for transactional and marketing messages | 2FA OTP codes delayed by 4 hours behind newsletters | Isolate queues and worker pools by channel and priority. |
-| **Duplicate Delivery Storm** | Upstream checkout service network timeout retry | Customer receives 5 identical credit card charge SMSs | Atomic Redis `SETNX` deduplication check with 24-hour TTL. |
-| **Middle-of-the-Night Push** | Server sends flash sale promotional blast using UTC time | User receives loud marketing push at 3:00 AM | Evaluate user local timezone via `QuietHoursEvaluator` before dispatch. |
-| **Provider Cloud Outage** | Primary SMS gateway (Twilio) suffers API outage | 100% of OTP SMS deliveries fail platform-wide | Wrap provider client with Resilience4j circuit breaker with AWS SNS fallback. |
-| **Unregistered Push Tokens** | User uninstalled mobile app | Apple APNs returns `410 BadDeviceToken` | Ingest APNs delivery feedback webhooks and deactivate invalid device tokens in DB. |
+When designing a notification platform in senior/staff system design interviews, the interviewer evaluates whether you understand real-world downstream constraints:
+
+| Architectural Dilemma | Junior Developer Answer | Senior / Staff Engineer Answer |
+| :--- | :--- | :--- |
+| **Queue Design & Throttling** | *"We'll put all notifications into a single Kafka topic or SQS queue, and scale up consumer pods to process them quickly."* | *"A single shared queue creates fatal Head-of-Line blocking. A 50M marketing burst will starve 2FA login codes. We must maintain channel-isolated priority queues (P0 Transactional vs P2 Marketing) with dedicated worker pools and token-bucket rate limiters configured to match carrier TPS quotas."* |
+| **Deduplication Strategy** | *"We will write every sent message to a PostgreSQL database table with a unique constraint on `(user_id, message_id)`."* | *"Writing every send event to relational disk at 100,000 QPS causes severe write IOPS exhaustion. We use a two-phase Redis key pattern: `SET dedup:{eventId}:{channel} PROCESSING NX EX 86400`. If acquired, we dispatch and update to `SENT`. If it fails transiently, we delete the key to allow retries."* |
+| **Quiet Hours & Scheduling** | *"We will run a cron job at 8:00 AM server time that selects all marketing notifications and sends them."* | *"Server-time cron jobs ignore international timezones, causing late-night push alerts in other regions. We resolve the user's IANA `ZoneId`, compute the exact UTC epoch millisecond of their local 8:00 AM morning, and enqueue into a Redis `ZSET` where the score is the target epoch. A lightweight poller extracts matured messages via `ZRANGEBYSCORE`."* |
+| **Provider Cloud Outages** | *"If Twilio or APNs is down, we retry with exponential backoff until they come back online."* | *"Blind retries cause retry storms and thread exhaustion during upstream outages. We front external providers with Resilience4j circuit breakers. When the failure rate passes 50%, the breaker trips to `OPEN`, immediately redirecting traffic to a secondary provider (e.g., Twilio $\rightarrow$ AWS SNS) while emitting alert metrics."* |
+| **Dead Mobile Push Tokens** | *"If the mobile app is deleted, the push will just fail and we ignore the error."* | *"Continuing to ping deleted apps wastes egress bandwidth and triggers carrier/Apple spam throttling. We listen to APNs `410 Unregistered` and FCM `UNREGISTERED` status codes, publishing dead token events to a clean-up pipeline that deactivates device records in PostgreSQL."* |
 
 ---
 
-## 8. Senior Interview Questions & Active Recall
+## Active Recall & Interview Mastery
 
 <AccordionGroup>
-  <Accordion title="1. Why is queue and worker isolation mandatory between transactional and marketing notifications?">
-    Marketing campaigns generate sudden bursts of tens of millions of non-urgent messages (e.g., weekly flash sales). Transactional messages (2FA login codes, password resets, fraud alerts) require sub-2-second delivery. If both types share the same queue, the massive marketing burst fills the buffer, causing Head-of-Line blocking where time-sensitive OTPs are stuck behind millions of marketing messages, breaking user authentication platform-wide.
+  <Accordion title="1. Why does combining marketing campaigns and 2FA OTPs in the same queue cause system failure?">
+    Marketing campaigns generate sudden, massive volume spikes (tens of millions of messages) with relaxed SLAs (hours), while 2FA authentication alerts require sub-3-second delivery. If both enter a single FIFO queue, the marketing batch causes severe **Head-of-Line (HoL) Blocking**. The 2FA messages sit at the tail of a 50-million-message queue, causing login timeouts and breaking user authentication platform-wide.
   </Accordion>
 
-  <Accordion title="2. How do you prevent duplicate notifications from being delivered when an upstream service retries an event?">
-    Upstream producers must include an immutable `idempotency_key` (or `event_id`) with every notification payload. When a notification worker dequeues the message, it executes an atomic Redis `SET dedup:{key}:{channel} "PROCESSING" NX EX 86400` command. If the key already exists (returns null), the worker immediately acknowledges and discards the message as a duplicate, preventing the user from receiving duplicate SMS or email alerts.
+  <Accordion title="2. How does the two-phase Redis deduplication pattern prevent duplicate notifications?">
+    The consumer executes an atomic Redis command: `SET dedup:{eventId}:{channel} "PROCESSING" NX EX 86400`. If the key already exists, Redis returns `nil`, proving another worker is already processing or has completed the notification, allowing the consumer to immediately ACK and drop the duplicate. Once the external gateway returns HTTP 200 OK, the status is updated to `"SENT"`. If the gateway encounters a transient network glitch, the key is deleted to permit downstream retry topic execution.
   </Accordion>
 
-  <Accordion title="3. How do you handle quiet hours when marketing notifications cross multiple international timezones?">
-    Do not schedule batch marketing blasts using server UTC time. Instead, store the user's IANA timezone (`ZoneId`, e.g., `Europe/London`, `Asia/Tokyo`) in their profile. Before dispatching a non-transactional marketing message, compute the user's current local time via `ZonedDateTime.now(userZone)`. If the local time falls within the quiet hours window (e.g., 22:00 to 08:00), divert the notification to a delayed queue scheduled for dispatch at 08:00 AM local time the following morning.
+  <Accordion title="3. How do you implement quiet hours scheduling without database cron scans?">
+    Relational cron scans (`SELECT * FROM notifications WHERE send_at <= NOW()`) lock database tables and scale poorly. Instead, calculate the UTC epoch millisecond of the user's local 8:00 AM morning using `java.time.ZonedDateTime` with the user's registered IANA `ZoneId`. Store the message in a Redis Sorted Set (`ZSET`) using the target epoch millisecond as the score. A poller executes `ZRANGEBYSCORE delayed:marketing 0 <now_epoch>` every few seconds to dequeue matured items in $O(\log N + M)$ time.
   </Accordion>
 
-  <Accordion title="4. How do you handle third-party gateway rate limits and sudden provider outages?">
-    Rate-limit outbound worker pools to match downstream provider quotas (e.g., 1 SMS/sec per US 10DLC number). Wrap external provider API calls in a **Resilience4j Circuit Breaker**. If the primary provider (e.g., Twilio) returns consecutive 5xx errors or network timeouts, the circuit breaker trips to `OPEN`, immediately diverting outbound traffic to a secondary fallback provider (e.g., AWS SNS) without dropping in-flight messages.
+  <Accordion title="4. What happens when an external SMS provider enforces a 1 TPS limit on long-code phone numbers?">
+    Standard US 10-Digit Long Code (10DLC) numbers are strictly limited by cellular carriers to 1 message per second. If a worker blindly fires 500 requests/sec, the provider will return HTTP 429 Too Many Requests, and carriers may flag the number for spam. High-throughput SMS requires provisioning a pool of long codes or purchasing a high-volume Short Code (100-500 TPS), coordinated by a distributed Token Bucket rate limiter (e.g., Redis Bucket4j).
+  </Accordion>
+
+  <Accordion title="5. How do you handle dead device tokens from Apple APNs and Google FCM?">
+    When a user uninstalls a mobile application, Apple APNs returns HTTP `410 BadDeviceToken` / `Unregistered`, and Google FCM returns an `UNREGISTERED` error payload. The push worker catches these responses and publishes a `DeadTokenEvent` to an asynchronous cleanup topic. An internal consumer updates the database to mark `user_devices.is_active = false`, preventing future campaigns from wasting compute and risking Apple developer throttling.
   </Accordion>
 </AccordionGroup>
-
----
-
-## 9. Done Checklist
-
-<Check>
-- [ ] Diagram an end-to-end notification architecture separating transactional OTPs from marketing blasts.
-- [ ] Explain why channel-dedicated priority queues eliminate Head-of-Line blocking.
-- [ ] Implement atomic message deduplication in Redis using `SETNX` with a 24-hour TTL.
-- [ ] Calculate user quiet hours using `java.time.ZoneId` and `ZonedDateTime` to mute non-urgent marketing alerts.
-- [ ] Build a Spring Boot 3.3 Kafka notification consumer with manual offset acknowledgment (`AckMode.MANUAL_IMMEDIATE`).
-- [ ] Architect multi-provider failover with Resilience4j circuit breakers (Twilio $\rightarrow$ AWS SNS).
-</Check>
