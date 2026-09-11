@@ -742,6 +742,9 @@ All phases of the comprehensive documentation overhaul and book-replacement dept
     - **Automated GitHub Pages CI/CD Pipeline** (`.github/workflows/deploy-pages.yml`):
       - Workflow automates `npm install`, `npm run check` (test:audit, audit, validate, links), `npm run export`, subpath prefixing via `scripts/prepare-github-pages.mjs`, and `actions/deploy-pages@v4` on every push to `main`.
       - **Subpath Asset Resolution & Jekyll Bypass**: Generates `.nojekyll` to prevent GitHub from ignoring `_next/` directories, prefixes all relative asset URLs and navigation routes with `/${repo}`, and configures Mintlify's client router with `var b="/${repo}"`.
+    - **Vercel Cloud Hosting Integration** (`vercel.json`):
+      - Configured zero-config Vercel build manifest (`buildCommand: "npm run export && unzip -q -o docs/export.zip -d ./out"`, `outputDirectory: "out"`).
+      - Operates natively at the root domain (`https://<project>.vercel.app`) without any GitHub Pages repository subpath rewriting or Jekyll interference.
     - **Alternative 10-Second Drag-and-Drop Hosting**:
       - Standalone `./out` directory is fully prepared for instant upload to Netlify Drop (`app.netlify.com/drop`) or Cloudflare Pages.
 
