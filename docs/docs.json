@@ -18,11 +18,12 @@
   "navigation": {
     "tabs": [
       {
-        "tab": "Learn",
+        "tab": "Getting Started",
+        "icon": "rocket",
         "groups": [
           {
-            "group": "Start Here",
-            "icon": "rocket",
+            "group": "Platform & Orientation",
+            "icon": "compass",
             "pages": [
               "index",
               "getting-started/how-to-use",
@@ -44,131 +45,300 @@
               "backend-basics/client-server",
               "backend-basics/http-json-api"
             ]
-          },
+          }
+        ]
+      },
+      {
+        "tab": "Java Foundation",
+        "icon": "coffee",
+        "groups": [
           {
-            "group": "Level 1: Java Foundation",
-            "icon": "coffee",
+            "group": "Core Java & OOP",
+            "icon": "code",
             "pages": [
               "java/java-core",
-              "java/oop",
+              "java/oop"
+            ]
+          },
+          {
+            "group": "Collections & Streams",
+            "icon": "boxes-stacked",
+            "pages": [
               "java/collections-exceptions",
-              "java/generics-streams",
+              "java/generics-streams"
+            ]
+          },
+          {
+            "group": "Concurrency & JVM Internals",
+            "icon": "cpu",
+            "pages": [
               "java/concurrency-jvm",
               "java/java-backend-mastery",
               "java/jvm-performance-tuning",
               "java/reactive-vs-virtual-threads"
             ]
-          },
+          }
+        ]
+      },
+      {
+        "tab": "Database Engineering",
+        "icon": "database",
+        "groups": [
           {
-            "group": "Level 2: Database",
-            "icon": "database",
+            "group": "Relational Modeling & SQL",
+            "icon": "table",
             "pages": [
               "database/sql-basics",
-              "database/relationships-joins",
+              "database/relationships-joins"
+            ]
+          },
+          {
+            "group": "Indexes, Transactions & Locking",
+            "icon": "lock",
+            "pages": [
               "database/indexes-transactions",
               "database/query-design-migrations",
-              "database/locking-isolation",
+              "database/locking-isolation"
+            ]
+          },
+          {
+            "group": "PostgreSQL Performance & Migrations",
+            "icon": "gauge-high",
+            "pages": [
               "database/database-performance-mastery",
-              "database/schema-change-mastery",
+              "database/schema-change-mastery"
+            ]
+          },
+          {
+            "group": "Distributed Data & Search",
+            "icon": "network-wired",
+            "pages": [
               "database/sharding-partitioning",
               "database/search-indexing-cdc"
-            ]
-          },
-          {
-            "group": "Level 3: Spring Boot",
-            "icon": "leaf",
-            "pages": [
-              "spring-boot/project-structure",
-              "spring-boot/dependency-injection",
-              "spring-boot/config-profiles",
-              "spring-boot/rest-api",
-              "spring-boot/validation-errors",
-              "spring-boot/jpa-hibernate",
-              "spring-boot/transactions",
-              "spring-boot/spring-security-deep",
-              "spring-boot/spring-security-production"
-            ]
-          },
-          {
-            "group": "Level 4: Production Backend",
-            "icon": "shield-check",
-            "pages": [
-              "production/security-jwt",
-              "production/testing",
-              "production/testcontainers",
-              "production/logging-monitoring",
-              "production/observability",
-              "production/caching",
-              "production/deployment-ci-cd",
-              "production/incident-response",
-              "production/oauth2-zerotrust-mesh"
-            ]
-          },
-          {
-            "group": "Level 5: Advanced Backend",
-            "icon": "network",
-            "pages": [
-              "advanced/message-queues",
-              "advanced/microservices",
-              "advanced/microservices-from-monolith",
-              "advanced/resilience-patterns",
-              "advanced/docker-kubernetes",
-              "advanced/distributed-batch-scheduling",
-              "advanced/realtime-websockets"
-            ]
-          },
-          {
-            "group": "Level 6: System Design",
-            "icon": "blocks",
-            "pages": [
-              "system-design/fundamentals",
-              "system-design/capacity-estimation",
-              "system-design/rate-limiter",
-              "system-design/url-shortener",
-              "system-design/notification-system",
-              "system-design/consistency-failures",
-              "system-design/financial-ledger",
-              "system-design/distributed-locks-consensus",
-              "system-design/distributed-id-generation",
-              "system-design/multi-region-disaster-recovery",
-              "system-design/webhook-engine-workflows",
-              "system-design/search-autocomplete",
-              "system-design/distributed-kv-store"
             ]
           }
         ]
       },
       {
-        "tab": "Practice",
+        "tab": "Spring Boot",
+        "icon": "leaf",
         "groups": [
           {
-            "group": "Projects",
-            "icon": "folder-code",
+            "group": "Architecture & Core IoC",
+            "icon": "cubes",
+            "pages": [
+              "spring-boot/project-structure",
+              "spring-boot/dependency-injection",
+              "spring-boot/config-profiles"
+            ]
+          },
+          {
+            "group": "Web APIs & Validation",
+            "icon": "globe",
+            "pages": [
+              "spring-boot/rest-api",
+              "spring-boot/validation-errors"
+            ]
+          },
+          {
+            "group": "Data JPA & Transactions",
+            "icon": "database",
+            "pages": [
+              "spring-boot/jpa-hibernate",
+              "spring-boot/transactions"
+            ]
+          },
+          {
+            "group": "Spring Security",
+            "icon": "shield-check",
+            "pages": [
+              "spring-boot/spring-security-deep",
+              "spring-boot/spring-security-production"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Production & DevOps",
+        "icon": "shield-halved",
+        "groups": [
+          {
+            "group": "Security & Identity",
+            "icon": "key",
+            "pages": [
+              "production/security-jwt",
+              "production/oauth2-zerotrust-mesh"
+            ]
+          },
+          {
+            "group": "Testing & Verification",
+            "icon": "vial",
+            "pages": [
+              "production/testing",
+              "production/testcontainers"
+            ]
+          },
+          {
+            "group": "Observability & Logging",
+            "icon": "chart-line",
+            "pages": [
+              "production/logging-monitoring",
+              "production/observability"
+            ]
+          },
+          {
+            "group": "Caching, SRE & CI/CD",
+            "icon": "bolt",
+            "pages": [
+              "production/caching",
+              "production/deployment-ci-cd",
+              "production/incident-response"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Advanced Backend",
+        "icon": "network-wired",
+        "groups": [
+          {
+            "group": "Event Streaming & Queues",
+            "icon": "envelope-open-text",
+            "pages": [
+              "advanced/message-queues"
+            ]
+          },
+          {
+            "group": "Microservices Architecture",
+            "icon": "sitemap",
+            "pages": [
+              "advanced/microservices",
+              "advanced/microservices-from-monolith"
+            ]
+          },
+          {
+            "group": "Resilience & Containers",
+            "icon": "shield-heart",
+            "pages": [
+              "advanced/resilience-patterns",
+              "advanced/docker-kubernetes"
+            ]
+          },
+          {
+            "group": "Distributed Processing & Realtime",
+            "icon": "clock",
+            "pages": [
+              "advanced/distributed-batch-scheduling",
+              "advanced/realtime-websockets"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "System Design",
+        "icon": "shapes",
+        "groups": [
+          {
+            "group": "Fundamentals & Capacity",
+            "icon": "calculator",
+            "pages": [
+              "system-design/fundamentals",
+              "system-design/capacity-estimation"
+            ]
+          },
+          {
+            "group": "Core System Architectures",
+            "icon": "diagram-project",
+            "pages": [
+              "system-design/rate-limiter",
+              "system-design/url-shortener",
+              "system-design/notification-system",
+              "system-design/distributed-kv-store"
+            ]
+          },
+          {
+            "group": "Distributed Consensus & Ledgers",
+            "icon": "scale-balanced",
+            "pages": [
+              "system-design/consistency-failures",
+              "system-design/financial-ledger",
+              "system-design/distributed-locks-consensus",
+              "system-design/distributed-id-generation"
+            ]
+          },
+          {
+            "group": "High Scale & Workflows",
+            "icon": "cloud",
+            "pages": [
+              "system-design/multi-region-disaster-recovery",
+              "system-design/webhook-engine-workflows",
+              "system-design/search-autocomplete"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Projects & Labs",
+        "icon": "folder-code",
+        "groups": [
+          {
+            "group": "Core REST API Projects",
+            "icon": "code",
             "pages": [
               "projects/todo-api",
               "projects/todo-api-full-build",
               "projects/blog-api-full-build",
               "projects/notes-api",
-              "projects/notes-api-full-build",
+              "projects/notes-api-full-build"
+            ]
+          },
+          {
+            "group": "Distributed Systems Projects",
+            "icon": "server",
+            "pages": [
               "projects/url-shortener-full-build",
               "projects/rate-limiter-full-build",
-              "projects/notification-worker-full-build",
+              "projects/notification-worker-full-build"
+            ]
+          },
+          {
+            "group": "Production Capstones & Labs",
+            "icon": "flask-conical",
+            "pages": [
               "projects/incident-debugging-lab",
               "projects/deployment-lab",
               "projects/ecommerce-backend",
               "projects/ecommerce-full-build"
             ]
-          },
+          }
+        ]
+      },
+      {
+        "tab": "Interview Preparation",
+        "icon": "messages-square",
+        "groups": [
           {
-            "group": "Interview",
-            "icon": "messages-square",
+            "group": "Technical Questions",
+            "icon": "circle-question",
             "pages": [
               "interview/backend-questions",
-              "interview/backend-answers",
               "interview/spring-questions",
+              "interview/system-design-questions"
+            ]
+          },
+          {
+            "group": "Model Answers & Deep Dives",
+            "icon": "circle-check",
+            "pages": [
+              "interview/backend-answers",
               "interview/spring-answers",
-              "interview/system-design-questions",
-              "interview/system-design-answers",
+              "interview/system-design-answers"
+            ]
+          },
+          {
+            "group": "Senior Engineering Playbook",
+            "icon": "trophy",
+            "pages": [
               "interview/senior-interview-playbook"
             ]
           }

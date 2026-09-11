@@ -56,11 +56,15 @@ npx vercel --prod
 ---
 
 ## Content Standards & Editorial Rules
-- **Simple English Rule**:
-  - Keep sentences short and direct.
-  - Explain technical terms immediately upon introduction.
-  - Show real backend code examples before deep theory.
-- **Book Replacement Standard**:
+- **The "Zero Assumptions, Infinite Depth" Rule (`docs/getting-started/simple-english-rule.mdx`)**:
+  - **Zero Assumptions**: Assume the learner is a beginner Java developer with basic syntax knowledge, but zero production experience. Never assume prior familiarity with architectural jargon.
+  - **Infinite Depth**: Do not dumb down the engineering. Build from physical hardware (CPU caches, RAM pointers, disk blocks, TCP sockets) up to senior/staff-level trade-offs and failure modes.
+  - **The 4-Phase Escalation Formula (Mandatory for all deep chapters)**:
+    1. *Ground Floor (Physical First Principles)*: Ground the concept in physical hardware and explain why the problem was invented.
+    2. *Naive Code (The Production Crash)*: Show what a beginner instinctively writes and how it crashes in production (OOM, race conditions, pool exhaustion).
+    3. *Under the Hood (Mechanics & Bytecode)*: Demystify the magic (CGLIB proxies, WAL sequential disk writes, B-Tree splits).
+    4. *Senior Ace (Staff Interview Phrasing)*: Provide explicit comparisons between a shallow "Junior Answer" and an articulate "Senior/Staff Answer".
+- **Book Replacement Standard (`docs/getting-started/book-standard.mdx`)**:
   - Every major topic should include: Mental Model, Real Backend Use Case, Working Code Shape, Request/Response Examples, Database Model, Failure Cases, Common Mistakes, Debug Checklist, Tests, Production Notes, Interview Answers, Practice Tasks, and Done Checklist.
 - **Mintlify Component Standards**:
   - Use native Mintlify components: `<Card>`, `<CardGroup>`, `<Tabs>`, `<Tab>`, `<Steps>`, `<Step>`, `<CodeGroup>`, `<Accordion>`, `<AccordionGroup>`, `<Tip>`, `<Warning>`, `<Note>`, `<Info>`, `<Check>`.
@@ -773,15 +777,61 @@ All phases of the comprehensive documentation overhaul and book-replacement dept
     - **Alternative 10-Second Drag-and-Drop Hosting**:
       - Standalone `./out` directory is fully prepared for instant upload to Netlify Drop (`app.netlify.com/drop`) or Cloudflare Pages.
 
+14. **Major Topics Navigation Architecture & Depth Expansion Analysis (September 2026)**:
+    - **Navigation Architecture Re-Engineering (`docs/docs.json`)**:
+      - **Problem Solved**: The top/sidebar tab select button previously contained only 2 generic tabs (`Learn` and `Practice`), forcing 8 massive levels (88 pages) into an overwhelming, endless sidebar scroll under `Learn`, while the select dropdown was barren and underutilized.
+      - **9 Major Domain Tabs**: Re-architected `navigation.tabs` into 9 focused major engineering domains directly selectable from the main select button:
+        1. 🚀 **Getting Started**: Platform Orientation & Level 0: Backend Basics (13 pages).
+        2. ☕ **Java Foundation**: Core Java & OOP, Collections & Streams, Concurrency & JVM Internals (8 pages).
+        3. 🗄️ **Database Engineering**: Relational Modeling & SQL, Indexes & Transactions & Locking, PostgreSQL Performance & Migrations, Distributed Data & Search (9 pages).
+        4. 🍃 **Spring Boot**: Architecture & Core IoC, Web APIs & Validation, Data JPA & Transactions, Spring Security (9 pages).
+        5. 🛡️ **Production & DevOps**: Security & Identity, Testing & Verification, Observability & Logging, Caching & SRE & CI/CD (9 pages).
+        6. 🌐 **Advanced Backend**: Event Streaming & Queues, Microservices Architecture, Resilience & Containers, Distributed Processing & Realtime (7 pages).
+        7. 🏗️ **System Design**: Fundamentals & Capacity, Core System Architectures, Distributed Consensus & Ledgers, High Scale & Workflows (13 pages).
+        8. 💻 **Projects & Labs**: Core REST API Projects, Distributed Systems Projects, Production Capstones & Labs (12 pages).
+        9. 🎯 **Interview Preparation**: Technical Questions, Model Answers & Deep Dives, Senior Engineering Playbook (7 pages).
+      - **Under-Topic Sidebar Menus**: Each major topic chosen in the select button renders only its relevant, cleanly scoped groups in the sidebar navigation, providing clean mental hierarchy and instant discoverability.
+      - **Integrity Validation**: Preserved 100% of the 87 MDX pages with 0 missing, 0 extra, 0 duplicates, and 0 broken links.
+    - **Curriculum Depth Expansion Blueprint**:
+      - Conducted a comprehensive audit of all curriculum topics to identify high-impact areas for deeper textbook-replacement expansion:
+        1. *Java & JVM*: Low-latency data structures & mechanical sympathy (False sharing, `@Contended`, `VarHandle`, LMAX Disruptor), production memory leak forensics (JFR, async-profiler, Eclipse MAT heap dump parsing), and Java 21+ data-oriented programming (sealed hierarchies, pattern matching, record patterns).
+        2. *Database Internals*: PostgreSQL Write-Ahead Logging (WAL) & crash recovery (LSN sequencing, checkpoint flushes, replication slots), PgBouncer connection pooling modes (Session vs Transaction pooling pitfalls), and NewSQL distributed consensus (CockroachDB / YugabyteDB Raft replication across tablets, Hybrid Logical Clocks).
+        3. *Spring Boot Framework*: GraalVM Native Image & AOT compilation (Reachability metadata, reflection registration, 30ms cold starts vs JIT trade-offs), Spring Cloud Gateway edge patterns (reactive filters, token relay, global rate limiting), transaction-bound domain events (`@TransactionalEventListener(phase = AFTER_COMMIT)`), and Spring Data JDBC / jOOQ for bypass of ORM overhead.
+        4. *Production & SRE*: Distributed Tracing & OpenTelemetry deep dive (W3C traceparent headers, context propagation across HTTP/gRPC/Kafka, tail-based sampling), Zero-Trust service mesh (Istio/Envoy sidecars, SPIFFE/SPIRE identities, automated mTLS rotation), and automated chaos engineering with Toxiproxy/Chaos Mesh.
+        5. *Advanced Microservices*: Kafka Exactly-Once Semantics (EOS) with transactional producers and `read_committed` consumers, gRPC & Protobuf in Spring Boot 3, and Raft distributed consensus protocol mechanics.
+        6. *System Design*: Multi-Region Active-Active disaster recovery expansion (CRDTs, DynamoDB Global Tables, Aurora Global, Anycast GeoDNS routing), High-Scale Distributed Object / Blob Storage (S3 Reed-Solomon erasure coding, chunk metadata stores), Real-Time Ride Sharing / Dispatch (Uber H3 hexagonal spatial indexing, driver location streams), and Idempotent Payment Gateway with batch reconciliation.
+
+15. **Zero Assumptions, Infinite Depth Core Curriculum Overhaul (September 2026)**:
+    - **Paradigm Shift for Beginner-to-Staff Escalation**:
+      - Eliminated the "Senior-to-Senior" shorthand and curse of knowledge across core chapters.
+      - Fully restructured primary foundational chapters to strictly enforce the **4-Phase Escalation Formula**:
+        1. *Phase 1: Ground Floor (Physical First Principles)*: Grounded in hardware, CPU registers, RAM pointers, 8KB disk pages, and TCP network sockets with zero assumed prior production experience.
+        2. *Phase 2: The Naive Code (The Production Crash)*: Code beginners instinctively write, deconstructing the exact failure sequence under traffic (OOM, connection pool starvation, dirty checking memory bloat, lost updates, race conditions).
+        3. *Phase 3: Under the Hood (Mechanics & Bytecode)*: Demystifying magic with CGLIB proxy subclasses, `SessionImpl` snapshot arrays, MVCC `xmin`/`xmax` headers, continuation unmounting on carrier threads, AQS lock queues, atomic Lua scripts, and BGP route withdrawals.
+        4. *Phase 4: Senior Interview Ace (Junior vs. Staff Phrasing)*: Side-by-side contrast of shallow Junior answers vs. articulate, trade-off-aware Senior/Staff answers that stun technical interviewers.
+    - **Chapters Overhauled to 4-Phase Standard (12 Master Chapters)**:
+      - **Batch 1 Foundations**:
+        - `docs/spring-boot/jpa-hibernate.mdx`: Object-Relational Impedance Mismatch, N+1 query waterfall crash, vanishing entity HashSet bug, `SessionImpl` dirty checking snapshots, dynamic ByteBuddy entity proxies, and 4 production N+1 solutions.
+        - `docs/spring-boot/transactions.mdx`: Alice to Bob bank transfer, Write-Ahead Log (WAL) physical crash recovery, catch-and-swallow trap, checked exception commit trap, nested `REQUIRES_NEW` pool deadlock, and CGLIB `this` pointer bypass.
+        - `docs/spring-boot/dependency-injection.mdx`: RAM object allocation, construction gridlock, mutable singleton data breach (race condition data leaks across Tomcat threads), field injection trap, 12-step lifecycle, 3-level cache, and dynamic Strategy maps.
+        - `docs/database/database-performance-mastery.mdx`: TCP socket cost (5MB RAM fork per connection), 8KB disk page layout, Shared Buffer Pool cache hit math, `EXPLAIN (ANALYZE, BUFFERS)` deconstruction, covering indexes (`INCLUDE`), and keyset pagination ($O(\log N + k)$ seeks).
+        - `docs/database/locking-isolation.mdx`: The last concert ticket problem, read-then-update lost updates, `synchronized` method failures across Kubernetes pods, MVCC tuple header anatomy, atomic SQL updates, `@Version` optimistic locking, `FOR UPDATE SKIP LOCKED`, and Canonical Ordering deadlock elimination.
+        - `docs/java/concurrency-jvm.mdx`: Platform thread cost (1MB stack memory), hardware latency hierarchy (registers vs L1/L2/L3 vs RAM), `volatile` compound atomicity failure, ThreadLocal memory leaks in pooled workers, Java 21 Virtual Threads continuation unmount/remount on carrier threads, carrier pinning trap defense, and Generational ZGC.
+      - **Batch 2 Advanced Web, Systems & Microservices**:
+        - `docs/spring-boot/rest-api.mdx`: Physical TCP socket reception, Tomcat NIO engine (Acceptor + Poller + Worker threads), `DispatcherServlet.doDispatch()` internal pipeline, unbounded collection OOM crashes, Jackson infinite recursion loops, unpooled RestTemplate thread starvation, and `Slice<T>` vs `Page<T>` zero-count pagination.
+        - `docs/spring-boot/spring-security-deep.mdx`: Untrusted network packets, Tomcat servlet container boundary vs Spring IoC, `DelegatingFilterProxy` bridge, `FilterChainProxy`, `SecurityContextHolder` ThreadLocal identity bleed across pooled Tomcat workers, BOLA/IDOR attacks and SpEL `@PreAuthorize` defenses, and BCrypt CPU lockup.
+        - `docs/system-design/multi-region-disaster-recovery.mdx`: Speed-of-light physical limit in silica glass ($204,000\text{ km/s}$), trans-Atlantic 85-110ms RTT math, 2PC cross-ocean connection pool collapse, Anycast BGP edge routing vs the DNS TTL caching blackhole, PostgreSQL WAL streaming lag, complete runnable Java CRDT implementations (PN-Counter and OR-Set), and Partitioned Active-Active home-region routing.
+        - `docs/system-design/rate-limiter.mdx`: Hardware NIC ring buffers, interrupt storms (`ksoftirqd`), TCP listen backlog drops (`somaxconn`), Layer 4 firewall limitations vs Layer 7 application limits, in-memory horizontal scaling leaks, Redis check-then-act race conditions, atomic Lua scripts, and L1 Caffeine / L2 Redis multi-tier caching with batch token leasing.
+        - `docs/advanced/message-queues.mdx`: Synchronous HTTP coupling costs, disk physics (mechanical seek vs sequential append, NVMe DMA throughput), the Dual-Write state corruption disaster, `enable.auto.commit` silent data loss, consumer `Thread.sleep` rebalance storms, zero-copy `sendfile()`, non-blocking multi-tier retry topics, and idempotent consumer deduplication.
+        - `docs/advanced/microservices.mdx`: In-memory method call ($\sim 2\text{ ns}$) vs network RPC ($\sim 5\text{ ms}$, $1,000,000\times$ slower gap), the 8 Fallacies of Distributed Computing, the Synchronous Distributed Monolith availability collapse ($0.995^5 \approx 97.5\%$), 2PC blocking row locks, Saga Choreography vs Orchestration, Transactional Outbox pattern with Debezium CDC, and gRPC over HTTP/2 with strict deadlines.
+
 ---
 
 ## Final Verification Summary
 - `npm run check` (`npm run test:audit` + `npm run audit` + `npm run validate` + `npm run links`):
   - **Audit Tests**: 4/4 passing (nested navigation, duplicate route detection, metadata validation, code fence labeling).
-  - **Content Inventory**: 87 pages, 33,067 lines, 942 code blocks, **0 structure errors**, **0 generic text fences**.
-  - **Mintlify Validate**: Build validation passed cleanly.
+  - **Content Inventory**: 87 pages, 34,157 lines, 987 code blocks, **0 structure errors**, **0 generic text fences**.
+  - **Mintlify Validate**: Build validation passed cleanly (`navigation.tabs` with 9 major topics).
   - **Mintlify Broken Links**: `success no broken links found` (100% link and anchor integrity across all 87 MDX documents).
-- `npm run test:examples` (`npm run test:java` + `npm run test:todo`):
-  - **Java Foundations**: 12/12 automated assertion checks passing with zero external dependencies.
-  - **Todo API**: 12/12 Spring Boot 3.5 + Spring Data JPA + Flyway integration tests passing on Java 21 with zero Mockito dynamic agent loading warnings.
-
+- `npm run build` (`node scripts/build-vercel.mjs`):
+  - Static distribution bundle fully compiled, extracted into `./out`, and verified for Vercel deployment.
