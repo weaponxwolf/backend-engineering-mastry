@@ -412,6 +412,127 @@ No origin backend cluster should ever attempt to serve 512 Gbps of static media.
 
 ---
 
+## Capacity Estimation Fundamentals Drill
+
+Capacity estimation is not a memorization game. It is the discipline of turning vague product traffic into physical pressure on CPU, memory, disk, network, queues, caches, and database connections.
+
+```mermaid
+flowchart LR
+    Product[Product requirement] --> Users[Active users]
+    Users --> QPS[Average and peak QPS]
+    QPS --> CPU[Application CPU]
+    QPS --> DB[Database QPS]
+    QPS --> Cache[Cache QPS]
+    QPS --> Queue[Queue throughput]
+    Product --> Data[Data created per action]
+    Data --> Storage[Raw storage]
+    Storage --> Replication[Replication and index multiplier]
+    QPS --> Latency[Latency target]
+    Latency --> Concurrency[Little's Law: in-flight work]
+```
+
+### The 8 Questions You Must Always Ask
+
+| Question | Why it matters | Backend pressure created |
+| --- | --- | --- |
+| How many users? | Establishes the traffic base. | Request volume |
+| What percentage are active daily? | Monthly users do not all arrive at once. | Daily active load |
+| How many actions per active user? | Converts humans into operations. | QPS |
+| What is the peak multiplier? | Production dies during peaks, not averages. | Peak QPS |
+| What is the read/write ratio? | Reads and writes scale differently. | Cache and DB design |
+| How much data per write? | Storage grows from bytes, not feature names. | Disk, WAL, backup size |
+| What latency is promised? | Lower latency means less queueing room. | Threads, connections, replicas |
+| What must survive failure? | Redundancy multiplies resources. | Replication, regions, cost |
+
+### Worked Mini Example: Photo Likes
+
+Assume:
+
+- 20 million monthly active users.
+- 25% daily active users.
+- Each daily user performs 40 read actions and 4 write actions.
+- Peak traffic is 5x average.
+- Each write creates 200 bytes of logical data before indexes and replication.
+
+Step by step:
+
+```markdown
+DAU = 20,000,000 * 0.25 = 5,000,000 users/day
+Read actions/day = 5,000,000 * 40 = 200,000,000 reads/day
+Write actions/day = 5,000,000 * 4 = 20,000,000 writes/day
+
+Average read QPS = 200,000,000 / 86,400 = 2,315 reads/sec
+Average write QPS = 20,000,000 / 86,400 = 231 writes/sec
+
+Peak read QPS = 2,315 * 5 = 11,575 reads/sec
+Peak write QPS = 231 * 5 = 1,155 writes/sec
+```
+
+Storage:
+
+```markdown
+Logical write data/day = 20,000,000 * 200 bytes = 4 GB/day
+With 3x replication = 12 GB/day
+With 2x index overhead = 24 GB/day
+One year = 24 GB * 365 = 8.76 TB/year
+```
+
+Concurrency with Little's Law:
+
+```markdown
+If peak read QPS = 11,575
+and p95 service time = 80 ms = 0.08 seconds
+in-flight read work = 11,575 * 0.08 = 926 concurrent requests
+```
+
+That number is why thread pools, connection pools, queue depth, and backpressure matter. If each request holds a database connection for the full 80 ms, the database is now expected to support nearly 1,000 concurrent connections, which is usually wrong. A senior answer immediately asks how much of that work can be served from cache, precomputed views, CDN edges, or asynchronous queues.
+
+### What A Shallow Answer Misses
+
+| Shallow answer | Deeper answer |
+| --- | --- |
+| "We need 10 servers." | "We need to compute peak QPS, CPU per request, memory working set, database QPS, and failure headroom before choosing server count." |
+| "Use cache." | "Cache helps read QPS only if the access pattern has locality and invalidation is acceptable." |
+| "Use Kafka for writes." | "A queue smooths bursts, but it adds lag. The user-facing write path must decide whether async durability is acceptable." |
+| "Use more database replicas." | "Replicas scale reads, not single-primary write throughput. Replica lag also changes consistency behavior." |
+
+### Interview Answer Template
+
+Use this shape when you are asked to estimate any backend system:
+
+1. Clarify product scale and traffic assumptions.
+2. Convert users into average QPS.
+3. Apply peak multiplier.
+4. Split reads, writes, and background jobs.
+5. Estimate storage with replication, indexes, backups, and retention.
+6. Use Little's Law to estimate concurrency.
+7. Identify the first bottleneck.
+8. Propose architecture changes only after the numbers justify them.
+
+### Build-Break-Fix Drill
+
+Build:
+
+```markdown
+Create a spreadsheet or small script for one feature:
+users -> DAU -> actions/day -> QPS -> peak QPS -> storage/day -> 1 year storage
+```
+
+Break:
+
+```markdown
+Change peak multiplier from 3x to 20x.
+Change read p95 latency from 50 ms to 500 ms.
+Change retention from 30 days to 7 years.
+```
+
+Fix:
+
+```markdown
+Explain which part fails first:
+application thread pool, database connections, WAL volume, disk capacity, network egress, or queue lag.
+```
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 When capacity estimation questions arise in system design interviews, interviewers listen for specific engineering maturity signals:

@@ -422,6 +422,86 @@ flowchart TD
 
 ---
 
+## Partitioning & Sharding Fundamentals Interview Map
+
+Partitioning and sharding both split data. The difference is whether one database node still owns the whole system.
+
+### 1. Partitioning
+
+Partitioning splits one logical table into physical child tables inside the same database.
+
+```mermaid
+flowchart TD
+    Orders["orders logical table"] --> Jan["orders_2026_01"]
+    Orders --> Feb["orders_2026_02"]
+    Orders --> Mar["orders_2026_03"]
+```
+
+Benefits:
+
+- Smaller indexes per partition.
+- Partition pruning.
+- Fast historical drops.
+- Easier vacuum and maintenance windows.
+
+### 2. Sharding
+
+Sharding splits data across independent database servers.
+
+```mermaid
+flowchart LR
+    Router["Shard router"] --> S1["Shard 1<br/>users 0-999"]
+    Router --> S2["Shard 2<br/>users 1000-1999"]
+    Router --> S3["Shard 3<br/>users 2000-2999"]
+```
+
+Use sharding only when one node cannot handle write throughput, storage, or connection load.
+
+### 3. Shard key choice
+
+A good shard key:
+
+- Appears in most queries.
+- Co-locates related data.
+- Distributes writes evenly.
+- Avoids hot tenants or celebrity keys.
+- Does not need frequent changes.
+
+Bad shard key choices create scatter-gather queries across every shard.
+
+### 4. Global uniqueness gets harder
+
+Single-node PostgreSQL can enforce global unique constraints. Sharded systems usually cannot without coordination.
+
+Options:
+
+- Include shard key in unique constraints.
+- Use globally unique IDs like UUIDv7 or Snowflake.
+- Route uniqueness checks through a single authority.
+- Accept scoped uniqueness, such as unique email per tenant.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Partition an orders table by month and shard a toy data model by tenant ID.
+  </Step>
+  <Step title="Break">
+    Query without the partition key and shard related tables by different keys.
+  </Step>
+  <Step title="Observe">
+    See partition pruning fail and joins become scatter-gather operations.
+  </Step>
+  <Step title="Fix">
+    Add partition-key predicates and co-locate entities by root aggregate key.
+  </Step>
+  <Step title="Prove">
+    Use `EXPLAIN` to show partition pruning and integration tests to verify shard routing.
+  </Step>
+</Steps>
+
+---
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 | Question / Scenario | Junior Developer Answer | Senior / Staff Backend Engineer Answer |

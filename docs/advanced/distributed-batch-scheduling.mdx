@@ -381,6 +381,74 @@ Each worker step operates completely independently on non-overlapping primary ke
 
 ---
 
+## Batch & Scheduling Fundamentals Interview Map
+
+Batch jobs are production systems. They need locking, restartability, backpressure, and auditability.
+
+### 1. Why `@Scheduled` duplicates work in Kubernetes
+
+Every pod has its own JVM and Spring scheduler.
+
+```mermaid
+flowchart LR
+    Cron["00:00"] --> Pod1["Pod 1 runs job"]
+    Cron --> Pod2["Pod 2 runs job"]
+    Cron --> Pod3["Pod 3 runs job"]
+```
+
+Without a distributed lock, all replicas run the job.
+
+### 2. At-most-once vs at-least-once
+
+| Goal | Meaning | Risk |
+| :--- | :--- | :--- |
+| At-most-once | Job never runs twice | It may not run if worker dies |
+| At-least-once | Job eventually runs | It may run more than once |
+| Exactly-once effect | Repeated execution has one business effect | Requires idempotent writes |
+
+Most production jobs aim for at-least-once execution with idempotent effects.
+
+### 3. Chunk size is a trade-off
+
+Small chunks:
+
+- More commits.
+- More overhead.
+- Less rollback work.
+
+Large chunks:
+
+- Fewer commits.
+- More memory.
+- More work lost on failure.
+- Longer locks.
+
+### 4. Restartability requires metadata
+
+A restartable job records progress after each committed chunk. Logs alone are not enough.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Create a scheduled invoice job that processes rows in chunks.
+  </Step>
+  <Step title="Break">
+    Run 3 replicas without ShedLock and crash during chunk 5.
+  </Step>
+  <Step title="Observe">
+    See duplicate execution or lost progress.
+  </Step>
+  <Step title="Fix">
+    Add ShedLock, idempotency keys, Spring Batch metadata, and restartable chunk processing.
+  </Step>
+  <Step title="Prove">
+    Start multiple pods and verify one job owner; kill the owner and verify safe restart.
+  </Step>
+</Steps>
+
+---
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 | Question / Scenario | Junior Developer Answer | Senior / Staff Backend Engineer Answer |

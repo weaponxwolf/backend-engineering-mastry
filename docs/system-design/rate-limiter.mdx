@@ -531,6 +531,99 @@ When interviewers ask you to design a distributed rate limiter, they are looking
 
 ---
 
+## Rate Limiter Fundamentals Drill
+
+A rate limiter is not just a counter. It is a policy engine that decides who is allowed to consume a shared resource, at what speed, under which identity, and what happens when the limiter storage is slow or unavailable.
+
+```mermaid
+flowchart LR
+    Request --> Key[Build limit key]
+    Key --> Policy[Find policy]
+    Policy --> Algo[Run algorithm]
+    Algo --> Allow{Allowed?}
+    Allow -->|Yes| Handler[Continue request]
+    Allow -->|No| Reject[429 response]
+    Algo --> Headers[RateLimit headers]
+    Algo --> Metrics[Limiter metrics]
+```
+
+### The 7 Questions Behind A Strong Design
+
+| Question | Why it matters |
+| --- | --- |
+| What identity is limited? | IP, user, API key, tenant, route, or device all behave differently. |
+| What resource is protected? | Login, payments, search, and public APIs need different policies. |
+| Which algorithm is used? | Fixed window, sliding window, token bucket, and leaky bucket have different burst behavior. |
+| Is the limiter local or distributed? | Multiple pods need shared state or coordinated local budgets. |
+| What is the failure policy? | Fail-open preserves availability; fail-closed protects expensive systems. |
+| How does the client recover? | `Retry-After` and rate limit headers make the API usable. |
+| How is abuse detected? | Metrics and logs must expose hot keys and rejected traffic. |
+
+### Algorithm Choice In Plain English
+
+| Algorithm | Behavior | Best for | Weakness |
+| --- | --- | --- | --- |
+| Fixed window | Count requests per time bucket. | simple low-risk limits | boundary burst can double traffic |
+| Sliding log | Store each request timestamp. | exact small-volume limits | memory heavy |
+| Sliding window counter | Weighted count across current and previous window. | practical API limits | approximate |
+| Token bucket | Tokens refill over time; bursts spend saved tokens. | public APIs and user actions | needs atomic refill logic |
+| Leaky bucket | Queue drains at steady rate. | smoothing downstream load | adds queueing delay |
+
+### Example: Login Protection
+
+A login limiter should not only limit by IP:
+
+```markdown
+login:ip:{ip}
+login:account:{emailNormalized}
+login:device:{deviceFingerprint}
+login:tenant:{tenantId}
+```
+
+Why? Attackers can rotate IPs. Legitimate offices can share one IP. Account-level limits protect the target account. IP-level limits protect infrastructure. Tenant-level limits prevent one customer from consuming the shared pool.
+
+### Redis Lua Or Database Row?
+
+Use Redis Lua when:
+
+```markdown
+The limit is high-QPS, short-window, and approximate enough to store in memory.
+```
+
+Use database constraints when:
+
+```markdown
+The operation is correctness-critical, low-volume, and must survive Redis loss.
+```
+
+Example: public search API rate limits can live in Redis. A "one coupon redemption per user" invariant belongs in the database.
+
+### Build-Break-Fix Drill
+
+Build:
+
+```markdown
+Add a token bucket limit for POST /login and GET /search.
+Return 429 with Retry-After and RateLimit-Remaining headers.
+```
+
+Break:
+
+```markdown
+Run 4 application pods with local-only counters.
+Send a burst exactly across a fixed-window boundary.
+Make Redis timeout for 3 seconds.
+```
+
+Fix:
+
+```markdown
+Move counters to Redis Lua.
+Use token bucket for burst tolerance.
+Choose fail-closed for login and fail-open for low-risk reads.
+Emit metrics for allowed, rejected, and Redis-error decisions.
+```
+
 ## 10. Senior Interview Questions & Active Recall
 
 <AccordionGroup>

@@ -329,6 +329,79 @@ public long getCelebrityLikeCount(String celebrityId, int saltBuckets) {
 
 ---
 
+## System Design Fundamentals Interview Map
+
+System design is not drawing boxes. It is making trade-offs explicit under constraints.
+
+### 1. The required interview flow
+
+```mermaid
+flowchart TD
+    Req["Clarify requirements"] --> Capacity["Estimate capacity"]
+    Capacity --> API["Design APIs"]
+    API --> Data["Design data model"]
+    Data --> HLD["High-level architecture"]
+    HLD --> Deep["Deep dives"]
+    Deep --> Failure["Failure modes"]
+    Failure --> Tradeoffs["Trade-offs and alternatives"]
+```
+
+Skipping requirements and jumping into architecture is a common junior mistake.
+
+### 2. Functional vs non-functional requirements
+
+Functional:
+
+- User can create short URL.
+- User can receive notification.
+- User can search products.
+
+Non-functional:
+
+- p99 latency.
+- availability target.
+- consistency requirement.
+- durability and data loss tolerance.
+- regional disaster recovery.
+- abuse/rate-limit protection.
+
+### 3. Every design needs a data model
+
+If you cannot name the tables, indexes, keys, and ownership boundaries, the design is still vague.
+
+### 4. Every design needs failure modes
+
+Ask:
+
+- What happens if a database is slow?
+- What happens if Kafka is down?
+- What happens if a region fails?
+- What happens if a client retries?
+- What happens if one key becomes hot?
+- What happens if a worker processes the same message twice?
+
+### Build-Break-Fix Drill
+
+<Steps>
+  <Step title="Build">
+    Design a URL shortener with API, schema, cache, and redirect flow.
+  </Step>
+  <Step title="Break">
+    Add duplicate alias creation, hot celebrity links, and cache node failure.
+  </Step>
+  <Step title="Observe">
+    Identify uniqueness races, hot partitions, and cache avalanche behavior.
+  </Step>
+  <Step title="Fix">
+    Add unique constraints, consistent hashing, hot-key salting, and backpressure.
+  </Step>
+  <Step title="Prove">
+    Explain tests, metrics, and runbooks that would validate the design.
+  </Step>
+</Steps>
+
+---
+
 ## 4. Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 When interviewing for Senior or Staff System Architect roles, interviewers evaluate whether you grasp physical hardware constraints and can defend your architectural choices with quantitative math.

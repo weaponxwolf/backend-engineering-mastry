@@ -870,13 +870,43 @@ All phases of the comprehensive documentation overhaul and book-replacement dept
         - `docs/production/oauth2-zerotrust-mesh.mdx`: Physical network packet sniffing, OAuth 2.1 Authorization Code with PKCE mathematical proof, lateral movement VPC breach, JWKS key rotation 401 blackouts, Private Key JWT (RFC 7523), and mTLS with SPIFFE/SPIRE workload identities via Envoy sidecars.
         - `docs/system-design/webhook-engine-workflows.mdx`: TCP socket timeout limits, timing side-channel attacks on signatures, outbound thread pool starvation, webhook replay financial credit attacks, Stripe-grade HMAC-SHA256 timestamped signatures, constant-time verification (`MessageDigest.isEqual`), 72-hour jittered backoff, and Temporal deterministic event sourcing replay.
 
+16. **Backend Fundamentals Interview Drill Expansion (September 2026)**:
+    - **Purpose**: Added a second learning layer across foundational, production, advanced, and system-design chapters for students who need to answer basic backend interview questions deeply, not just read senior-level theory.
+    - **Standard Pattern Added Across Chapters**:
+      - "What the concept really means" in simple English.
+      - Mermaid diagrams for the answer shape and system flow.
+      - Tables contrasting shallow answers with deeper production answers.
+      - Concrete request/data/architecture examples.
+      - Build-Break-Fix drills that force learners to create the naive version, break it under realistic failure, and repair it using production techniques.
+    - **Core Fundamentals Expanded**:
+      - Java OOP, collections, exceptions, generics, streams, concurrency, and JVM fundamentals.
+      - SQL, joins, indexes, transactions, isolation, locking, JPA/Hibernate, schema migration, sharding, search indexing, and CDC fundamentals.
+      - Spring IoC, MVC REST, validation/errors, configuration/profiles, Spring Security, JWT/session architecture, OAuth2/OIDC, and zero-trust service-to-service identity.
+      - Docker, Kubernetes, testing, Testcontainers, caching, observability, logging, deployment, CI/CD, incident response, messaging, microservices, resilience, realtime systems, distributed batch processing, and monolith-to-microservices migration.
+    - **System Design Drill Layer Added**:
+      - `docs/system-design/capacity-estimation.mdx`: QPS, storage, bandwidth, Little's Law concurrency, bottleneck identification, and estimation answer templates.
+      - `docs/system-design/consistency-failures.mdx`: consistency levels, stale-read examples, idempotency, transactional outbox, and retry safety.
+      - `docs/system-design/distributed-id-generation.mdx`: UUIDv4 vs UUIDv7 vs Snowflake vs database sequences, B-Tree locality, worker IDs, clock regression, and public/private ID separation.
+      - `docs/system-design/distributed-kv-store.mdx`: partitioning, replication, quorum choices, conflict handling, read repair, and rebalancing drills.
+      - `docs/system-design/distributed-locks-consensus.mdx`: local locks vs leases, fencing tokens, Redis lock limitations, consensus-backed leadership, and duplicate-job defenses.
+      - `docs/system-design/financial-ledger.mdx`: double-entry invariants, immutable ledger entries, idempotent money commands, snapshots, and reconciliation.
+      - `docs/system-design/multi-region-disaster-recovery.mdx`: RTO/RPO, active-passive vs active-active, failover timelines, write fencing, and delayed-event reconciliation.
+      - `docs/system-design/notification-system.mdx`: transactional vs promotional notifications, preference checks, async delivery, provider rate limits, deduplication, and delivery receipts.
+      - `docs/system-design/rate-limiter.mdx`: identity dimensions, token bucket/sliding window choices, Redis Lua, fail-open/fail-closed policy, and 429 response headers.
+      - `docs/system-design/search-autocomplete.mdx`: lookup vs search vs autocomplete, inverted indexes, prefix indexes, ranking, hot prefixes, and freshness monitoring.
+      - `docs/system-design/url-shortener.mdx`: create path vs redirect path, collision handling, redirect semantics, hot link caching, analytics, and abuse scanning.
+      - `docs/system-design/webhook-engine-workflows.mdx`: outbound and inbound webhook reliability, HMAC signatures, retries, delivery logs, dead-letter states, and durable workflow state machines.
+    - **Projects & Labs Proof Layer Added**:
+      - Added Project Proof Drill sections to Todo API, Notes API, E-commerce, Blog API, URL Shortener, Rate Limiter, Notification Worker, Deployment Lab, and Incident Debugging Lab pages.
+      - Each proof drill defines the architecture diagram, correctness evidence, failure drill, and acceptance criteria that prove the learner can build and debug the project rather than merely copy code.
+
 ---
 
-## Final Verification Summary
+## Latest Verification Summary
 - `npm run check` (`npm run test:audit` + `npm run audit` + `npm run validate` + `npm run links`):
   - **Audit Tests**: 4/4 passing (nested navigation, duplicate route detection, metadata validation, code fence labeling).
-  - **Content Inventory**: 87 pages, 35,641 lines, 1,025 code blocks, **0 structure errors**, **0 generic text fences**.
+  - **Content Inventory**: 87 pages, 42,705 lines, 1,315 code blocks, **0 structure errors**.
+  - **Editorial Observations**: 5 generic text fences remain report-only observations from the audit script, not build blockers.
   - **Mintlify Validate**: Build validation passed cleanly (`navigation.tabs` with 9 major topics).
   - **Mintlify Broken Links**: `success no broken links found` (100% link and anchor integrity across all 87 MDX documents).
-- `npm run build` (`node scripts/build-vercel.mjs`):
-  - Static distribution bundle fully compiled, extracted into `./out`, and verified for Vercel deployment.
+- `npm run build` (`node scripts/build-vercel.mjs`) should still be run before deployment packaging when a new static bundle is required.

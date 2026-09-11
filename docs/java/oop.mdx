@@ -399,6 +399,137 @@ The core domain contains business logic and defines the **Ports** (interfaces). 
 
 ---
 
+## OOP Fundamentals Interview Map
+
+OOP is not "classes and objects." In backend systems, OOP is how you protect business rules from invalid state changes.
+
+### 1. Class vs object
+
+A class is the blueprint. An object is one runtime instance in heap memory.
+
+```mermaid
+flowchart LR
+    Class["class Order<br/>fields + methods"] --> Obj1["Order object #1<br/>id=101"]
+    Class --> Obj2["Order object #2<br/>id=102"]
+```
+
+In production, object state matters because a bad object can represent an impossible business fact, such as a paid order with zero total.
+
+### 2. Encapsulation means invariant protection
+
+Bad entity:
+
+```java
+public class Order {
+    public OrderStatus status;
+    public long totalCents;
+}
+```
+
+Any caller can create nonsense:
+
+```java
+order.status = OrderStatus.PAID;
+order.totalCents = -500;
+```
+
+Better:
+
+```java
+public class Order {
+    private OrderStatus status;
+    private long totalCents;
+
+    public void markPaid() {
+        if (totalCents <= 0) {
+            throw new IllegalStateException("Cannot pay zero-value order");
+        }
+        this.status = OrderStatus.PAID;
+    }
+}
+```
+
+**Senior answer:** "Encapsulation is not hiding fields for style. It makes invalid state unrepresentable or at least impossible to create silently."
+
+### 3. Interface vs abstract class
+
+| Tool | Use When |
+| :--- | :--- |
+| Interface | You need a capability contract across unrelated classes |
+| Abstract class | You need shared base state or template behavior |
+
+For backend architecture, prefer interfaces at boundaries:
+
+```java
+public interface PaymentGateway {
+    ChargeResult charge(ChargeCommand command);
+}
+```
+
+The domain depends on the contract, not Stripe, Razorpay, or any HTTP SDK.
+
+### 4. Inheritance vs composition
+
+Inheritance says "is a." Composition says "has a."
+
+Bad:
+
+```java
+class StripePaymentService extends BaseHttpPaymentService {}
+```
+
+Better:
+
+```java
+class StripePaymentGateway implements PaymentGateway {
+    private final RestClient restClient;
+}
+```
+
+Composition is easier to test, replace, secure, and observe.
+
+### 5. Polymorphism replaces branching
+
+Bad:
+
+```java
+switch (provider) {
+    case STRIPE -> stripe.charge(command);
+    case PAYPAL -> paypal.charge(command);
+}
+```
+
+Better:
+
+```java
+Map<PaymentProvider, PaymentGateway> gateways;
+gateways.get(provider).charge(command);
+```
+
+This is the Open/Closed Principle in real Spring code: add a new provider by adding one implementation, not editing the central workflow.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Model `Order`, `PaymentGateway`, and two provider implementations.
+  </Step>
+  <Step title="Break">
+    Add public setters and a switch-based provider selection service.
+  </Step>
+  <Step title="Observe">
+    Create invalid order states and watch each new provider require editing old code.
+  </Step>
+  <Step title="Fix">
+    Move state transitions into domain methods and replace branching with strategy polymorphism.
+  </Step>
+  <Step title="Prove">
+    Add unit tests showing invalid states throw and a new provider can be added without modifying the orchestrator.
+  </Step>
+</Steps>
+
+---
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 | Question / Scenario | Junior Developer Answer | Senior / Staff Backend Engineer Answer |

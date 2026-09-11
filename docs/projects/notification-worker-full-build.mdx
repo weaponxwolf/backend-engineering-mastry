@@ -605,6 +605,38 @@ class NotificationWorkerIntegrationTest {
 
 ---
 
+## Project Proof Drill
+
+The notification worker is complete when it proves asynchronous reliability. The worker must survive duplicate messages, provider timeouts, user preference changes, poison messages, and provider rate limits.
+
+```mermaid
+flowchart LR
+    Kafka[Kafka record] --> Dedup[Idempotency table]
+    Dedup --> Pref[Preference check]
+    Pref --> Template[Render template]
+    Template --> Send[Provider send]
+    Send --> Status[Delivery status]
+    Send --> Retry[Retry topic]
+    Retry --> DLT[Dead-letter topic]
+```
+
+| Proof target | Required evidence |
+| --- | --- |
+| Duplicate safety | Same event processed twice sends at most once per channel. |
+| Preference timing | Opt-out before send prevents delivery even if event was queued earlier. |
+| Provider timeout | Worker retries without blocking the consumer partition forever. |
+| Poison message | Bad payload reaches DLT instead of looping forever. |
+| Observability | Delivery attempts include event ID, user ID, channel, provider status, and retry count. |
+
+Failure drill:
+
+| Failure | Production behavior |
+| --- | --- |
+| Provider returns 429 | Worker backs off and respects channel throttling. |
+| Worker crashes after provider accepts send | Dedup/status prevents duplicate delivery on retry. |
+| Template variable missing | Message goes to DLT with actionable error. |
+| User unsubscribes during queue delay | Preference check near send time blocks promotional notification. |
+
 ## 7. Active Recall Mastery Questions
 
 <AccordionGroup>

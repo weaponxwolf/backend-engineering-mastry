@@ -144,7 +144,7 @@ To produce millions of unique IDs per second with zero collisions, sub-milliseco
 
 A standard Twitter Snowflake ID is packed into a single signed 64-bit integer (`long` in Java):
 
-```text
+```markdown
  1 bit   41 bits (Timestamp in ms)        10 bits (Worker ID)  12 bits (Sequence)
 +------+---------------------------------+--------------------+------------------+
 | Sign | Milliseconds since custom epoch | Machine/Pod ID     | Per-ms Counter   |
@@ -311,7 +311,7 @@ sequenceDiagram
 
 If your architecture exposes public resource IDs across external REST APIs and requires standard UUID formatting (`8-4-4-4-12` hex characters) without destroying B-Tree index locality, use **UUIDv7** (RFC 9562):
 
-```text
+```markdown
  0                   1                   2                   3
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -344,6 +344,96 @@ If your architecture exposes public resource IDs across external REST APIs and r
 | **Network Coordination** | None (Local RNG) | None (Local RNG + Time) | Requires Worker ID allocation (etcd/Redis) |
 
 ---
+
+## ID Generation Fundamentals Drill
+
+An ID generator is not just a way to make unique strings. It shapes database index locality, sharding, ordering, debugging, privacy, and failure behavior during clock drift.
+
+```mermaid
+flowchart TD
+    Need[Need a new ID] --> Unique{Must be globally unique?}
+    Unique -->|Yes| Ordered{Must be time sortable?}
+    Unique -->|No| Sequence[Local database sequence]
+    Ordered -->|Yes| Snowflake[Snowflake or UUIDv7]
+    Ordered -->|No| UUID4[UUIDv4]
+    Snowflake --> Clock[Handle clock moving backward]
+    Snowflake --> Worker[Assign worker id safely]
+    UUID4 --> Index[Accept random B-Tree writes]
+```
+
+### The 6 Questions Behind Every ID Choice
+
+| Question | Why it matters |
+| --- | --- |
+| Does it need to be globally unique? | Determines whether one database sequence is enough. |
+| Does it need to reveal creation time? | Time-sortable IDs help indexes but can leak business volume. |
+| Does it need to be generated offline? | Clients and services may need IDs before database insert. |
+| Does it need to preserve insert locality? | Random IDs fragment B-Tree indexes under heavy writes. |
+| Does it need to be unguessable? | Public URLs and security-sensitive resources need entropy. |
+| What happens when clocks move backward? | Time-based IDs can duplicate or regress without protection. |
+
+### UUIDv4 vs UUIDv7 vs Snowflake vs Database Sequence
+
+| Strategy | Strength | Weakness | Use when |
+| --- | --- | --- | --- |
+| Database sequence | Simple, ordered, transaction-safe | Central database dependency | Single primary relational system |
+| UUIDv4 | Decentralized and unguessable | Random index inserts, no natural order | Public opaque IDs with moderate write rate |
+| UUIDv7 | Decentralized and time-sortable | Newer operational familiarity | Public IDs that benefit from index locality |
+| Snowflake | Compact, sortable, very high throughput | Worker ID and clock management | Large distributed systems with controlled infrastructure |
+
+### Example Interview Walkthrough
+
+If asked, "How would you generate IDs for orders?", do not start with "UUID." Start with the invariant:
+
+```markdown
+An order ID must be globally unique, safe across multiple application pods,
+sortable enough for operational debugging, and must not create database index
+hotspots or random-write amplification.
+```
+
+Then choose:
+
+```markdown
+For internal primary keys, I would prefer UUIDv7 or Snowflake because they are
+distributed and mostly time-ordered. If the system has one PostgreSQL primary
+and no offline generation requirement, a BIGINT sequence is simpler. For public
+order references, I may expose a separate opaque reference so users cannot infer
+business volume.
+```
+
+### Common Production Failures
+
+| Failure | Root cause | Defense |
+| --- | --- | --- |
+| Duplicate Snowflake IDs | Two pods use the same worker ID. | Lease worker IDs with TTL and heartbeat. |
+| IDs go backward | NTP clock adjustment. | Detect backward time and wait, fail, or move to logical counter. |
+| Slow inserts with UUIDv4 | Random B-Tree leaf writes. | Use UUIDv7, Snowflake, or optimized index settings. |
+| Guessable public IDs | Sequential IDs exposed in URLs. | Separate public opaque ID from internal primary key. |
+
+### Build-Break-Fix Drill
+
+Build:
+
+```markdown
+Create a table with 1 million rows using BIGSERIAL, UUIDv4, and UUIDv7 keys.
+Measure insert time and index size.
+```
+
+Break:
+
+```markdown
+Run two Snowflake generators with the same worker ID.
+Move system time backward by 2 seconds in a test.
+Expose sequential customer IDs in a public API.
+```
+
+Fix:
+
+```markdown
+Add worker ID leases.
+Add clock regression handling.
+Use separate public references for external URLs.
+```
 
 ## 4. Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 

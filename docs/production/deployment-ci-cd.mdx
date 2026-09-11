@@ -424,6 +424,72 @@ flowchart LR
 
 ---
 
+## Deployment Fundamentals Interview Map
+
+Deployment is not copying code to a server. It is changing a live distributed system without breaking users.
+
+### 1. Build vs release vs deploy
+
+| Word | Meaning |
+| :--- | :--- |
+| Build | Compile/test/package an immutable artifact |
+| Release | Make a version available for deployment |
+| Deploy | Put that version into a runtime environment |
+| Rollout | Gradually shift running traffic to the new version |
+
+### 2. Why immutable artifacts matter
+
+The same image digest should move from CI to staging to production.
+
+```console
+registry.example.com/notes-api@sha256:abc123...
+```
+
+Avoid `:latest`; it is mutable and destroys reproducibility.
+
+### 3. Deployment strategy basics
+
+| Strategy | Strength | Weakness |
+| :--- | :--- | :--- |
+| Rolling | Simple, low extra cost | Old and new versions overlap |
+| Blue/Green | Fast rollback | Needs duplicate capacity |
+| Canary | Small blast radius | Needs good metrics and routing |
+
+### 4. Database migration compatibility
+
+Code deploys roll forward gradually. Database schema changes are global. That mismatch is why expand/contract matters.
+
+```mermaid
+flowchart LR
+    Old["Old pods"] --> DB["Shared database"]
+    New["New pods"] --> DB
+    Migration["Migration"] --> DB
+```
+
+The schema must support old and new pods during the rollout.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Create a CI pipeline that builds, tests, scans, and tags an image by commit SHA.
+  </Step>
+  <Step title="Break">
+    Deploy `latest`, run Flyway in every web pod, and remove readiness checks.
+  </Step>
+  <Step title="Observe">
+    Watch mixed versions, migration lock contention, and traffic routed to unready pods.
+  </Step>
+  <Step title="Fix">
+    Use immutable image tags, a dedicated migration job, readiness gates, and canary metrics.
+  </Step>
+  <Step title="Prove">
+    Run a rollback and canary failure simulation with expected deployment events.
+  </Step>
+</Steps>
+
+---
+
 ## 4. Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 When interviewing for Senior or Staff Backend Engineer roles, interviewers evaluate whether you understand the operational mechanics of zero-downtime deployments and failure blast radius reduction.

@@ -592,6 +592,48 @@ class UrlShortenerIntegrationTest {
 
 ---
 
+## Project Proof Drill
+
+The URL shortener is complete when create and redirect paths are tested separately. Creation can be a little slower. Redirects must be fast, cacheable, observable, and protected from unsafe destinations.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant API
+    participant Cache
+    participant DB
+    participant Queue
+
+    User->>API: GET /abc123
+    API->>Cache: lookup abc123
+    alt cache hit
+        Cache-->>API: target URL
+    else cache miss
+        API->>DB: select active mapping
+        DB-->>API: target URL
+        API->>Cache: store mapping
+    end
+    API->>Queue: async click event
+    API-->>User: 302 Location: target
+```
+
+| Proof target | Required evidence |
+| --- | --- |
+| Collision safety | Forced duplicate short code retries or fails cleanly. |
+| Redirect speed | Hot code uses cache and avoids unnecessary database load. |
+| Expiration | Expired code never redirects. |
+| Analytics isolation | Click tracking failure does not break redirect. |
+| Abuse state | Unsafe links can be disabled without deleting history. |
+
+Failure drill:
+
+| Failure | Expected behavior |
+| --- | --- |
+| Cache is empty | Database fallback works and warms cache. |
+| Analytics queue is down | Redirect still works if analytics is non-critical. |
+| Code does not exist | Return `404` without expensive repeated DB hits for hot missing keys. |
+| Link is disabled | Return safe error page or `410 Gone`. |
+
 ## 8. Active Recall Mastery Questions
 
 <AccordionGroup>

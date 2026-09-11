@@ -29,6 +29,37 @@ graph TD
     RootCause --> PMR["5. Blameless Postmortem (5 Whys & Action Items)"]
 ```
 
+---
+
+## Lab Proof Drill
+
+This lab is complete only when the learner can move from symptom to mitigation to permanent prevention. The goal is not to admire dashboards; the goal is to reduce impact quickly and then explain the causal chain precisely.
+
+```mermaid
+flowchart LR
+    Alert[Alert fires] --> Triage[Confirm user impact]
+    Triage --> Mitigate[Mitigate first]
+    Mitigate --> Diagnose[Find causal chain]
+    Diagnose --> Prevent[Permanent fix]
+    Prevent --> PMR[Postmortem action items]
+```
+
+| Incident | First signal | First mitigation | Permanent fix |
+| --- | --- | --- | --- |
+| DB lock queue | Hikari timeouts and blocked sessions | terminate blocker or pause migration | lock timeouts and migration safety rules |
+| OOMKilled pod | restart count and exit code 137 | roll back or raise limit temporarily | heap sizing, leak fix, load test |
+| Downstream outage | p99 latency and thread saturation | open circuit breaker | timeouts, bulkheads, async isolation |
+| Kafka poison record | lag stuck on one partition | skip or DLT bad offset | deserializer error handling and DLT |
+
+Minimum evidence for each simulation:
+
+| Evidence | Example |
+| --- | --- |
+| Detection query | `pg_stat_activity`, thread dump, Actuator metrics, consumer group lag |
+| Mitigation command | terminate blocker, rollback deployment, trip circuit breaker, reset offset |
+| Root cause chain | symptom -> saturated resource -> triggering change -> missing guardrail |
+| Preventive action | test, alert, runbook, configuration, architecture change |
+
 <Important>
 ### The SRE Golden Rule: Mitigate First, Debug Later
 **Your first duty in an incident is to restore customer service, NOT to understand why the bug happened.**

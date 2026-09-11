@@ -388,6 +388,109 @@ public class BatchCollector<T> implements Collector<T, List<List<T>>, List<List<
 
 ---
 
+## Generics & Streams Fundamentals Interview Map
+
+Generics protect types at compile time. Streams describe data pipelines. Both can hurt production when used blindly.
+
+### 1. Why generics exist
+
+Without generics:
+
+```java
+List values = new ArrayList();
+values.add("paid");
+Integer status = (Integer) values.get(0); // runtime ClassCastException
+```
+
+With generics:
+
+```java
+List<String> statuses = new ArrayList<>();
+statuses.add("paid");
+```
+
+The compiler blocks wrong types before production.
+
+### 2. Why generic type information disappears
+
+Java erases generic parameters for backward compatibility:
+
+```java
+List<String> names
+List<Long> ids
+```
+
+Both become mostly `List` at runtime. This is why you cannot write:
+
+```java
+if (value instanceof List<String>) { }
+```
+
+### 3. When to use `? extends` and `? super`
+
+Use `extends` when reading:
+
+```java
+double total(List<? extends Number> values) { ... }
+```
+
+Use `super` when writing:
+
+```java
+void addIds(List<? super Long> output) { ... }
+```
+
+PECS: Producer Extends, Consumer Super.
+
+### 4. Streams are not automatically faster
+
+This is fine:
+
+```java
+orders.stream()
+        .filter(Order::isPaid)
+        .map(OrderResponse::from)
+        .toList();
+```
+
+This is dangerous on huge data:
+
+```java
+repository.findAll().stream()
+        .sorted(comparing(Order::createdAt))
+        .toList();
+```
+
+The database should filter, sort, and paginate using indexes. Do not pull millions of rows into heap and sort them in Java.
+
+### 5. `parallelStream()` is not a web performance button
+
+`parallelStream()` uses the shared `ForkJoinPool.commonPool()`. If one request blocks that pool with database or HTTP calls, other unrelated work in the JVM suffers.
+
+Use virtual threads, dedicated executors, or database-side work instead.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Implement a small order summarizer using typed collections and sequential streams.
+  </Step>
+  <Step title="Break">
+    Introduce raw types, unchecked casts, `.sorted()` on a huge list, and `parallelStream()` around blocking I/O.
+  </Step>
+  <Step title="Observe">
+    Capture `ClassCastException`, heap growth, and common-pool starvation.
+  </Step>
+  <Step title="Fix">
+    Restore generic types, push sorting to SQL, and remove blocking parallel streams.
+  </Step>
+  <Step title="Prove">
+    Add unit tests for type-safe transformations and a repository test proving SQL sorting/pagination.
+  </Step>
+</Steps>
+
+---
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 | Question / Scenario | Junior Developer Answer | Senior / Staff Backend Engineer Answer |

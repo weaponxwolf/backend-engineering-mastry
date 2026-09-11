@@ -404,6 +404,73 @@ At 14:12 UTC, deployment v2.4.1 introduced an unindexed query on the `orders` ta
 
 ---
 
+## Incident Response Fundamentals Interview Map
+
+Incident response is an engineering system for restoring service under pressure.
+
+### 1. Mitigate first, debug later
+
+During a live outage, the first goal is reducing customer impact:
+
+- Roll back a bad deploy.
+- Disable a broken integration.
+- Shed non-critical traffic.
+- Scale a saturated worker.
+- Kill a known blocking query.
+
+Root cause analysis happens after the service is stable.
+
+### 2. Severity levels
+
+| Severity | Meaning |
+| :--- | :--- |
+| SEV-1 | Major customer-facing outage or data loss risk |
+| SEV-2 | Serious degradation with workaround or partial impact |
+| SEV-3 | Limited impact, non-critical workflow affected |
+| SEV-4 | Minor issue, no urgent customer impact |
+
+### 3. Incident roles
+
+| Role | Job |
+| :--- | :--- |
+| Incident Commander | Coordinates response and decisions |
+| Tech Lead | Investigates and executes technical mitigation |
+| Comms Lead | Updates stakeholders/customers |
+| Scribe | Records timeline and decisions |
+
+### 4. First five minutes checklist
+
+```console
+declare severity
+open incident channel
+assign IC, tech lead, comms, scribe
+check recent deploys
+check user pain metric
+choose mitigation path
+```
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Create a service with dashboard panels for p99 latency, 5xx rate, HikariCP active connections, and database locks.
+  </Step>
+  <Step title="Break">
+    Deploy an unindexed query and hold a database transaction open.
+  </Step>
+  <Step title="Observe">
+    Follow the alert to metrics, traces, logs, and `pg_stat_activity`.
+  </Step>
+  <Step title="Fix">
+    Roll back, cancel/terminate the blocker, and add the missing index concurrently.
+  </Step>
+  <Step title="Prove">
+    Write a postmortem with timeline, 5 Whys, corrective actions, and prevention tests.
+  </Step>
+</Steps>
+
+---
+
 ## 4. Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 When interviewing for Senior or Staff SRE / Backend Engineer roles, interviewers evaluate whether you stay calm under operational stress and understand the systemic mechanics of cascading failures.

@@ -364,6 +364,78 @@ public class OAuth2ResourceServerConfig {
 
 ---
 
+## OAuth2 & Zero-Trust Fundamentals Interview Map
+
+OAuth and zero-trust are about delegated authorization and verified service identity.
+
+### 1. OAuth2 vs OpenID Connect
+
+OAuth2 answers: "Can this client access this resource?"
+
+OpenID Connect adds identity on top of OAuth2 and answers: "Who is the user?"
+
+Do not send ID tokens to resource servers as API authorization credentials. Use access tokens.
+
+### 2. Authorization code flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User
+    participant Client
+    participant IdP as Identity Provider
+    participant API as Resource Server
+
+    User->>Client: Start login
+    Client->>IdP: Authorization request + PKCE challenge
+    IdP-->>Client: Authorization code
+    Client->>IdP: Code + PKCE verifier
+    IdP-->>Client: Tokens
+    Client->>API: Access token
+```
+
+PKCE binds the authorization code to the client instance that started the flow.
+
+### 3. Zero-trust service calls
+
+Zero-trust means every service call is authenticated and authorized, even inside the cluster.
+
+```mermaid
+flowchart LR
+    ServiceA["Service A"] --> SidecarA["Envoy sidecar<br/>client cert"]
+    SidecarA --> MTLS["mTLS"]
+    MTLS --> SidecarB["Envoy sidecar<br/>server cert"]
+    SidecarB --> ServiceB["Service B"]
+```
+
+### 4. Common production failure
+
+If the identity provider rotates signing keys and services cache JWKS forever, every new token fails with `401`.
+
+Resource servers must refresh JWKS by `kid` and rate-limit refresh attempts.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Configure a resource server with issuer, audience, JWKS, and role mapping.
+  </Step>
+  <Step title="Break">
+    Rotate the signing key, use an ID token at the API, and remove audience validation.
+  </Step>
+  <Step title="Observe">
+    See global `401` failures or token confusion vulnerabilities.
+  </Step>
+  <Step title="Fix">
+    Add dynamic JWKS refresh, strict access-token validation, and mTLS service identity.
+  </Step>
+  <Step title="Prove">
+    Add tests for wrong audience, wrong issuer, stale `kid`, expired token, and missing scope.
+  </Step>
+</Steps>
+
+---
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 | Question / Scenario | Junior Developer Answer | Senior / Staff Backend Engineer Answer |

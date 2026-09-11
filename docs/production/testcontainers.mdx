@@ -711,6 +711,73 @@ If you run inside an unprivileged Docker-in-Docker CI environment where mounting
 
 ---
 
+## Testcontainers Fundamentals Interview Map
+
+Testcontainers answers one core question: does the code work against the real dependency behavior?
+
+### 1. Why H2 is not PostgreSQL
+
+H2 can be useful for tiny tests, but it does not perfectly match PostgreSQL:
+
+- SQL dialect differences.
+- Locking differences.
+- JSONB behavior.
+- Index planner behavior.
+- Transaction isolation behavior.
+- Timestamp/time zone behavior.
+
+If production uses PostgreSQL, serious repository and migration tests should run against PostgreSQL.
+
+### 2. Dynamic ports are normal
+
+Docker maps container ports to random host ports so tests can run in parallel.
+
+```java
+postgres.getMappedPort(5432);
+```
+
+Do not hard-code `localhost:5432` in tests.
+
+### 3. Container lifecycle matters
+
+Static containers start once per class. Non-static containers can start once per test method, making the suite slow.
+
+Spring context caching plus static containers is the usual fast path.
+
+### 4. What to test with Testcontainers
+
+Use it for:
+
+- Flyway migrations.
+- JPA mappings.
+- PostgreSQL constraints.
+- Locking/isolation behavior.
+- Kafka consumer offset and retry behavior.
+- Redis Lua scripts.
+- Network failure simulation with Toxiproxy.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Write a `@DataJpaTest` using PostgreSQL Testcontainers and Flyway migrations.
+  </Step>
+  <Step title="Break">
+    Replace PostgreSQL with H2 and hard-code a fixed port.
+  </Step>
+  <Step title="Observe">
+    Watch dialect gaps or parallel test port collisions.
+  </Step>
+  <Step title="Fix">
+    Use `@ServiceConnection`, dynamic ports, real PostgreSQL, and stable cleanup.
+  </Step>
+  <Step title="Prove">
+    Add tests for JSONB, unique constraints, transaction rollback, and concurrent row updates.
+  </Step>
+</Steps>
+
+---
+
 ## Production Antipatterns Checklist
 
 <AccordionGroup>

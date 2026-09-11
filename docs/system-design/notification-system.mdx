@@ -430,6 +430,105 @@ sequenceDiagram
 
 ---
 
+## Notification System Fundamentals Drill
+
+A notification system is a delivery pipeline, not just `sendEmail()`. It has preferences, templates, fanout, provider limits, retries, deduplication, unsubscribe rules, delivery receipts, and abuse controls.
+
+```mermaid
+flowchart LR
+    Event[Domain event] --> Pref[Preference check]
+    Pref --> Template[Template render]
+    Template --> Fanout[Channel fanout]
+    Fanout --> Email[Email queue]
+    Fanout --> SMS[SMS queue]
+    Fanout --> Push[Push queue]
+    Email --> Provider[Provider API]
+    SMS --> Provider
+    Push --> Provider
+    Provider --> Webhook[Delivery webhook]
+    Webhook --> Status[Delivery status]
+```
+
+### The Questions Behind Notification Design
+
+| Question | Why it matters |
+| --- | --- |
+| Is it transactional or marketing? | Legal requirements and unsubscribe behavior differ. |
+| Is delivery user-visible? | Password reset needs stronger guarantees than weekly digest. |
+| Can duplicates happen? | Providers and retries can deliver twice. |
+| Does ordering matter? | "Your order shipped" should not arrive before "order confirmed." |
+| What is the provider rate limit? | Bursts must be queued and throttled. |
+| How do users opt out? | Preferences must be checked near send time, not only event time. |
+
+### Transactional vs Promotional Notifications
+
+| Type | Example | Delivery expectation |
+| --- | --- | --- |
+| Transactional | password reset, payment receipt, OTP | high priority, low latency, carefully audited |
+| Operational | order shipped, ride arriving | timely, retryable, status tracked |
+| Promotional | campaign email, discount | batchable, opt-out required, provider throttled |
+
+### Example: Order Shipped Notification
+
+Naive flow:
+
+```markdown
+Order service calls email provider inside the database transaction.
+Provider is slow.
+The transaction stays open.
+Database connections exhaust.
+Checkout starts failing.
+```
+
+Production flow:
+
+```markdown
+Order service commits order state and outbox event.
+Outbox publisher sends event to notification topic.
+Notification service checks preferences and renders template.
+Channel workers send through providers with rate limits.
+Provider webhooks update delivery status idempotently.
+```
+
+### Idempotency Keys
+
+Each send attempt should have a stable identity:
+
+```markdown
+notification:{eventId}:{userId}:{channel}:{templateVersion}
+```
+
+This prevents duplicate sends when:
+
+- The queue redelivers a message.
+- The provider times out after accepting the request.
+- The worker crashes after sending but before storing status.
+
+### Build-Break-Fix Drill
+
+Build:
+
+```markdown
+Create an order-shipped event and send email asynchronously through a queue.
+```
+
+Break:
+
+```markdown
+Make the provider return 429 rate limit errors.
+Deliver the same queue message twice.
+Send an unsubscribe update while messages are already queued.
+```
+
+Fix:
+
+```markdown
+Add provider-specific rate limiters.
+Add deduplication keys.
+Check preferences immediately before send.
+Add retry topics and a dead-letter queue.
+```
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 When designing a notification platform in senior/staff system design interviews, the interviewer evaluates whether you understand real-world downstream constraints:

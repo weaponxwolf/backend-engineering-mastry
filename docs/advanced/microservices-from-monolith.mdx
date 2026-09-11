@@ -289,6 +289,72 @@ The gateway forwards incoming requests to both systems simultaneously. The shado
 
 ---
 
+## Monolith Migration Fundamentals Interview Map
+
+Migrating a monolith is not rewriting code. It is changing traffic, data ownership, and team boundaries while users keep using the system.
+
+### 1. Modular monolith first
+
+Before extraction, create internal boundaries:
+
+- Package-private domain internals.
+- Public facade interfaces.
+- No cross-module repository access.
+- No shared mutable database shortcuts.
+- Architecture tests with ArchUnit or Spring Modulith.
+
+If the monolith has no internal boundaries, extracted services will inherit chaos over the network.
+
+### 2. Strangler pattern
+
+```mermaid
+flowchart LR
+    Client["Client"] --> Gateway["Gateway"]
+    Gateway --> Old["Old monolith route"]
+    Gateway --> New["New service route"]
+```
+
+Move one route at a time. Keep rollback easy.
+
+### 3. Data migration is the dangerous part
+
+Code can be deployed and rolled back. Data changes are harder.
+
+Safe migration usually needs:
+
+- Ownership decision.
+- Backward-compatible schema.
+- CDC sync.
+- Dual-read comparison.
+- Shadow traffic.
+- Cutover plan.
+
+### 4. Avoid shared database microservices
+
+If two services write the same tables, they are not independent. They are a distributed monolith.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Start with a modular monolith containing user, order, and billing modules.
+  </Step>
+  <Step title="Break">
+    Extract billing but keep direct reads from the monolith database.
+  </Step>
+  <Step title="Observe">
+    Watch schema changes require coordinated deployments.
+  </Step>
+  <Step title="Fix">
+    Give billing owned tables, sync historical data with CDC, and route through an anti-corruption layer.
+  </Step>
+  <Step title="Prove">
+    Mirror traffic, compare responses, then cut over one route with a rollback switch.
+  </Step>
+</Steps>
+
+---
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 Decomposing a monolith is a classic staff-level systems interview topic. Interviewers listen for operational maturity and failure mitigation:

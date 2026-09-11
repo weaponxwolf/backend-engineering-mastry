@@ -378,6 +378,99 @@ sequenceDiagram
 
 ---
 
+## Distributed Locks & Consensus Fundamentals Drill
+
+A distributed lock is not the same as a local `synchronized` block. A local lock protects memory inside one JVM. A distributed lock tries to coordinate multiple machines that can pause, lose network access, restart, or keep running after their lock lease has expired.
+
+```mermaid
+sequenceDiagram
+    participant A as Service A
+    participant Lock as Lock service
+    participant DB as Database
+    participant B as Service B
+
+    A->>Lock: acquire lock, token=41
+    Lock-->>A: lease granted
+    A--xA: GC pause for 60 seconds
+    B->>Lock: acquire lock, token=42
+    Lock-->>B: lease granted
+    B->>DB: write with fencing token 42
+    A->>DB: stale write with fencing token 41
+    DB-->>A: reject token 41
+```
+
+The important part is not just "who holds the lock." The important part is whether the protected resource can reject an old owner after lease expiry.
+
+### Lock, Lease, Fencing Token, Consensus
+
+| Concept | Meaning | Production rule |
+| --- | --- | --- |
+| Local lock | Coordinates threads in one process. | Does not protect multiple pods. |
+| Distributed lock | Coordinates processes across machines. | Must assume pauses and partitions. |
+| Lease | Lock with expiration. | Expiration prevents dead owners from blocking forever. |
+| Fencing token | Monotonic number attached to each lock grant. | Downstream resource rejects stale owners. |
+| Consensus | Agreement protocol among nodes. | Needed for strong leadership and metadata correctness. |
+
+### Why "I Used Redis SET NX" Is Not A Complete Answer
+
+`SET key value NX PX 30000` can be useful for soft coordination, but it is not the full correctness story.
+
+You still must answer:
+
+1. What if the holder pauses longer than the lease?
+2. What if the operation continues after the lock expires?
+3. Can the downstream database compare fencing tokens?
+4. What if Redis fails over and loses recent writes?
+5. Is this a correctness lock or just duplicate-work reduction?
+
+If duplicate work is harmless, a Redis lock can be enough. If two writers can corrupt money, inventory, or leadership state, use a consensus-backed system or push the invariant into the database with constraints and fencing.
+
+### Example: Scheduled Billing Job
+
+Bad design:
+
+```markdown
+Every pod runs @Scheduled at midnight.
+Each pod scans invoices and charges cards.
+Redis lock prevents duplicates most of the time.
+```
+
+Deeper design:
+
+```markdown
+Use a lease to choose one coordinator.
+Each batch claim writes a fencing token or uses SELECT FOR UPDATE SKIP LOCKED.
+Each payment command has an idempotency key.
+The ledger has a unique constraint preventing duplicate charge records.
+```
+
+The senior answer layers protection. The lock reduces duplicate work; the database constraint protects correctness.
+
+### Build-Break-Fix Drill
+
+Build:
+
+```markdown
+Run two instances of the same scheduled job against one database table.
+```
+
+Break:
+
+```markdown
+Pause the lock holder for longer than the lease.
+Restart Redis during lock ownership.
+Send the same job item twice.
+```
+
+Fix:
+
+```markdown
+Add fencing tokens.
+Add unique constraints.
+Add idempotent job item processing.
+Move critical correctness into the database transaction.
+```
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 | Question / Scenario | Junior Developer Answer | Senior / Staff Backend Engineer Answer |

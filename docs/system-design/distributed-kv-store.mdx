@@ -337,6 +337,93 @@ $$\Phi = -\log_{10}(P_{\text{later}}(t - t_{\text{last}}))$$
 
 ---
 
+## Distributed KV Store Fundamentals Drill
+
+A distributed key-value store looks simple because the API is small: `put(key, value)` and `get(key)`. The complexity hides underneath: where the key lives, how many copies exist, what happens when nodes disagree, and how the system repairs itself.
+
+```mermaid
+flowchart LR
+    Client --> Router[Coordinator / router]
+    Router --> Ring[Partition map]
+    Ring --> N1[Replica 1]
+    Ring --> N2[Replica 2]
+    Ring --> N3[Replica 3]
+    N1 --> Disk1[Commit log + SSTables]
+    N2 --> Disk2[Commit log + SSTables]
+    N3 --> Disk3[Commit log + SSTables]
+    N1 <--> Repair[Read repair / anti-entropy]
+    N2 <--> Repair
+    N3 <--> Repair
+```
+
+### The Core Design Axes
+
+| Axis | Question | Typical choices |
+| --- | --- | --- |
+| Partitioning | Which node owns a key? | hash ranges, consistent hashing, virtual nodes |
+| Replication | How many copies exist? | replication factor 3, multi-AZ, multi-region |
+| Consistency | How many replicas must agree? | `R=1/W=1`, quorum, leader-based writes |
+| Storage engine | How is data stored on disk? | LSM tree, B-Tree, append-only log |
+| Repair | How do replicas converge? | read repair, background repair, hinted handoff |
+| Rebalancing | What happens when nodes join or leave? | token movement, streaming, throttling |
+
+### Example: Shopping Cart KV Store
+
+Requirement:
+
+```markdown
+Users should rarely lose cart updates.
+Reads should be low latency.
+It is acceptable for another device to see the update after a short delay.
+```
+
+Possible design:
+
+```markdown
+Key: cart:{userId}
+Value: JSON or encoded cart snapshot
+Replication factor: 3
+Write policy: W=2
+Read policy: R=1 with read repair
+Conflict handling: version vector or last-write-wins only if product accepts overwrite risk
+```
+
+The senior detail is conflict handling. If two devices update the cart during a partition, "last write wins" can drop one item. A deeper design stores item-level operations or merges carts by line item instead of replacing the whole snapshot blindly.
+
+### Common Interview Traps
+
+| Trap | Why it is shallow | Better answer |
+| --- | --- | --- |
+| "Just hash the key." | Node changes remap too many keys. | Use consistent hashing or partition maps. |
+| "Replicate to 3 nodes." | Replication alone does not define read/write correctness. | Specify `R`, `W`, failure behavior, and repair. |
+| "Use eventual consistency." | Too vague. | State what stale result can occur and why it is acceptable. |
+| "Store JSON." | Large values make partial updates and conflicts harder. | Choose value shape based on write pattern. |
+
+### Build-Break-Fix Drill
+
+Build:
+
+```markdown
+Implement an in-memory KV store with 3 replicas per key and a simple hash router.
+```
+
+Break:
+
+```markdown
+Kill one replica during writes.
+Add a new node and observe key remapping.
+Perform two conflicting writes to the same key.
+```
+
+Fix:
+
+```markdown
+Add virtual nodes.
+Add quorum writes.
+Add version metadata.
+Add background repair for stale replicas.
+```
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 In distributed systems design interviews, the difference between a mid-level candidate and a staff architect is the depth of trade-off reasoning:

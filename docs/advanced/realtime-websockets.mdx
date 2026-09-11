@@ -412,6 +412,72 @@ class ResilientWebSocketClient {
 
 ---
 
+## Realtime Fundamentals Interview Map
+
+Realtime does not always mean WebSockets. Choose the transport from the direction, frequency, and delivery needs.
+
+### 1. Polling vs SSE vs WebSocket
+
+| Transport | Direction | Best For |
+| :--- | :--- | :--- |
+| Polling | Client asks repeatedly | Simple low-frequency refresh |
+| SSE | Server to client | Notifications, LLM token stream, stock ticker |
+| WebSocket | Both directions | Chat, multiplayer, collaborative editing |
+
+WebSockets add stateful connection management. Do not choose them just because they sound advanced.
+
+### 2. A WebSocket is still a TCP connection
+
+After HTTP upgrade, the server keeps a socket open. That consumes:
+
+- File descriptor.
+- Kernel receive/send buffers.
+- JVM session object.
+- Authentication/session metadata.
+- Load balancer tracking state.
+
+### 3. Horizontal scaling problem
+
+If User A connects to Pod 1 and User B connects to Pod 4, Pod 1 cannot write directly to B's socket. The socket lives in Pod 4 memory.
+
+Use a message backplane:
+
+```mermaid
+flowchart LR
+    Pod1["Pod 1<br/>Alice socket"] --> Redis["Redis/Kafka backplane"]
+    Redis --> Pod4["Pod 4<br/>Bob socket"]
+```
+
+### 4. Delivery guarantees matter
+
+Redis Pub/Sub is fast but at-most-once. A disconnected pod misses messages.
+
+Kafka is durable and replayable but has higher operational complexity and latency.
+
+Choose based on whether missed events are acceptable.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Implement a small chat or notification stream with two application pods.
+  </Step>
+  <Step title="Break">
+    Store sessions only in a local map and send messages across pods.
+  </Step>
+  <Step title="Observe">
+    Messages disappear when sender and recipient are connected to different pods.
+  </Step>
+  <Step title="Fix">
+    Add a Redis/Kafka backplane and heartbeat-based connection cleanup.
+  </Step>
+  <Step title="Prove">
+    Run two pods, connect users to different pods, and verify delivery plus cleanup after forced disconnect.
+  </Step>
+</Steps>
+
+---
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 | Question / Scenario | Junior Developer Answer | Senior / Staff Backend Engineer Answer |

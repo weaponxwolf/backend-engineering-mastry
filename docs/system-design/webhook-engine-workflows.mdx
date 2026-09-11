@@ -407,6 +407,100 @@ Because Temporal state is reconstructed via **Event Sourcing Replay**:
 
 ---
 
+## Webhook & Workflow Fundamentals Drill
+
+Webhook systems are reliability systems wearing an HTTP costume. The hard parts are signature verification, idempotency, retries, ordering, backoff, dead-letter handling, and giving customers enough observability to debug their own endpoints.
+
+```mermaid
+flowchart LR
+    Event[Business event] --> Outbox[Outbox row]
+    Outbox --> Dispatcher[Dispatcher]
+    Dispatcher --> Attempt[Delivery attempt]
+    Attempt --> Customer[Customer endpoint]
+    Customer --> Result[2xx / 4xx / 5xx / timeout]
+    Result --> Retry[Retry scheduler]
+    Retry --> Attempt
+    Result --> DLT[Dead-letter state]
+    Attempt --> Log[Delivery log]
+```
+
+### Outbound Webhook Design Questions
+
+| Question | Strong design answer |
+| --- | --- |
+| How do you prove authenticity? | Sign payloads with timestamped HMAC and rotate secrets. |
+| What if the customer endpoint is down? | Retry with exponential backoff and cap total retry window. |
+| What if the same event is delivered twice? | Include stable event ID and require idempotent consumers. |
+| Does ordering matter? | Use per-aggregate ordering keys or document that ordering is not guaranteed. |
+| How can customers debug failures? | Provide attempt logs, response codes, timestamps, and replay controls. |
+| What if delivery never succeeds? | Move to dead-letter state and alert or expose manual replay. |
+
+### Inbound Webhook Design Questions
+
+Inbound webhooks are equally dangerous because external providers retry aggressively.
+
+```markdown
+Verify signature before parsing trust-sensitive fields.
+Store event ID before performing side effects.
+Return 2xx only after durable acceptance.
+Process slow work asynchronously.
+Treat duplicate delivery as normal.
+```
+
+### Workflow Engine Mental Model
+
+A workflow engine is a durable state machine:
+
+```markdown
+State + event -> decision + next state
+```
+
+Example payment workflow:
+
+```markdown
+CREATED -> AUTHORIZED -> CAPTURED -> SETTLED
+CREATED -> AUTH_FAILED
+AUTHORIZED -> CAPTURE_FAILED -> REFUND_PENDING
+```
+
+The database must remember the current state and enough history to resume after crashes. A workflow that only lives in memory is not a production workflow.
+
+### Common Failure Modes
+
+| Failure | Result | Defense |
+| --- | --- | --- |
+| Timeout after customer processed webhook | Sender retries and customer may duplicate work. | Stable event ID and idempotent receiver. |
+| Secret leaked | Attackers forge events. | Secret rotation and timestamp tolerance. |
+| Retry storm | Customer outage becomes traffic flood. | Exponential backoff, jitter, per-destination throttles. |
+| Out-of-order delivery | Customer sees impossible transitions. | Sequence numbers or per-resource ordering. |
+| Missing delivery logs | Support cannot debug. | Persist every attempt and response summary. |
+
+### Build-Break-Fix Drill
+
+Build:
+
+```markdown
+Create an outbound webhook dispatcher with event ID, HMAC signature, retry count, and delivery log.
+```
+
+Break:
+
+```markdown
+Make the customer endpoint timeout after processing.
+Return 500 for 30 minutes.
+Rotate the webhook secret while events are in flight.
+Deliver event version 2 before version 1.
+```
+
+Fix:
+
+```markdown
+Add idempotency guidance and stable IDs.
+Add exponential backoff with jitter.
+Support overlapping old and new secrets during rotation.
+Add per-aggregate sequence numbers when ordering is required.
+```
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 | Question / Scenario | Junior Developer Answer | Senior / Staff Backend Engineer Answer |

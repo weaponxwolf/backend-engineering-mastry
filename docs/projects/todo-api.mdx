@@ -190,6 +190,37 @@ Every production implementation must satisfy the following automated test cases:
 
 ---
 
+## Project Proof Drill
+
+This project is not complete when the endpoints "work once." It is complete when you can prove the basic backend boundaries are correct under validation errors, missing rows, duplicate requests, and database persistence.
+
+```mermaid
+flowchart LR
+    Client --> Controller[Controller: HTTP contract]
+    Controller --> Service[Service: business rules]
+    Service --> Repository[Repository: persistence boundary]
+    Repository --> DB[(PostgreSQL)]
+    Service --> Errors[Domain errors]
+    Errors --> Problem[ProblemDetail response]
+```
+
+| Proof target | What to demonstrate | Evidence |
+| --- | --- | --- |
+| HTTP contract | Each route returns the correct status code. | `201`, `200`, `204`, `400`, `404` examples |
+| Validation | Invalid title/body never reaches business logic. | Bean Validation test |
+| Persistence | Created todos survive application restart. | Testcontainers or local Postgres verification |
+| Error shape | Errors are predictable for clients. | RFC ProblemDetail JSON |
+| Layering | Controller does not contain SQL or business rules. | Package scan or code review |
+
+Break it deliberately:
+
+| Break | Expected failure | Correct fix |
+| --- | --- | --- |
+| Send empty title | `400 Bad Request` | DTO validation with useful message |
+| Read unknown ID | `404 Not Found` | Domain exception mapped centrally |
+| Delete same ID twice | First `204`, second `404` or idempotent `204` by design | Choose and document behavior |
+| Return entity directly | Persistence fields leak | Response DTO |
+
 ## 7. Active Recall Mastery Questions
 
 <AccordionGroup>

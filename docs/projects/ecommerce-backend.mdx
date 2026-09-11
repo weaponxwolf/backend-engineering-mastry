@@ -282,6 +282,43 @@ sequenceDiagram
 
 ---
 
+## Project Proof Drill
+
+The e-commerce backend is a correctness project. It must prove that checkout preserves inventory, money, order history, and idempotency even when users retry, webhooks repeat, and concurrent buyers race for the same stock.
+
+```mermaid
+sequenceDiagram
+    participant Buyer
+    participant API
+    participant DB
+    participant Outbox
+    participant Worker
+
+    Buyer->>API: POST /checkout with Idempotency-Key
+    API->>DB: Reserve inventory atomically
+    API->>DB: Create order and price snapshots
+    API->>Outbox: Store payment/order event in same transaction
+    API-->>Buyer: 201 Created
+    Worker->>Outbox: Publish after commit
+```
+
+| Proof target | What to demonstrate | Evidence |
+| --- | --- | --- |
+| No oversell | 10 buyers racing for 2 items gives exactly 2 successes. | Concurrent integration test |
+| Idempotent checkout | Retry does not create a second order. | Unique idempotency key per user |
+| Price history | Past orders do not change when product price changes. | Snapshot assertion |
+| Webhook safety | Same payment webhook can arrive twice. | Deduplication by provider event ID |
+| Outbox durability | Order and event commit together. | Transactional test |
+
+Failure drill:
+
+| Failure | Expected protection |
+| --- | --- |
+| Application crashes after order insert | Outbox row remains available for replay |
+| Payment provider times out | Idempotency key prevents duplicate order effects |
+| Two users buy last unit | Atomic SQL rejects one user without negative inventory |
+| Catalog price changes after checkout | Order item keeps original price |
+
 ## 7. Active Recall Mastery Questions
 
 <AccordionGroup>

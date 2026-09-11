@@ -874,6 +874,37 @@ For a serious app, keep related feature code together.
 
 ---
 
+## Project Proof Drill
+
+The full Notes API build should prove authorization, persistence, validation, search, and pagination together. A learner should be able to run tests that simulate two real users and prove isolation at every endpoint.
+
+```mermaid
+flowchart LR
+    UserA[User A token] --> API
+    UserB[User B token] --> API
+    API --> Scope[Owner-scoped service]
+    Scope --> Repo[Owner-scoped repository queries]
+    Repo --> Notes[(notes)]
+    Notes --> DTO[DTO responses]
+```
+
+| Scenario | Required proof |
+| --- | --- |
+| User A creates a private note | Row stores `owner_id = A` |
+| User B requests User A note ID | Response does not leak the note |
+| User A searches notes | SQL includes owner predicate |
+| User A updates note title | Only owned note mutates |
+| User A lists notes | Pagination limits rows returned |
+
+Minimum test names:
+
+```java
+@Test void userCannotReadAnotherUsersNote() {}
+@Test void searchResultsAreScopedToAuthenticatedUser() {}
+@Test void updateDoesNotTrustOwnerIdFromRequestBody() {}
+@Test void invalidNotePayloadReturnsProblemDetails() {}
+```
+
 ## Production Hardening
 
 Before shipping to production:

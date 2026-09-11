@@ -294,6 +294,36 @@ curl -i -X GET http://localhost:8080/api/v1/notes/1 \
 
 ---
 
+## Project Proof Drill
+
+The Notes API proves multi-tenant backend thinking. A correct solution is not only CRUD; it must prove that one authenticated user can never read, update, delete, search, or infer another user's notes.
+
+```mermaid
+flowchart LR
+    Token[JWT subject] --> Controller
+    Controller --> Service
+    Service --> Query[Repository query includes owner_id]
+    Query --> DB[(notes table)]
+    DB --> DTO[Owned note response]
+```
+
+| Proof target | What to demonstrate | Evidence |
+| --- | --- | --- |
+| Tenant isolation | Every read/write includes the authenticated owner. | Cross-user access tests |
+| Search safety | Search never escapes the owner boundary. | Query test with same title under two users |
+| Update safety | ID alone is never trusted. | `WHERE id = ? AND owner_id = ?` behavior |
+| Error safety | A foreign note should look missing, not leaked. | `404` instead of `403` when hiding existence |
+| Pagination | Large note lists do not load everything. | `Pageable` or `Slice` test |
+
+Attack drill:
+
+| Attack | Naive bug | Production defense |
+| --- | --- | --- |
+| Change URL ID to another user's note | Repository loads by `id` only | Query by `id` and `ownerId` |
+| Search common keyword | Search scans all notes | Add owner predicate to every search spec |
+| Decode JWT and modify user ID | Trust client-provided body user ID | Use authenticated principal only |
+| Delete foreign note | Delete by ID | Delete through owner-scoped command |
+
 ## 7. Active Recall Mastery Questions
 
 <AccordionGroup>

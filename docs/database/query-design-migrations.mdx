@@ -468,6 +468,93 @@ public class ProductionDataBackfillService {
 
 ---
 
+## Query Design Fundamentals Interview Map
+
+Query design is choosing the cheapest correct path through data.
+
+### 1. Start from the access pattern
+
+Do not create tables first and hope queries are fast. Write the questions the product asks:
+
+```console
+List the 50 newest paid orders for one user.
+Find unprocessed outbox events in creation order.
+Search active products by tenant and category.
+```
+
+Then design indexes that match filters, ordering, and pagination.
+
+### 2. Composite index order
+
+For this query:
+
+```sql
+SELECT id, created_at, total_cents
+FROM orders
+WHERE user_id = ?
+  AND status = 'PAID'
+ORDER BY created_at DESC
+LIMIT 50;
+```
+
+Use:
+
+```sql
+CREATE INDEX idx_orders_user_status_created
+ON orders(user_id, status, created_at DESC)
+INCLUDE (total_cents);
+```
+
+Equality filters usually come first, then range/order columns, then included payload columns.
+
+### 3. Backfills are workload, not just SQL
+
+A large update creates WAL, locks rows, produces dead tuples, and can lag replicas.
+
+Chunk it:
+
+```sql
+SELECT id
+FROM orders
+WHERE id > :lastId
+ORDER BY id
+LIMIT 1000;
+```
+
+Then update only that batch and commit.
+
+### 4. Migrations need evidence
+
+For every migration, ask:
+
+- Is it metadata-only or table-rewriting?
+- What lock does it require?
+- Can old and new app versions both run?
+- How will it behave on existing data?
+- What is the rollback or roll-forward plan?
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Design a query and index for newest paid orders per user.
+  </Step>
+  <Step title="Break">
+    Put `created_at` first in the index and omit `user_id`.
+  </Step>
+  <Step title="Observe">
+    Use `EXPLAIN` to see missed index usage or excess scanning.
+  </Step>
+  <Step title="Fix">
+    Reorder the composite index to match equality filters and sort order.
+  </Step>
+  <Step title="Prove">
+    Add a regression note with expected plan shape and bounded execution rows.
+  </Step>
+</Steps>
+
+---
+
 ## 4. Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 When interviewing for Senior or Staff Backend Engineer roles, interviewers evaluate whether you understand database internals and zero-downtime operational safety.

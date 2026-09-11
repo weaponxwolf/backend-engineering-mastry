@@ -528,6 +528,106 @@ class LedgerZeroSumTest {
 
 ---
 
+## Ledger Fundamentals Drill
+
+A financial ledger is not a table that stores the latest balance. It is an immutable history of money movement where every business event is recorded as balanced debits and credits.
+
+```mermaid
+flowchart LR
+    Command[Payment command] --> Idem[Idempotency check]
+    Idem --> Tx[Database transaction]
+    Tx --> Entry[Ledger entry]
+    Entry --> Debit[Debit line]
+    Entry --> Credit[Credit line]
+    Tx --> Outbox[Outbox event]
+    Entry --> Snapshot[Balance snapshot]
+    Snapshot --> Reconcile[Reconciliation job]
+```
+
+### The Ledger Invariants
+
+| Invariant | Meaning | How to enforce |
+| --- | --- | --- |
+| Debits equal credits | Money is moved, not created by accident. | Transaction check before insert commit |
+| Entries are append-only | History is never silently rewritten. | No update/delete path for posted entries |
+| Idempotent commands | Retries do not duplicate money movement. | Unique command key |
+| Currency-safe math | No floating-point rounding drift. | integer minor units or exact decimal |
+| Reconciliation exists | External systems are compared regularly. | settlement and drift reports |
+
+### Balance Table vs Ledger Table
+
+Naive balance table:
+
+```sql
+UPDATE accounts
+SET balance = balance - 1000
+WHERE id = 'buyer';
+
+UPDATE accounts
+SET balance = balance + 1000
+WHERE id = 'seller';
+```
+
+This can leave the system in a half-moved state if one update succeeds and the other fails. It also destroys the audit trail unless every mutation is separately logged.
+
+Ledger approach:
+
+```markdown
+Entry: checkout-payment-123
+Line 1: buyer_cash        CREDIT 1000 cents
+Line 2: platform_payable  DEBIT  1000 cents
+```
+
+The current balance becomes a derived view from posted lines. Snapshots are allowed for performance, but the immutable ledger remains the source of truth.
+
+### Interview Answer Shape
+
+When asked to design payments or wallet balances:
+
+1. State that balances are derived from immutable ledger entries.
+2. Use double-entry accounting for every money movement.
+3. Use idempotency keys for all external commands.
+4. Use database transactions for entry and line insertion.
+5. Use outbox events for downstream notification.
+6. Add reconciliation against payment processor settlement files.
+7. Forbid floating-point currency math.
+
+### Failure Questions You Must Be Ready For
+
+| Question | Strong answer |
+| --- | --- |
+| What if the client retries payment? | Same idempotency key returns same result. |
+| What if the processor captures but your server crashes? | Reconciliation and webhook idempotency repair local state. |
+| What if an entry is wrong? | Post a reversal entry, never edit history silently. |
+| How do you query balances fast? | Maintain transactionally updated snapshots or materialized aggregates. |
+| How do you prove no money was created? | Sum debits and credits by currency and account type. |
+
+### Build-Break-Fix Drill
+
+Build:
+
+```markdown
+Create tables: ledger_entry, ledger_line, account, idempotency_key.
+Post a payment with two balanced lines.
+```
+
+Break:
+
+```markdown
+Retry the same payment request.
+Crash after one account balance update in a naive balance-table design.
+Send a processor webhook twice.
+```
+
+Fix:
+
+```markdown
+Enforce a unique command key.
+Insert all ledger lines in one transaction.
+Reject unbalanced entries.
+Handle duplicate webhooks as normal behavior.
+```
+
 ## 12. Active Recall Interview Mastery
 
 <AccordionGroup>

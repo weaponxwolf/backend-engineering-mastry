@@ -650,6 +650,40 @@ class ConcurrentCheckoutIntegrationTest {
 
 ---
 
+## Project Proof Drill
+
+This full build should prove the difference between a demo checkout and a production checkout. The passing condition is not "order row inserted"; it is "the system keeps correct state when inventory is scarce, payment messages repeat, and downstream publication is delayed."
+
+```mermaid
+flowchart LR
+    Checkout[Checkout command] --> Idem[Idempotency guard]
+    Idem --> Inventory[Atomic inventory reservation]
+    Inventory --> Order[Order aggregate]
+    Order --> Snapshot[Price snapshot]
+    Order --> Outbox[Outbox event]
+    Outbox --> Publisher[Async publisher]
+    Provider[Payment provider] --> Webhook[Signed webhook]
+    Webhook --> Dedup[Provider event dedup]
+```
+
+| Proof target | Required evidence |
+| --- | --- |
+| Atomic inventory | Concurrent buyers never drive stock below zero. |
+| Idempotency | Same checkout command returns the original result. |
+| Price snapshot | Historical order remains stable after catalog update. |
+| Webhook security | Bad signature is rejected before state mutation. |
+| Outbox reliability | Order event is not lost when publisher is down. |
+| Transaction boundary | External HTTP calls do not run inside the database transaction. |
+
+Extra tests worth adding:
+
+```java
+@Test void retryingSameCheckoutDoesNotCreateSecondOrder() {}
+@Test void staleProductPriceDoesNotChangeExistingOrderItem() {}
+@Test void invalidWebhookSignatureDoesNotMutatePaymentState() {}
+@Test void unpublishedOutboxRowsAreRecoveredByPublisher() {}
+```
+
 ## 9. Production Acceptance Checklist
 
 | Requirement | Production Verification Standard |

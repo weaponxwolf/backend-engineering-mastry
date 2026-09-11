@@ -320,6 +320,79 @@ groups:
 
 ---
 
+## Logging & Monitoring Fundamentals Interview Map
+
+Logging and monitoring are not decorations. They are how production tells you what is happening.
+
+### 1. Log level meaning
+
+| Level | Use |
+| :--- | :--- |
+| `TRACE` | Extremely detailed local debugging |
+| `DEBUG` | Developer diagnostics, disabled in production by default |
+| `INFO` | Important lifecycle and business events |
+| `WARN` | Unexpected but handled condition |
+| `ERROR` | Failed operation requiring attention |
+
+Do not log every request body at `INFO`. Do not log secrets at any level.
+
+### 2. Structured logs beat plain strings
+
+Bad:
+
+```java
+log.info("order failed for user " + userId);
+```
+
+Better:
+
+```java
+log.warn("Order payment declined userId={} orderId={} reason={}",
+        userId, orderId, reason);
+```
+
+Best production output is structured JSON with `traceId`, `spanId`, service, route, status, and safe domain identifiers.
+
+### 3. What should trigger a page?
+
+Page on user pain:
+
+- High 5xx rate.
+- p99 latency above SLO.
+- Checkout/payment failures.
+- Queue lag causing missed deadlines.
+- Saturation of critical pools.
+
+Do not page only because CPU is high. High CPU may mean the worker is doing useful work.
+
+### 4. Error budget basics
+
+If the SLO is `99.9%`, the allowed failure is `0.1%`.
+
+Burn-rate alerts ask: "How fast are we spending that allowed failure?"
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Add structured JSON logs and RED metrics to a checkout endpoint.
+  </Step>
+  <Step title="Break">
+    Log raw tokens, add `userId` as a metric label, and alert on average latency only.
+  </Step>
+  <Step title="Observe">
+    Identify secret leakage, metric cardinality explosion, and hidden p99 pain.
+  </Step>
+  <Step title="Fix">
+    Mask secrets, move high-cardinality values to logs/traces, and alert on SLO burn rate.
+  </Step>
+  <Step title="Prove">
+    Add tests or log assertions that sensitive fields are masked and metrics expose only safe labels.
+  </Step>
+</Steps>
+
+---
+
 ## Production Mistakes & Anti-Patterns
 
 <Warning>

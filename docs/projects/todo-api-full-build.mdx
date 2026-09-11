@@ -507,6 +507,37 @@ It is small enough to finish in an afternoon, yet serious enough to teach the co
   </Tab>
 </Tabs>
 
+## Project Proof Drill
+
+Use this drill after the full build compiles. The point is to prove the learner understands the backend layers, not just that the happy path responds once.
+
+```mermaid
+flowchart TD
+    HTTP[HTTP request] --> DTO[Request DTO validation]
+    DTO --> Service[Service command]
+    Service --> Entity[Domain entity mutation]
+    Entity --> Repo[JPA repository]
+    Repo --> PG[(PostgreSQL)]
+    Service --> Response[Response DTO]
+```
+
+| Skill | Proof question | Passing evidence |
+| --- | --- | --- |
+| REST basics | Does create return `201 Created` with a resource representation or location? | cURL response and integration test |
+| Validation | Are invalid requests blocked before persistence? | `400` response with field errors |
+| JPA basics | Are entity changes saved through transaction boundaries? | SQL/log observation or repository assertion |
+| Error handling | Are missing todos mapped consistently? | ProblemDetail JSON |
+| Testing | Does a real database test pass without H2 shortcuts? | Testcontainers run |
+
+Break-fix checklist:
+
+| Break | Fix |
+| --- | --- |
+| Remove `@Valid` | Validation test fails |
+| Return JPA entity from controller | Replace with DTO |
+| Call repository from controller | Move business operation into service |
+| Use in-memory list | Replace with persistent repository and migration |
+
 ## Common Real-World Mistakes
 
 - **Missing `@Valid`**: Controller method accepts invalid payload because `@Valid` was forgotten before `@RequestBody`.

@@ -400,6 +400,80 @@ This controller excerpt assumes an `accountService` that maps the validated `(is
 
 ---
 
+## JWT & Session Fundamentals Interview Map
+
+Token security is about storage, validation, rotation, and resource authorization.
+
+### 1. Access token vs refresh token
+
+| Token | Purpose | Lifetime | Storage |
+| :--- | :--- | :--- | :--- |
+| Access token | Call APIs | Short | memory or secure platform storage |
+| Refresh token | Get new access tokens | Longer | `HttpOnly`, `Secure`, `SameSite` cookie or secure server-side session |
+
+If an access token leaks, short expiry limits damage. If a refresh token leaks, rotation and reuse detection limit long-term takeover.
+
+### 2. Stateless does not mean logout is solved
+
+Pure JWT access tokens are valid until expiry. If you need immediate revocation, you need:
+
+- Short access-token TTL.
+- Refresh-token rotation.
+- Server-side token family state.
+- Optional denylist or introspection for high-risk scopes.
+
+### 3. Claims are not trusted until verified
+
+Bad:
+
+```java
+String role = parseJwtWithoutVerifying(token).getClaim("role");
+```
+
+Correct validation:
+
+```mermaid
+flowchart LR
+    Parse["Parse token"] --> Signature["Verify signature"]
+    Signature --> Issuer["Validate issuer"]
+    Issuer --> Audience["Validate audience"]
+    Audience --> Time["Validate exp/nbf"]
+    Time --> Claims["Map trusted claims"]
+```
+
+### 4. XSS vs CSRF
+
+XSS lets attacker-controlled JavaScript run in your site. It can steal tokens from `localStorage`.
+
+CSRF abuses browser auto-sent credentials like cookies. It cannot usually add custom bearer headers from another origin.
+
+Token storage is a trade:
+
+- `localStorage`: easier, but exposed to XSS.
+- `HttpOnly` cookie: hidden from JavaScript, but needs CSRF defense.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Implement login, access token validation, refresh token rotation, and protected note retrieval.
+  </Step>
+  <Step title="Break">
+    Accept unsigned tokens, skip `aud`, store refresh token in localStorage, and check only roles.
+  </Step>
+  <Step title="Observe">
+    Forge claims, reuse old refresh tokens, and access another user's resource.
+  </Step>
+  <Step title="Fix">
+    Enforce issuer/audience/algorithm, rotate refresh tokens, and scope database queries by authenticated owner.
+  </Step>
+  <Step title="Prove">
+    Add tests for expired token, wrong audience, refresh reuse, wrong owner, and CSRF-protected cookie endpoints.
+  </Step>
+</Steps>
+
+---
+
 ## 6. Active Recall Interview Mastery
 
 <AccordionGroup>

@@ -411,6 +411,83 @@ Senior interviewers ask locking and isolation questions to see if you understand
 
 ---
 
+## Locking & Isolation Fundamentals Interview Map
+
+Transactions are not enough unless you understand what they isolate.
+
+### 1. Read phenomena in plain English
+
+| Anomaly | Meaning |
+| :--- | :--- |
+| Dirty read | You read data another transaction has not committed |
+| Non-repeatable read | You read the same row twice and get different values |
+| Phantom read | You repeat a range query and new matching rows appear |
+| Lost update | Two writers overwrite each other's change |
+| Write skew | Two transactions update different rows but break one shared rule |
+
+### 2. MVCC means readers do not block writers
+
+PostgreSQL keeps row versions. A reader sees the version visible to its snapshot.
+
+```mermaid
+flowchart LR
+    Old["Row version A<br/>xmin=10 xmax=20"] --> New["Row version B<br/>xmin=20 xmax=null"]
+    Snapshot["Reader snapshot before tx 20"] --> Old
+    Newer["Reader snapshot after tx 20"] --> New
+```
+
+An `UPDATE` creates a new tuple version; it does not overwrite the old bytes in place.
+
+### 3. Row locks protect rows, not ideas
+
+`SELECT ... FOR UPDATE` locks selected rows. It does not automatically lock rows that do not exist or a count-based invariant.
+
+For "at least one doctor must remain on call," two transactions can update different doctor rows and both commit unless you lock a shared parent row or use serializable isolation.
+
+### 4. Atomic SQL is often the simplest correctness tool
+
+Bad:
+
+```java
+Inventory inv = repo.findByProductId(id).orElseThrow();
+if (inv.available() >= qty) {
+    inv.decrease(qty);
+}
+```
+
+Better:
+
+```sql
+UPDATE inventory
+SET available_quantity = available_quantity - :qty
+WHERE product_id = :productId
+  AND available_quantity >= :qty;
+```
+
+If updated row count is `1`, the reservation succeeded. If `0`, it failed without overselling.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Create an inventory reservation table with one product and limited stock.
+  </Step>
+  <Step title="Break">
+    Use read-then-write logic from Java under 20 concurrent requests.
+  </Step>
+  <Step title="Observe">
+    Reproduce lost update or overselling.
+  </Step>
+  <Step title="Fix">
+    Replace it with atomic SQL or optimistic/pessimistic locking.
+  </Step>
+  <Step title="Prove">
+    Add a concurrent integration test where exactly available stock count succeeds.
+  </Step>
+</Steps>
+
+---
+
 ## Failure Modes & Edge Case Matrix
 
 | Failure Mode | Root Cause | Impact | Production Defense |

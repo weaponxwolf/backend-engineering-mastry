@@ -466,6 +466,104 @@ Senior interviewers test concurrency to verify whether an engineer understands l
 
 ---
 
+## Concurrency Fundamentals Interview Map
+
+Concurrency questions are about what two threads can observe and modify at the same time.
+
+### 1. Thread vs task
+
+A task is work. A thread is an execution vehicle.
+
+```mermaid
+flowchart LR
+    Task["Send email"] --> Thread["Platform or virtual thread"]
+    Thread --> CPU["CPU core executes instructions"]
+```
+
+Platform threads are OS-backed and expensive. Virtual threads are JVM-managed and cheap for blocking I/O, but they do not make shared mutable state safe.
+
+### 2. Race condition
+
+This is not atomic:
+
+```java
+count++;
+```
+
+It is three steps:
+
+```console
+read count
+add 1
+write count
+```
+
+Two threads can both read `41`, both compute `42`, and both write `42`. One increment disappears.
+
+### 3. Visibility vs atomicity
+
+`volatile` gives visibility. It does not make compound operations atomic.
+
+```java
+private volatile int count;
+
+void increment() {
+    count++; // still unsafe
+}
+```
+
+Use `AtomicInteger`, locks, or database atomic updates depending on the shared state location.
+
+### 4. Locks protect critical sections
+
+```java
+lock.lock();
+try {
+    balance = balance.subtract(amount);
+} finally {
+    lock.unlock();
+}
+```
+
+In backend systems, prefer database constraints and atomic SQL for persistent invariants. JVM locks protect only one process; they do not coordinate multiple pods.
+
+### 5. ThreadLocal is request-scoped only if cleaned
+
+A Tomcat thread can serve thousands of users over its lifetime. A `ThreadLocal` value left behind can leak one user's data into another request.
+
+Always clean:
+
+```java
+try {
+    CURRENT_USER.set(user);
+    chain.doFilter(request, response);
+} finally {
+    CURRENT_USER.remove();
+}
+```
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Implement an inventory decrement using a shared counter and then a database row.
+  </Step>
+  <Step title="Break">
+    Use `volatile int stock` and run 50 concurrent purchases.
+  </Step>
+  <Step title="Observe">
+    Watch lost updates or negative stock under contention.
+  </Step>
+  <Step title="Fix">
+    Use `AtomicInteger` for in-memory demos and atomic SQL for persistent inventory.
+  </Step>
+  <Step title="Prove">
+    Add a `CountDownLatch` concurrency test where exactly `K` of `N` purchases succeed.
+  </Step>
+</Steps>
+
+---
+
 ## Failure Modes & Edge Case Matrix
 
 | Failure Mode | Root Cause | Impact | Production Defense |

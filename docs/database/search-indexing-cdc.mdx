@@ -328,6 +328,87 @@ public class SemanticSearchService {
 
 ---
 
+## Search, CDC & Vector Fundamentals Interview Map
+
+Search is not the same as lookup. CDC is not the same as dual-writing. Vector search is not the same as SQL filtering.
+
+### 1. Lookup vs search
+
+Lookup:
+
+```sql
+SELECT *
+FROM products
+WHERE id = 42;
+```
+
+Search:
+
+```console
+User types: "wireless noise canceling travel headphones"
+```
+
+Search needs tokenization, scoring, typo tolerance, language processing, and ranking.
+
+### 2. Inverted index mental model
+
+```mermaid
+flowchart LR
+    Term["headphones"] --> Docs["doc 7, doc 9, doc 42"]
+    Term2["wireless"] --> Docs2["doc 9, doc 15, doc 42"]
+    Query["wireless headphones"] --> Intersect["Intersect postings + score"]
+```
+
+A B-Tree answers ordered scalar lookup. An inverted index answers text relevance.
+
+### 3. CDC vs application dual-write
+
+Application dual-write:
+
+```java
+db.save(product);
+search.index(product);
+```
+
+This can corrupt state when one write succeeds and the other fails.
+
+CDC reads committed database changes from the WAL after the database has already decided truth.
+
+### 4. Vector search basics
+
+Embeddings turn meaning into numbers. Similar text has nearby vectors.
+
+```sql
+SELECT id, title
+FROM product_embeddings
+ORDER BY embedding <=> :queryEmbedding
+LIMIT 10;
+```
+
+Vector search is approximate when using HNSW/IVFFlat indexes. You trade recall, memory, and latency.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Index product rows into OpenSearch through a CDC-style event stream.
+  </Step>
+  <Step title="Break">
+    Write directly to PostgreSQL and OpenSearch from application code, then force the second write to fail.
+  </Step>
+  <Step title="Observe">
+    Search results diverge from the source of truth.
+  </Step>
+  <Step title="Fix">
+    Move indexing behind outbox/CDC and make the indexer idempotent with external versioning.
+  </Step>
+  <Step title="Prove">
+    Replay old events out of order and assert newer indexed state is not overwritten.
+  </Step>
+</Steps>
+
+---
+
 ## 8. Failure Modes & Edge Case Matrix
 
 | Failure Mode | Component | Root Cause | Impact | Production Defense |

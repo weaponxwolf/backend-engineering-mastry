@@ -421,6 +421,89 @@ public class GlobalApiExceptionHandler {
 
 ---
 
+## Collections & Exceptions Fundamentals Interview Map
+
+Collections are not just API names. They are memory layouts, equality contracts, and concurrency choices.
+
+### 1. `List` vs `Set` vs `Map`
+
+| Type | Meaning | Production Use |
+| :--- | :--- | :--- |
+| `List` | Ordered sequence, duplicates allowed | API response order, line items |
+| `Set` | Uniqueness by `equals`/`hashCode` | tags, unique permissions |
+| `Map` | Key to value lookup | deduplication, registries, strategy maps |
+
+Wrong collection choice creates bugs. A `List` of permissions can contain duplicates. A `HashSet` with broken equality can lose elements.
+
+### 2. Big-O is not the whole answer
+
+`LinkedList` has theoretical $O(1)$ insertion if you already hold the node. Most backend code does not. It traverses from the head, misses CPU cache repeatedly, and allocates one object per node.
+
+```mermaid
+flowchart LR
+    ArrayList["ArrayList<br/>contiguous references"] --> Cache["CPU prefetch friendly"]
+    LinkedList["LinkedList<br/>scattered nodes"] --> Miss["pointer chasing + cache misses"]
+```
+
+### 3. Hash-based collections need immutable keys
+
+Bad:
+
+```java
+record MutableKey(StringBuilder value) {}
+```
+
+If the value used for `hashCode()` changes after insertion, the key is stored in one bucket but looked up in another.
+
+Use records or immutable fields for keys:
+
+```java
+public record OrderKey(Long tenantId, Long orderId) {}
+```
+
+### 4. Exceptions should represent exceptional paths
+
+Bad high-volume path:
+
+```java
+try {
+    return repository.findById(id).orElseThrow();
+} catch (NoSuchElementException ex) {
+    return null;
+}
+```
+
+Better:
+
+```java
+return repository.findById(id)
+        .map(NoteResponse::from);
+```
+
+Throw domain exceptions at boundaries where an error response is needed. Do not throw exceptions for normal loop decisions.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Create a deduplication map keyed by an immutable `OrderKey`.
+  </Step>
+  <Step title="Break">
+    Replace the key with a mutable class and mutate it after insertion.
+  </Step>
+  <Step title="Observe">
+    `map.get(key)` fails even though the entry still consumes heap.
+  </Step>
+  <Step title="Fix">
+    Use records or final fields for all hash keys.
+  </Step>
+  <Step title="Prove">
+    Add unit tests for equality, duplicate suppression, and failed mutable-key lookup.
+  </Step>
+</Steps>
+
+---
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 | Question / Scenario | Junior Developer Answer | Senior / Staff Backend Engineer Answer |

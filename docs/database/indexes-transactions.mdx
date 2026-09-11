@@ -359,6 +359,96 @@ ON tenant_orders (status, created_at DESC);
 
 ---
 
+## Index & Transaction Fundamentals Interview Map
+
+Indexes are not magic speed buttons. They are extra data structures that trade write cost and disk space for faster reads.
+
+### 1. What is an index physically?
+
+An index is a smaller sorted structure that points to table rows.
+
+```mermaid
+flowchart LR
+    Query["WHERE email = 'a@x.com'"] --> BTree["B+Tree index on email"]
+    BTree --> Tid["Tuple ID<br/>(page, item)"]
+    Tid --> Heap["Table heap page"]
+```
+
+Without an index, PostgreSQL may read every table page. With a selective index, it can jump to a few pages.
+
+### 2. Why not index every column?
+
+Every index must be maintained on writes.
+
+```mermaid
+flowchart LR
+    Insert["INSERT order row"] --> Heap["Write table row"]
+    Insert --> Idx1["Update user_id index"]
+    Insert --> Idx2["Update status index"]
+    Insert --> Idx3["Update created_at index"]
+```
+
+Too many indexes slow `INSERT`, `UPDATE`, `DELETE`, consume memory, increase WAL volume, and make migrations slower.
+
+### 3. Cardinality and selectivity
+
+High-cardinality columns have many distinct values, such as email. Low-cardinality columns have few values, such as boolean flags.
+
+```sql
+CREATE INDEX idx_users_email ON users(email); -- usually useful
+CREATE INDEX idx_users_active ON users(active); -- often useless if most rows are active
+```
+
+For sparse boolean queries, use partial indexes:
+
+```sql
+CREATE INDEX idx_users_deleted
+ON users(id)
+WHERE deleted_at IS NOT NULL;
+```
+
+### 4. Transactions need constraints too
+
+Application checks are not enough under concurrency.
+
+Bad:
+
+```java
+if (!repo.existsByEmail(email)) {
+    repo.save(new User(email));
+}
+```
+
+Two requests can both pass the check. Add a database unique constraint:
+
+```sql
+ALTER TABLE users ADD CONSTRAINT uq_users_email UNIQUE (email);
+```
+
+**Senior answer:** "The database is the final invariant boundary. Application validation improves UX; constraints protect correctness."
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Create `users(email)` and `orders(user_id, status, created_at)` queries.
+  </Step>
+  <Step title="Break">
+    Run the queries without indexes, then add low-value indexes on every column.
+  </Step>
+  <Step title="Observe">
+    Use `EXPLAIN (ANALYZE, BUFFERS)` to compare scans, write cost, and buffer reads.
+  </Step>
+  <Step title="Fix">
+    Add selective composite, partial, or covering indexes that match real access patterns.
+  </Step>
+  <Step title="Prove">
+    Add integration tests for unique constraints and capture query plans for critical reads.
+  </Step>
+</Steps>
+
+---
+
 ## Active Recall & Interview Mastery
 
 <AccordionGroup>

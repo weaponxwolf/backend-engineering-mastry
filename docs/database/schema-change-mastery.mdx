@@ -335,6 +335,84 @@ DROP INDEX CONCURRENTLY idx_orders_customer_date;
 
 ---
 
+## Schema Migration Fundamentals Interview Map
+
+Schema changes are production deployments. Treat them like code releases with compatibility windows.
+
+### 1. Why `ddl-auto: update` is dangerous
+
+Hibernate `ddl-auto: update` mutates schema at app startup. In production, many pods can start together, race for metadata locks, and apply unexpected changes without review.
+
+Production:
+
+```yaml
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: false # in web pods when migrations run as a separate job
+```
+
+### 2. Backward compatibility during rolling deploys
+
+During a rolling deploy, old and new app versions run at the same time.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Old as App v1
+    participant New as App v2
+    participant DB as Database
+
+    Old->>DB: Reads column name
+    New->>DB: Writes name and full_name
+    Old->>DB: Still must not crash
+```
+
+A schema change is safe only if both versions can operate during the transition.
+
+### 3. Expand and contract
+
+1. Expand: add new nullable column/table/index.
+2. Dual-write: new app writes old and new shapes.
+3. Backfill: migrate old data in chunks.
+4. Read switch: app reads new shape.
+5. Contract: later remove old shape.
+
+### 4. Lock timeout is a safety valve
+
+Every DDL script should fail fast if it cannot acquire locks:
+
+```sql
+SET lock_timeout = '2s';
+SET statement_timeout = '5s';
+```
+
+Failing a migration is better than blocking every web request behind a queued `ACCESS EXCLUSIVE` lock.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Add `full_name` while old code still reads `name`.
+  </Step>
+  <Step title="Break">
+    Rename the column in one step during a simulated rolling deploy.
+  </Step>
+  <Step title="Observe">
+    Watch either old or new pods fail depending on deployment order.
+  </Step>
+  <Step title="Fix">
+    Use expand/contract, dual-write, chunked backfill, and delayed cleanup.
+  </Step>
+  <Step title="Prove">
+    Run tests with both old and new application versions against the transitional schema.
+  </Step>
+</Steps>
+
+---
+
 ## 4. Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 When interviewing for Senior or Staff Database Architect roles, interviewers evaluate whether you understand lock hierarchies, transaction isolation, and backward-compatible schema changes.

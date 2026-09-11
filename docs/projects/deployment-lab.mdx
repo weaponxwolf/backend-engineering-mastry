@@ -369,6 +369,48 @@ jobs:
 
 ---
 
+## Project Proof Drill
+
+The deployment lab should prove that the application can be built, scanned, configured, started, drained, and rolled back without guessing. A production deployment is a controlled state transition, not a file copy.
+
+```mermaid
+flowchart LR
+    Commit --> CI[Test and package]
+    CI --> Image[Build image]
+    Image --> Scan[Security scan]
+    Scan --> Registry[Push image]
+    Registry --> Deploy[Kubernetes rollout]
+    Deploy --> Probes[Readiness and liveness]
+    Probes --> Traffic[Receive traffic]
+    Traffic --> Rollback[Rollback if SLO burns]
+```
+
+| Proof target | Required evidence |
+| --- | --- |
+| Reproducible artifact | Same commit produces a tagged immutable image. |
+| Container health | Readiness blocks traffic until the app can serve. |
+| Graceful shutdown | Existing requests finish during pod termination. |
+| Secret handling | Secrets come from environment/secret manager, not Git. |
+| Migration safety | Flyway runs before incompatible application code. |
+| Rollback | Previous image can be restored with one command. |
+
+Drill:
+
+```bash
+kubectl rollout restart deployment/ecommerce-backend
+kubectl rollout status deployment/ecommerce-backend
+kubectl rollout undo deployment/ecommerce-backend
+```
+
+Evidence to capture:
+
+| Evidence | Why it matters |
+| --- | --- |
+| zero failed readiness during startup | no traffic before app is ready |
+| no interrupted in-flight request during shutdown | graceful termination works |
+| image digest in deployment | deployment is traceable |
+| migration logs | schema changed before app depended on it |
+
 ## 7. Operational Deployment Checklist & Rollback Runbook
 
 ### Pre-Deployment Checklist

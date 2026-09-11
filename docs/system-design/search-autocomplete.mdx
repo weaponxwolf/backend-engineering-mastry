@@ -318,6 +318,113 @@ sequenceDiagram
 
 ---
 
+## Search & Autocomplete Fundamentals Drill
+
+Search is not a database `LIKE '%word%'` query at scale. It is a retrieval and ranking system: parse user intent, find candidate documents fast, rank them well, and keep the index fresh enough for the product.
+
+```mermaid
+flowchart LR
+    Query[User query] --> Normalize[Normalize and tokenize]
+    Normalize --> Retrieve[Retrieve candidates]
+    Retrieve --> Rank[Rank results]
+    Rank --> Personalize[Optional personalization]
+    Personalize --> Response[Return top N]
+    Docs[Source data] --> Indexer[Index pipeline]
+    Indexer --> Inverted[Index / prefix structure]
+    Inverted --> Retrieve
+```
+
+### Lookup vs Search vs Autocomplete
+
+| Problem | Example | Best mental model |
+| --- | --- | --- |
+| Lookup | Find user by exact email. | B-Tree or hash lookup |
+| Search | Find products matching "running shoes waterproof." | inverted index and ranking |
+| Autocomplete | Suggest after typing "runn". | prefix index, trie, edge n-grams, popularity ranking |
+| Recommendation | "You may also like." | behavior signals and ranking model |
+
+### Why SQL `LIKE` Fails
+
+Naive query:
+
+```sql
+SELECT *
+FROM products
+WHERE name ILIKE '%phone%'
+ORDER BY created_at DESC
+LIMIT 20;
+```
+
+Problems:
+
+- Leading wildcard prevents normal B-Tree index usage.
+- Ranking by recency ignores textual relevance.
+- Spelling mistakes return nothing.
+- Hot queries repeatedly scan too much data.
+- Multi-language tokenization becomes messy.
+
+Production systems use inverted indexes, n-grams, prefix indexes, or specialized search engines depending on scale and feature needs.
+
+### Autocomplete Design Checklist
+
+| Concern | Question |
+| --- | --- |
+| Latency | Can suggestions return under 50 ms? |
+| Prefix length | Do you query after 1 character or wait until 2-3? |
+| Ranking | Is ordering by popularity, personalization, business priority, or freshness? |
+| Freshness | Must a newly created item appear immediately? |
+| Hot prefixes | What happens when everyone types "a" or "i"? |
+| Abuse | Can attackers enumerate private data with prefixes? |
+
+### Example: Product Autocomplete
+
+Index-time work:
+
+```markdown
+Product: "Apple iPhone 16 Pro"
+Tokens: apple, iphone, 16, pro
+Prefixes: ap, app, appl, apple, ip, iph, ipho, iphone
+Signals: popularity, availability, click-through rate, region
+```
+
+Query-time work:
+
+```markdown
+Input: "iph"
+Normalize: iph
+Retrieve: prefix matches for iph
+Rank: popularity + availability + region + personalization
+Return: top 10 suggestions
+```
+
+### Build-Break-Fix Drill
+
+Build:
+
+```markdown
+Create a small autocomplete index from product names using prefixes.
+Return top 10 by popularity.
+```
+
+Break:
+
+```markdown
+Add 1 million products starting with the same prefix.
+Type a one-character query.
+Update product popularity while serving reads.
+Search for misspelled words.
+```
+
+Fix:
+
+```markdown
+Require minimum prefix length.
+Cache hot prefixes.
+Separate retrieval from ranking.
+Add typo-tolerant matching only after measuring need.
+Use an async indexing pipeline with freshness monitoring.
+```
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 Search autocomplete is a classic system design interview question where candidates are evaluated on scale math and data structure choices:

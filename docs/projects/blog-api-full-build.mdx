@@ -311,6 +311,40 @@ public class Post {
 
 ---
 
+## Project Proof Drill
+
+The Blog API project proves relational modeling, dynamic filtering, JPA fetch planning, and author-level authorization. The learner should be able to explain why each test exists and which production failure it prevents.
+
+```mermaid
+flowchart LR
+    Request[Search request] --> Spec[JPA Specification]
+    Spec --> Query[Generated SQL]
+    Query --> PG[(PostgreSQL)]
+    PG --> EntityGraph[EntityGraph fetch plan]
+    EntityGraph --> DTO[Post response DTO]
+    Author[Authenticated author] --> Authz[Method security]
+    Authz --> Command[Create/update/publish command]
+```
+
+| Proof target | What to verify |
+| --- | --- |
+| Dynamic search | Keyword, tag, status, and author filters compose without handwritten SQL string concatenation. |
+| N+1 prevention | Loading a page of posts does not trigger one author/tag query per row. |
+| Slug uniqueness | Duplicate slugs fail predictably at validation or unique constraint boundary. |
+| Author ownership | One author cannot edit another author's draft. |
+| Publication workflow | Draft, publish, archive, and visibility rules are explicit state transitions. |
+
+Failure drill:
+
+| Break | Expected learning |
+| --- | --- |
+| Remove `@EntityGraph` | Query count grows with result size. |
+| Use string-built SQL for filters | Injection and escaping risks appear. |
+| Trust `authorId` from request body | Authorization bypass appears. |
+| Delete a tag without relationship rules | Join table or referential integrity failure appears. |
+
+---
+
 ### 2. Threaded Hierarchical Comment Entity
 ```java
 package com.example.blog.comment.domain;

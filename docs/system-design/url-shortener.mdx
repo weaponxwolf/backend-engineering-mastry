@@ -481,6 +481,107 @@ DROP TABLE urls_2026_09;
 
 ---
 
+## URL Shortener Fundamentals Drill
+
+A URL shortener looks tiny, but it tests nearly every backend fundamental: ID generation, redirects, caching, abuse prevention, analytics, expiration, and read-heavy scaling.
+
+```mermaid
+flowchart LR
+    Create[POST /links] --> Code[Generate short code]
+    Code --> Store[(URL mapping table)]
+    Store --> Cache[(Cache)]
+    User[Browser] --> Redirect[GET /{code}]
+    Redirect --> Cache
+    Cache --> Store
+    Redirect --> Analytics[Async click event]
+    Redirect --> Target[301 or 302 redirect]
+```
+
+### The Real Requirements
+
+| Requirement | Why it matters |
+| --- | --- |
+| Short code uniqueness | Collisions must be handled safely. |
+| Low redirect latency | Redirect path is read-heavy and user-facing. |
+| Abuse protection | Short links hide dangerous destinations. |
+| Expiration | Old links need cleanup without table-wide locks. |
+| Analytics | Click tracking must not slow redirects. |
+| Custom aliases | User-chosen codes need uniqueness and moderation. |
+| Redirect semantics | 301 can be cached by browsers; 302/307 remain flexible. |
+
+### Create Path vs Redirect Path
+
+Create path:
+
+```markdown
+Validate target URL.
+Check user quota.
+Generate or reserve short code.
+Insert mapping with unique constraint.
+Return short URL.
+```
+
+Redirect path:
+
+```markdown
+Read code from request path.
+Check cache.
+Fallback to database.
+Reject expired or unsafe link.
+Emit async analytics event.
+Return redirect response.
+```
+
+The redirect path must stay extremely fast. Analytics, fraud scoring, and enrichment should not block the browser unless the product explicitly requires synchronous protection.
+
+### Collision Handling
+
+A shallow answer says, "hash the URL." A deeper answer says:
+
+```markdown
+If two long URLs hash to the same short code, the database unique constraint
+detects the collision. The system retries with more entropy or allocates from
+a key generation service. Correctness must not depend on probability alone.
+```
+
+### Public API Edge Cases
+
+| Edge case | Defense |
+| --- | --- |
+| Same URL submitted twice | Decide whether to return same code per user or create separate trackable links. |
+| Malicious URL | Safe browsing checks, domain blocklist, reporting, takedown workflow. |
+| Hot celebrity link | CDN/cache redirect metadata and async analytics. |
+| Expired link | Return 404 or custom expired page, do not redirect. |
+| Browser caches old 301 | Use 302 until the target is permanent. |
+
+### Build-Break-Fix Drill
+
+Build:
+
+```markdown
+POST /links creates a short code.
+GET /{code} redirects and emits an analytics event.
+```
+
+Break:
+
+```markdown
+Force a code collision.
+Send 10,000 requests/second to one hot code.
+Change the target after returning 301.
+Submit a dangerous destination URL.
+```
+
+Fix:
+
+```markdown
+Use a unique constraint and retry.
+Cache redirect mappings.
+Emit analytics asynchronously.
+Choose redirect status intentionally.
+Add abuse scanning and takedown state.
+```
+
 ## 11. Senior Interview Questions & Active Recall
 
 <AccordionGroup>

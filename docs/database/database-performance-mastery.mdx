@@ -390,6 +390,98 @@ Execution Time: 0.055 ms
 
 ---
 
+## Database Performance Fundamentals Interview Map
+
+Performance work starts with evidence, not guesses.
+
+### 1. What is slow: CPU, disk, lock, or network?
+
+| Symptom | Likely Bottleneck |
+| :--- | :--- |
+| High `shared read` buffers | Disk/cache miss problem |
+| High CPU with low reads | Bad plan, expensive function, sort, join |
+| Long wait on locks | Transaction holding row/table lock |
+| App waits for connection | HikariCP pool exhaustion |
+| Fast DB query but slow API | Serialization, network, downstream, or thread pool |
+
+### 2. `EXPLAIN` vs `EXPLAIN ANALYZE`
+
+`EXPLAIN` shows the planner's estimate. `EXPLAIN ANALYZE` executes the query and shows real timings.
+
+Use:
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT id, total_cents
+FROM orders
+WHERE user_id = 42
+ORDER BY created_at DESC
+LIMIT 50;
+```
+
+Read:
+
+- Estimated rows vs actual rows.
+- Scan type.
+- Join type.
+- Buffers hit vs read.
+- Sort method and disk spill.
+- Planning time vs execution time.
+
+### 3. Connection pool size is a budget
+
+If each pod has pool size `20` and you run `30` replicas, the database may receive `600` connections.
+
+```console
+total_db_connections = replicas * max_pool_size + admin_reserved_connections
+```
+
+Do not size pools per pod in isolation. Size them against the database's CPU, memory, and `max_connections`.
+
+### 4. Pagination is a performance contract
+
+Offset pagination gets slower as the offset grows:
+
+```sql
+SELECT *
+FROM orders
+ORDER BY created_at DESC
+OFFSET 1000000
+LIMIT 20;
+```
+
+Keyset pagination uses the previous row as the cursor:
+
+```sql
+SELECT *
+FROM orders
+WHERE (created_at, id) < (:lastCreatedAt, :lastId)
+ORDER BY created_at DESC, id DESC
+LIMIT 20;
+```
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Insert one million orders with a realistic user/status/date distribution.
+  </Step>
+  <Step title="Break">
+    Query with deep offset, missing composite index, and oversized HikariCP pools across replicas.
+  </Step>
+  <Step title="Observe">
+    Compare `EXPLAIN (ANALYZE, BUFFERS)`, API p99 latency, and connection waits.
+  </Step>
+  <Step title="Fix">
+    Use keyset pagination, covering indexes, and a database-wide connection budget.
+  </Step>
+  <Step title="Prove">
+    Record before/after plans and write a regression test for bounded page size.
+  </Step>
+</Steps>
+
+---
+
 ## Failure Modes & Edge Case Matrix
 
 | Failure Mode | Root Cause | Impact | Production Defense |

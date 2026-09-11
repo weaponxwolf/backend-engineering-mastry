@@ -655,6 +655,48 @@ Retry-After: 38
 
 ---
 
+## Project Proof Drill
+
+This project proves that rate limiting is a distributed systems problem. A passing implementation must make the same decision across multiple application pods and must expose clear behavior to clients.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant P1 as Pod 1
+    participant R as Redis
+    participant P2 as Pod 2
+
+    C->>P1: Request 1
+    P1->>R: Atomic Lua decision
+    R-->>P1: allow, remaining=9
+    C->>P2: Request 2
+    P2->>R: Atomic Lua decision
+    R-->>P2: allow, remaining=8
+```
+
+| Proof target | Required evidence |
+| --- | --- |
+| Atomic decision | Concurrent requests cannot exceed the limit through race conditions. |
+| Multi-pod correctness | Requests distributed across pods share the same budget. |
+| Useful rejection | `429` includes `Retry-After` and rate limit headers. |
+| Policy flexibility | Different routes can use different limits. |
+| Redis failure policy | Behavior is intentionally fail-open or fail-closed per route. |
+
+Load drill:
+
+```bash
+hey -n 200 -c 50 http://localhost:8080/api/search?q=spring
+```
+
+Expected evidence:
+
+| Metric | What it proves |
+| --- | --- |
+| allowed count | Requests under budget pass. |
+| rejected count | Excess requests get `429`. |
+| Redis latency | Limiter storage is not the bottleneck. |
+| hot keys | One user/API key is not overwhelming shared capacity. |
+
 ## 10. Active Recall Mastery Questions
 
 <AccordionGroup>

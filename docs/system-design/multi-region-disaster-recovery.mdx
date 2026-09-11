@@ -462,6 +462,91 @@ flowchart TD
 
 ---
 
+## Multi-Region Disaster Recovery Fundamentals Drill
+
+Multi-region design is not "put servers in two regions." It is a set of promises about how much data you can lose, how long the service can be down, which region accepts writes, and how users are routed during failure.
+
+```mermaid
+flowchart LR
+    User --> DNS[DNS or global traffic manager]
+    DNS --> R1[Region A]
+    DNS --> R2[Region B]
+    R1 --> DB1[(Primary database)]
+    DB1 -- async replication --> DB2[(Replica database)]
+    R1 --> Queue1[Regional queue]
+    R2 --> Queue2[Regional queue]
+    DB2 --> Promote[Failover promotion]
+```
+
+### RTO And RPO In Plain English
+
+| Term | Question it answers | Example |
+| --- | --- | --- |
+| RTO | How long can we be unavailable? | "Checkout must recover within 15 minutes." |
+| RPO | How much committed data can we lose? | "At most 30 seconds of analytics data, zero confirmed payments." |
+
+Every multi-region architecture must start with these two numbers. Without them, active-active, active-passive, and backup frequency are just expensive guesses.
+
+### Active-Passive vs Active-Active
+
+| Pattern | How writes work | Strength | Cost |
+| --- | --- | --- | --- |
+| Active-passive | One region accepts writes, another waits. | Simpler consistency and failover story. | Slower recovery unless automated and tested. |
+| Warm standby | Passive region already has running capacity. | Faster RTO than cold standby. | Pays for idle capacity. |
+| Active-active | Multiple regions accept traffic. | Low latency and regional resilience. | Conflict resolution and data correctness become much harder. |
+
+### Example: E-Commerce Platform
+
+Not every subsystem needs the same DR promise:
+
+| Subsystem | DR requirement | Design choice |
+| --- | --- | --- |
+| Product catalog | Can be stale for minutes. | Multi-region read replicas and CDN cache |
+| Cart | User should not lose recent updates. | Regional sticky routing plus async backup |
+| Payment ledger | Cannot lose confirmed money movement. | Single write authority or strongly consistent ledger region |
+| Analytics | Can replay from events. | Queue retention and batch rebuild |
+
+### What Happens During Failover
+
+A serious answer describes the failover timeline:
+
+```markdown
+00:00 Monitoring detects primary region outage.
+00:02 Incident commander declares failover.
+00:04 Stop writes to unhealthy region.
+00:06 Promote replica or activate standby database.
+00:08 Switch global traffic routing.
+00:10 Verify health checks, error rate, queue lag, and payment reconciliation.
+```
+
+The hard part is not moving traffic. The hard part is making sure the old region cannot come back and accept conflicting writes.
+
+### Build-Break-Fix Drill
+
+Build:
+
+```markdown
+Run the application with primary database in region A and read-only replica in region B.
+Document RTO and RPO for each major feature.
+```
+
+Break:
+
+```markdown
+Cut connectivity from region A.
+Promote region B while region A is partially alive.
+Replay delayed events after failover.
+```
+
+Fix:
+
+```markdown
+Add explicit write fencing.
+Add runbook steps.
+Add synthetic failover tests.
+Add reconciliation for delayed or duplicated events.
+```
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 When senior interviewers ask how you design a multi-region system, they want to see if you respect the laws of physics, understand networking protocols, and evaluate operational trade-offs, or if you simply assume cloud databases handle everything automatically.
