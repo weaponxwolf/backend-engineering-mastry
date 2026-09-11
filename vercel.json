@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "buildCommand": "npm run export && unzip -q -o docs/export.zip -d ./out",
+  "outputDirectory": "out",
+  "cleanUrls": true,
+  "trailingSlash": false
+}

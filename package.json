@@ -14,6 +14,7 @@
     "test:examples": "npm run test:java && npm run test:todo",
     "check": "npm run test:audit && npm run audit && npm run validate && npm run links",
     "export": "cd docs && mintlify export",
+    "build": "npm run export && unzip -q -o docs/export.zip -d ./out",
     "links:external": "cd docs && mintlify broken-links --check-external"
   },
   "keywords": [
