@@ -108,11 +108,11 @@ for (const filePath of allFiles) {
       }
     }
 
-    // Replace Next.js environment fallbacks inside JS bundles
+    // Replace Next.js environment fallbacks inside JS bundles with valid syntax
     if (content.includes('NEXT_PUBLIC_BASE_PATH')) {
-      content = content.replaceAll('.NEXT_PUBLIC_BASE_PATH??""', `"${basePath}"`);
-      content = content.replaceAll('.NEXT_PUBLIC_BASE_PATH?? ""', `"${basePath}"`);
-      content = content.replaceAll('.NEXT_PUBLIC_ASSET_PREFIX??""', `"${basePath}"`);
+      content = content.replaceAll('.NEXT_PUBLIC_BASE_PATH??""', `.NEXT_PUBLIC_BASE_PATH??"${basePath}"`);
+      content = content.replaceAll('.NEXT_PUBLIC_BASE_PATH?? ""', `.NEXT_PUBLIC_BASE_PATH??"${basePath}"`);
+      content = content.replaceAll('.NEXT_PUBLIC_ASSET_PREFIX??""', `.NEXT_PUBLIC_ASSET_PREFIX??"${basePath}"`);
     }
 
     if (content !== original) {
@@ -134,6 +134,18 @@ for (const filePath of allFiles) {
         fs.writeFileSync(filePath, content, 'utf8');
         modifiedCount++;
       }
+    }
+  }
+}
+
+// Verify syntax of all generated JS chunks
+for (const filePath of allFiles) {
+  if (path.extname(filePath) === '.js') {
+    try {
+      import('child_process').then(cp => cp.execSync(`node --check "${filePath}"`));
+    } catch (err) {
+      console.error(`[prepare-github-pages] Syntax error in ${filePath}:`, err.message);
+      process.exit(1);
     }
   }
 }
