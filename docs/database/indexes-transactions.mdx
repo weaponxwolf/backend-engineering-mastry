@@ -14,6 +14,13 @@ A backend engineer who only understands syntax will build slow, fragile systems:
 
 This masterclass provides an exhaustive, production-grade guide to B+Tree storage mechanics, the Leftmost Prefix rule, index selectivity math, covering indexes, and the mapping of ACID guarantees directly to PostgreSQL engine subsystems.
 
+## Prerequisites: Before You Begin
+
+Before exploring B+Tree indexing and transaction isolation internals, ensure you understand:
+- Relational table schemas, primary keys, and foreign key constraints.
+- Basic SQL querying (`SELECT`, `WHERE`, `ORDER BY`, `JOIN`).
+- The fundamental concept of database transactions (`BEGIN`, `COMMIT`, `ROLLBACK`).
+
 ---
 
 ## The Fundamental Search Problem: Sequential Scan vs B+Tree Index
@@ -286,6 +293,72 @@ REINDEX INDEX CONCURRENTLY idx_orders_status_created_user;
 
 ---
 
+## Failure Modes & Edge Case Matrix
+
+| Failure Mode | Root Cause | Impact | Production Defense |
+| :--- | :--- | :--- | :--- |
+| **Unindexed Foreign Key Lock** | Child table FK column lacks an index | `DELETE` on parent acquires table-level share lock on child | Always create explicit B-Tree index on all foreign key columns. |
+| **Random UUID Index Fragmentation** | Using `UUIDv4` as clustered/primary key | Inserts hit random 8 KB pages, causing constant leaf page splits | Use sequential UUIDs (`UUIDv7`) or `BIGSERIAL` / TSID. |
+| **Leftmost Prefix Bypass** | Query filters on 2nd or 3rd index column without 1st | Database ignores composite index; falls back to Seq Scan | Reorder index columns or create a dedicated single-column index. |
+| **Phantom Index Overhead** | Over-indexing write-heavy tables (e.g. 10+ indexes) | Every `INSERT` and `UPDATE` must update 10 separate trees | Audit unused indexes with `pg_stat_user_indexes` and drop them. |
+| **Transaction Deadlock** | Two transactions update rows in opposite order | One transaction is aborted with 40P01 Deadlock detected | Enforce Canonical Ordering (always update IDs in sorted order). |
+
+---
+
+## Hands-on Practice Challenge & Verification Tests
+
+### The Lab: Diagnosing Leftmost Prefix Violations
+
+**Objective**: Given a composite index on `orders(tenant_id, status, created_at)`, demonstrate how query filter order triggers or bypasses the index, and verify plan differences with `EXPLAIN`.
+
+#### 1. Table & Composite Index Setup
+
+```sql
+CREATE TABLE tenant_orders (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id BIGINT NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    total_cents BIGINT NOT NULL
+);
+
+-- Composite B+Tree sorted by (tenant_id -> status -> created_at):
+CREATE INDEX idx_tenant_orders_composite ON tenant_orders (tenant_id, status, created_at);
+```
+
+#### 2. Test Case A: Compliant Leftmost Query (Fast Index Seek)
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM tenant_orders
+WHERE tenant_id = 42 AND status = 'COMPLETED'
+ORDER BY created_at DESC
+LIMIT 20;
+```
+*Observed*: `Index Scan using idx_tenant_orders_composite`. Traverses tree directly; requires 0 sort operations because data is pre-sorted in the index.
+
+#### 3. Test Case B: Violating Query (Index Bypass Failure)
+
+```sql
+-- Missing tenant_id! Skips leading prefix column:
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM tenant_orders
+WHERE status = 'COMPLETED'
+ORDER BY created_at DESC
+LIMIT 20;
+```
+*Observed*: `Seq Scan on tenant_orders`. Because `tenant_id` is omitted, the engine cannot seek into the composite tree and scans all rows.
+
+#### 4. The Verification Fix
+
+```sql
+-- Solution: Create a dedicated index for status queries that omit tenant_id:
+CREATE INDEX CONCURRENTLY idx_tenant_orders_status_created 
+ON tenant_orders (status, created_at DESC);
+```
+
+---
+
 ## Active Recall & Interview Mastery
 
 <AccordionGroup>
@@ -330,3 +403,17 @@ REINDEX INDEX CONCURRENTLY idx_orders_status_created_user;
     In **Repeatable Read**, the MVCC snapshot is created once when the first query in the transaction runs and remains frozen for the entire transaction lifecycle. All subsequent queries see the exact same historical snapshot, preventing Non-Repeatable Reads and Phantom Reads.
   </Accordion>
 </AccordionGroup>
+
+---
+
+## Done Checklist
+
+<Check>
+- [ ] Understand the difference between an $O(N)$ Sequential Scan and an $O(\log N)$ B+Tree Index Scan.
+- [ ] Design composite indexes respecting the Leftmost Prefix Rule and column selectivity.
+- [ ] Build Partial Indexes to accelerate queries targeting sparse row states without wasting RAM.
+- [ ] Create Covering Indexes with `INCLUDE` clauses to eliminate random table heap seeks.
+- [ ] Map the four ACID guarantees directly to PostgreSQL WAL, MVCC snapshots, and lock queues.
+- [ ] Differentiate between ANSI SQL isolation levels and identify concurrency anomalies.
+- [ ] Rebuild production indexes concurrently without table-locking via `REINDEX INDEX CONCURRENTLY`.
+</Check>

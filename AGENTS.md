@@ -712,12 +712,33 @@ All phases of the comprehensive documentation overhaul and book-replacement dept
     - **Anchor Link Verification**:
       - Resolved broken anchor validation in `docs/spring-boot/spring-security-production.mdx` by synchronizing slug `#4-2-spring-boot-3-resource-server-configuration` with Mintlify's link-rot engine.
 
+12. **Curriculum Depth & Book Replacement Standard Content Overhaul (September 2026)**:
+    - **Spring Transactions & Master/Replica Routing** (`docs/spring-boot/transactions.mdx`):
+      - Added dynamic read/write replica routing via `AbstractRoutingDataSource` and `LazyConnectionDataSourceProxy`.
+      - Documented the connection borrow timing trap in Spring's transaction interceptor (why `LazyConnectionDataSourceProxy` is mandatory).
+      - Documented PostgreSQL replication lag hazard (Read-Your-Own-Writes consistency) and session stickiness mitigation.
+      - Added hands-on practice challenge and integration test diagnosing the self-invocation proxy bypass trap and defending it with `TransactionTemplate`.
+    - **Database Engine Internals & HOT Updates** (`docs/database/database-performance-mastery.mdx`):
+      - Added PostgreSQL Heap-Only Tuples (HOT) update mechanics and write amplification defense with `fillfactor = 85`.
+      - Added Block Range Index (BRIN) architecture and trade-offs for 100M+ row append-only tables (99% smaller RAM footprint).
+      - Added hands-on practice challenge verifying Index-Only Scans with zero heap fetches and 0 buffer cache reads.
+    - **Inter-Service Communication: gRPC & Protobuf in Spring Boot 3** (`docs/advanced/microservices.mdx`):
+      - Added binary Protocol Buffers (`.proto`) service contract definition and Spring Boot 3 `@GrpcService` implementation.
+      - Documented HTTP/2 multiplexing vs HTTP/1.1 head-of-line blocking and gRPC client deadlines (`withDeadlineAfter()`) to prevent zombie thread pool exhaustion.
+      - Added hands-on practice challenge implementing an idempotent event consumer with PostgreSQL deduplication table and integration test.
+    - **Database Indexes & Leftmost Prefix Lab** (`docs/database/indexes-transactions.mdx`):
+      - Added prerequisites, Leftmost Prefix violation diagnosis lab with `EXPLAIN (ANALYZE, BUFFERS)` execution plans, failure modes matrix, and done checklist.
+    - **Spring Data JPA & N+1 Elimination Lab** (`docs/spring-boot/jpa-hibernate.mdx`):
+      - Added prerequisites, hands-on N+1 query reproduction test, and resolution via `@EntityGraph` and DTO projections.
+    - **Financial Ledger & Concurrency Systems** (`docs/system-design/financial-ledger.mdx` & `docs/system-design/rate-limiter.mdx`):
+      - Added prerequisites, deferred constraint triggers for double-entry zero-sum balance invariants, multi-threaded `CountDownLatch` concurrency test suites with Redis Testcontainers.
+
 ---
 
 ## Final Verification Summary
 - `npm run check` (`npm run test:audit` + `npm run audit` + `npm run validate` + `npm run links`):
   - **Audit Tests**: 4/4 passing (nested navigation, duplicate route detection, metadata validation, code fence labeling).
-  - **Content Inventory**: 87 pages, 32,139 lines, 908 code blocks, **0 structure errors**, **0 generic text fences**.
+  - **Content Inventory**: 87 pages, 33,067 lines, 942 code blocks, **0 structure errors**, **0 generic text fences**.
   - **Mintlify Validate**: Build validation passed cleanly.
   - **Mintlify Broken Links**: `success no broken links found` (100% link and anchor integrity across all 87 MDX documents).
 - `npm run test:examples` (`npm run test:java` + `npm run test:todo`):

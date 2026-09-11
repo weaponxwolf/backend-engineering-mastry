@@ -4,6 +4,15 @@ sidebarTitle: "JPA & Hibernate"
 description: "The definitive guide to JPA and Hibernate 6. Deep dive into Persistence Context lifecycle states, First-Level Cache dirty checking, N+1 query elimination, and entity domain modeling."
 ---
 
+## Prerequisites: Before You Begin
+
+Before studying Spring Data JPA and Hibernate internals, ensure you understand:
+- Relational database concepts: primary keys, foreign keys, and SQL `JOIN` syntax.
+- Java OOP: references, collections, and identity (`equals()` vs `==`).
+- Basic Spring Boot dependency injection and repository interfaces.
+
+---
+
 ## 1. Mental Model: The Object-Relational Impedance Mismatch
 
 Jakarta Persistence API (JPA) is the official specification for Object-Relational Mapping (ORM) in Java. **Hibernate 6** is the underlying engine that implements the specification, translating object-oriented operations on Java classes into relational SQL queries against PostgreSQL or MySQL.
@@ -319,7 +328,95 @@ public class Order {
 
 ---
 
-## 7. Failure Modes & Edge Case Matrix
+---
+
+## 7. Hands-on Practice Challenge & Integration Tests
+
+### The Lab: Reproducing and Eliminating the N+1 Query Disaster
+
+**Objective**: Write an integration test that catches an N+1 query regression when loading 20 blog posts with their authors, then eliminate the secondary queries using Spring Data JPA `@EntityGraph`.
+
+#### 1. The Vulnerable N+1 Code Shape
+
+```java
+@Entity
+public class Post {
+    @Id @GeneratedValue
+    private Long id;
+    private String title;
+
+    // LAZY fetch by default
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "author_id")
+    private Author author;
+}
+
+public interface PostRepository extends JpaRepository<Post, Long> {
+    // Basic query triggers 1 initial query + N author queries!
+    List<Post> findTop20ByOrderByCreatedAtDesc();
+}
+```
+
+#### 2. The Verification Test (Proving the N+1 Regression)
+
+```java
+@DataJpaTest
+class PostRepositoryNPlusOneTest {
+
+    @Autowired
+    private PostRepository postRepository;
+
+    @Autowired
+    private EntityManager entityManager;
+
+    @Test
+    void findAllPosts_withoutEntityGraph_triggersNPlusOneQueries() {
+        // Clear persistence context to ensure lookups hit the database
+        entityManager.clear();
+
+        // 1. Initial query: SELECT * FROM posts ORDER BY created_at DESC LIMIT 20
+        List<Post> posts = postRepository.findTop20ByOrderByCreatedAtDesc();
+        assertEquals(20, posts.size());
+
+        // 2. Accessing authors in loop fires 20 additional individual SELECT queries!
+        for (Post post : posts) {
+            assertNotNull(post.getAuthor().getName());
+        }
+        // Total queries executed: 1 + 20 = 21 queries!
+    }
+}
+```
+
+#### 3. The Optimized Solution: `@EntityGraph`
+
+```java
+public interface PostRepository extends JpaRepository<Post, Long> {
+
+    // Overrides default lazy fetch with an immediate SQL LEFT JOIN in a single statement
+    @EntityGraph(attributePaths = {"author"})
+    List<Post> findTop20ByOrderByCreatedAtDesc();
+}
+```
+
+#### 4. The Verified Query Reduction
+
+With `@EntityGraph(attributePaths = {"author"})` applied, Hibernate executes only **1 single SQL query**:
+
+```sql
+SELECT p.id, p.title, p.created_at, a.id, a.name, a.email
+FROM post p
+LEFT OUTER JOIN author a ON p.author_id = a.id
+ORDER BY p.created_at DESC
+LIMIT 20;
+```
+
+<Check>
+**Verification Outcome**: Total query count dropped from **21 database round-trips to 1**, eliminating connection pool contention and reducing API response latency by over 90%.
+</Check>
+
+---
+
+## 8. Failure Modes & Edge Case Matrix
 
 | Failure Mode | Root Cause | Impact | Production Defense |
 | :--- | :--- | :--- | :--- |
@@ -331,7 +428,7 @@ public class Order {
 
 ---
 
-## 8. Senior Interview Questions & Active Recall
+## 9. Senior Interview Questions & Active Recall
 
 <AccordionGroup>
   <Accordion title="1. Explain the difference between Transient, Managed, Detached, and Removed entity states.">
@@ -359,7 +456,7 @@ public class Order {
 
 ---
 
-## 9. Done Checklist
+## 10. Done Checklist
 
 <Check>
 - [ ] Understand the 4 JPA entity lifecycle states: Transient, Managed, Detached, and Removed.

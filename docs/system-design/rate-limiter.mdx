@@ -4,6 +4,15 @@ sidebarTitle: "Distributed Rate Limiter"
 description: "Master production distributed rate limiting. Deep dive into Token Bucket vs Sliding Window Counter math, atomic Redis Lua scripts, L1/L2 multi-tier caching, and fail-open circuit breakers."
 ---
 
+## Prerequisites: Before You Begin
+
+Before designing distributed rate limiters, ensure you understand:
+- HTTP protocol request/response cycles, status codes (`HTTP 429`), and headers (`Retry-After`).
+- Redis fundamentals: single-threaded event loops, data structures, and atomic operations.
+- Spring Boot web filters (`OncePerRequestFilter`) and RFC 7807 `ProblemDetail`.
+
+---
+
 ## 1. Mental Model: Protecting the Perimeter
 
 A distributed rate limiter controls the rate at which network requests are accepted by an application fleet. Once allocated quotas are breached, excess requests are rejected with `HTTP 429 Too Many Requests`.
@@ -315,7 +324,76 @@ What happens when your central Redis cluster crashes or suffers a cloud network 
 
 ---
 
-## 8. Failure Modes & Edge Case Matrix
+## 8. Hands-on Practice Challenge & Integration Tests
+
+### The Lab: High-Concurrency Rate Limiter Verification
+
+**Objective**: Write a multi-threaded integration test using `CountDownLatch` and Redis Testcontainers to verify that given a limit of 10 requests/minute, exactly 10 requests are admitted and 40 concurrent requests are rejected with `HTTP 429`.
+
+#### 1. The Concurrency Test Suite
+
+```java
+@SpringBootTest
+@Testcontainers
+class RateLimiterConcurrencyTest {
+
+    @Container
+    static GenericContainer<?> redis = new GenericContainer<>("redis:7-alpine")
+            .withExposedPorts(6379);
+
+    @DynamicPropertySource
+    static void redisProperties(DynamicPropertyRegistry registry) {
+        registry.add("spring.data.redis.host", redis::getHost);
+        registry.add("spring.data.redis.port", () -> redis.getMappedPort(6379));
+    }
+
+    @Autowired
+    private RateLimiterService rateLimiterService;
+
+    @Test
+    void concurrentRequests_strictlyEnforceQuotaWithoutOversubscription() throws Exception {
+        String clientId = "client-tenant-42";
+        int limit = 10;
+        int totalRequests = 50;
+
+        ExecutorService executor = Executors.newFixedThreadPool(totalRequests);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(totalRequests);
+
+        AtomicInteger admittedCount = new AtomicInteger(0);
+        AtomicInteger rejectedCount = new AtomicInteger(0);
+
+        for (int i = 0; i < totalRequests; i++) {
+            executor.submit(() -> {
+                try {
+                    startLatch.await(); // Simultaneous unleash
+                    boolean allowed = rateLimiterService.isAllowed(clientId, limit, 60);
+                    if (allowed) {
+                        admittedCount.incrementAndGet();
+                    } else {
+                        rejectedCount.incrementAndGet();
+                    }
+                } catch (Exception ignored) {
+                } finally {
+                    doneLatch.countDown();
+                }
+            });
+        }
+
+        // Release all 50 threads at the exact same millisecond
+        startLatch.countDown();
+        doneLatch.await(10, TimeUnit.SECONDS);
+
+        // STRICTURE: Atomic Lua guarantees zero race condition leakage
+        assertEquals(10, admittedCount.get(), "Admitted requests must strictly equal 10");
+        assertEquals(40, rejectedCount.get(), "Excess 40 requests must be rejected");
+    }
+}
+```
+
+---
+
+## 9. Failure Modes & Edge Case Matrix
 
 | Failure Mode | Root Cause | Impact | Production Defense |
 | :--- | :--- | :--- | :--- |
@@ -327,7 +405,7 @@ What happens when your central Redis cluster crashes or suffers a cloud network 
 
 ---
 
-## 9. Senior Interview Questions & Active Recall
+## 10. Senior Interview Questions & Active Recall
 
 <AccordionGroup>
   <Accordion title="1. Explain the Fixed Window 2x Boundary Burst bug and how Sliding Window Counter solves it.">
@@ -349,7 +427,7 @@ What happens when your central Redis cluster crashes or suffers a cloud network 
 
 ---
 
-## 10. Done Checklist
+## 11. Done Checklist
 
 <Check>
 - [ ] Understand the trade-offs across Token Bucket, Leaky Bucket, Fixed Window, Sliding Log, and Sliding Window Counter.

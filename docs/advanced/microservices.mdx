@@ -9,6 +9,14 @@ A microservices architecture decomposes a monolithic application into small, ind
 
 While microservices enable independent team velocity, targeted horizontal scaling, and isolated blast radiuses, they trade monolithic simplicity for distributed systems realities: **unreliable networks, partial failures, asynchronous latency, and the loss of single-database ACID transactions**.
 
+## Prerequisites: Before You Begin
+
+Before designing microservices architectures, ensure you have mastered:
+- Relational database ACID transactions and the Spring `@Transactional` lifecycle.
+- RESTful HTTP APIs, status codes, and HTTP client connection pooling (`RestClient`).
+- Event-driven message brokers (Kafka or RabbitMQ fundamentals).
+- Containerization and Docker networking basics.
+
 ---
 
 ## 1. The Distributed Transaction Problem: Why 2PC Fails
@@ -353,7 +361,134 @@ When using Spring Boot 3's `RestClient`, `WebClient`, or `KafkaTemplate`, the tr
 
 ---
 
-## 7. The "Distributed Monolith" Anti-Pattern
+## 7. High-Performance Inter-Service Communication: gRPC & Protocol Buffers
+
+While public-facing APIs typically use HTTP REST with JSON for browser compatibility, high-throughput internal microservice-to-microservice communication faces substantial overhead using JSON:
+1. **JSON Parsing Tax**: Serializing and deserializing ASCII text into JVM heap objects is CPU-intensive.
+2. **Bandwidth Inefficiency**: Verbose field names (`"transactionTimestamp": "2026-09-11T12:00:00Z"`) repeat on every message.
+3. **HTTP/1.1 Connection Head-of-Line Blocking**: Each HTTP/1.1 connection handles one request at a time, requiring large connection pools.
+
+### The Solution: gRPC over HTTP/2 with Protocol Buffers
+
+**gRPC** replaces text-based JSON with strongly-typed binary **Protocol Buffers (Protobuf)** multiplexed over persistent HTTP/2 TCP connections:
+
+```mermaid
+flowchart LR
+    subgraph REST["REST / HTTP 1.1 (Text JSON)"]
+        S1[Order Service] -->|Text JSON Payload\nRepeated field strings| S2[Inventory Service]
+    end
+
+    subgraph gRPC["gRPC / HTTP 2 (Binary Protobuf)"]
+        G1[Order Service] -->|Binary Framed Streams\nMultiplexed over 1 TCP socket| G2[Inventory Service]
+    end
+```
+
+#### 1. Defining the Binary Service Contract (`order_service.proto`)
+
+```protobuf
+syntax = "proto3";
+
+package com.example.grpc;
+option java_multiple_files = true;
+option java_package = "com.example.grpc.order";
+
+service OrderGrpcService {
+  rpc CheckInventory (InventoryRequest) returns (InventoryResponse);
+}
+
+message InventoryRequest {
+  string product_id = 1;
+  int32 requested_quantity = 2;
+}
+
+message InventoryResponse {
+  bool is_available = 1;
+  int32 remaining_stock = 2;
+  int64 unit_price_cents = 3;
+}
+```
+
+#### 2. Spring Boot 3 gRPC Server Implementation
+
+```java
+@GrpcService
+public class InventoryGrpcServiceImpl extends OrderGrpcServiceGrpc.OrderGrpcServiceImplBase {
+
+    private final InventoryRepository inventoryRepository;
+
+    public InventoryGrpcServiceImpl(InventoryRepository inventoryRepository) {
+        this.inventoryRepository = inventoryRepository;
+    }
+
+    @Override
+    public void checkInventory(InventoryRequest request, StreamObserver<InventoryResponse> responseObserver) {
+        var stock = inventoryRepository.findByProductId(request.getProductId());
+        
+        boolean available = stock.isPresent() && stock.get().getQuantity() >= request.getRequestedQuantity();
+
+        InventoryResponse response = InventoryResponse.newBuilder()
+                .setIsAvailable(available)
+                .setRemainingStock(stock.map(Inventory::getQuantity).orElse(0))
+                .setUnitPriceCents(stock.map(Inventory::getPriceCents).orElse(0L))
+                .build();
+
+        responseObserver.onNext(response);
+        responseObserver.onCompleted();
+    }
+}
+```
+
+#### 3. Spring Boot 3 gRPC Client with Deadlines
+
+<Warning>
+**The Distributed Zombie Call Trap**:
+Never execute remote gRPC calls without an explicit **Deadline**. If a downstream service hangs, the calling thread remains blocked indefinitely.
+
+Deadlines automatically propagate across microservice hops: if Service A has a 500ms deadline and calls Service B, and Service B calls Service C after 400ms, Service C automatically inherits a 100ms remaining budget!
+</Warning>
+
+```java
+@Service
+public class OrderProcessingService {
+
+    @GrpcClient("inventory-service")
+    private OrderGrpcServiceGrpc.OrderGrpcServiceBlockingStub inventoryStub;
+
+    public boolean verifyStock(String productId, int quantity) {
+        try {
+            // Mandate a strict 500ms deadline
+            var stubWithDeadline = inventoryStub.withDeadlineAfter(500, TimeUnit.MILLISECONDS);
+            
+            var request = InventoryRequest.newBuilder()
+                    .setProductId(productId)
+                    .setRequestedQuantity(quantity)
+                    .build();
+
+            InventoryResponse response = stubWithDeadline.checkInventory(request);
+            return response.getIsAvailable();
+        } catch (StatusRuntimeException e) {
+            if (e.getStatus().getCode() == Status.Code.DEADLINE_EXCEEDED) {
+                // Downstream timed out - trip circuit breaker or fail safe
+                throw new DownstreamServiceTimeoutException("Inventory service deadline exceeded");
+            }
+            throw e;
+        }
+    }
+}
+```
+
+#### Protocol Decision Matrix
+
+| Dimension | HTTP REST (JSON) | gRPC (Protobuf) | Apache Kafka |
+| :--- | :--- | :--- | :--- |
+| **Communication Style** | Synchronous Request / Response | Synchronous or Bidirectional Streaming | Asynchronous Event Streaming |
+| **Payload Format** | Human-readable UTF-8 JSON | Compact binary serialization | Binary (Protobuf, Avro, or JSON) |
+| **Transport Protocol** | HTTP/1.1 or HTTP/2 | HTTP/2 multiplexed streams | Custom TCP protocol |
+| **Ideal Production Use** | Public APIs, web and mobile clients | Internal synchronous service-to-service | Cross-service async events, audit, CDC |
+
+---
+
+## 8. The "Distributed Monolith" Anti-Pattern
 
 If microservices are implemented incorrectly, you incur all the operational costs of distributed systems with none of the benefits. This disaster is known as a **Distributed Monolith**:
 
@@ -372,7 +507,101 @@ If microservices are implemented incorrectly, you incur all the operational cost
 
 ---
 
-## 8. Active Recall Interview Mastery
+## 9. Failure Modes & Edge Case Matrix
+
+| Failure Mode | Root Cause | Impact | Production Defense |
+| :--- | :--- | :--- | :--- |
+| **Dual-Write Corruption** | Database update succeeds, but message publish fails | Downstream services never receive business event | Implement Transactional Outbox pattern with CDC. |
+| **Saga Compensation Crash** | Participant node crashes during compensating transaction | System left in inconsistent state | Make compensations strictly idempotent; retry with dead-letter alerts. |
+| **Cascading Gateway Timeout** | Unbounded thread pool calling slow downstream service | Entire API Gateway thread pool exhausts | Apply circuit breakers, thread pool bulkheads, and gRPC deadlines. |
+| **Duplicate Event Ingestion** | Network blip causes Kafka consumer to re-read offset | Duplicate charges or duplicate inventory reservations | Deduplication table (`event_deduplication`) with unique message ID. |
+| **Cyclic Choreography Storm** | Service A event triggers Service B, which triggers Service A | Infinite loop saturates broker and CPU | Switch to Saga Orchestration for complex circular flows. |
+
+---
+
+## 10. Hands-on Practice Challenge & Integration Tests
+
+### The Lab: Idempotent Event Consumer with Deduplication
+
+**Objective**: Implement an event consumer that guarantees exactly-once business outcomes even when Kafka delivers the same `OrderCreatedEvent` multiple times due to consumer rebalance.
+
+#### 1. PostgreSQL Deduplication Table Migration
+
+```sql
+CREATE TABLE processed_events (
+    event_id VARCHAR(64) PRIMARY KEY,
+    event_type VARCHAR(64) NOT NULL,
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+#### 2. The Idempotent Consumer Implementation
+
+```java
+@Component
+public class InventoryEventConsumer {
+
+    private final InventoryService inventoryService;
+    private final JdbcTemplate jdbcTemplate;
+
+    public InventoryEventConsumer(InventoryService inventoryService, JdbcTemplate jdbcTemplate) {
+        this.inventoryService = inventoryService;
+        this.jdbcTemplate = jdbcTemplate;
+    }
+
+    @Transactional
+    public boolean processOrderEvent(String eventId, String orderId, String productId, int quantity) {
+        // Atomic insert: Returns 0 if event was already processed (Unique Constraint)
+        int inserted = jdbcTemplate.update(
+            "INSERT INTO processed_events (event_id, event_type) VALUES (?, ?) ON CONFLICT (event_id) DO NOTHING",
+            eventId, "ORDER_CREATED"
+        );
+
+        if (inserted == 0) {
+            log.info("Duplicate event {} detected for order {}. Skipping.", eventId, orderId);
+            return false; // Idempotent skip
+        }
+
+        inventoryService.reserveStock(productId, quantity);
+        return true;
+    }
+}
+```
+
+#### 3. The Verification Test
+
+```java
+@SpringBootTest
+class IdempotentConsumerTest {
+
+    @Autowired
+    private InventoryEventConsumer consumer;
+
+    @Autowired
+    private InventoryRepository inventoryRepository;
+
+    @Test
+    void duplicateEvent_executesBusinessLogicExactlyOnce() {
+        String eventId = "EVT-998822";
+        String productId = "PROD-A";
+        
+        // 1. First event arrival: Successfully reserves 5 units
+        boolean firstProcessed = consumer.processOrderEvent(eventId, "ORD-1", productId, 5);
+        assertTrue(firstProcessed);
+
+        // 2. Duplicate event re-delivery (simulating network retry)
+        boolean secondProcessed = consumer.processOrderEvent(eventId, "ORD-1", productId, 5);
+        assertFalse(secondProcessed);
+
+        // 3. Verify stock was only decremented ONCE (not twice)
+        assertEquals(95, inventoryRepository.findByProductId(productId).get().getQuantity());
+    }
+}
+```
+
+---
+
+## 11. Senior Interview Questions & Active Recall
 
 <AccordionGroup>
   <Accordion title="1. Why is Two-Phase Commit (2PC) considered an anti-pattern in modern cloud-native microservices?">
@@ -386,46 +615,34 @@ If microservices are implemented incorrectly, you incur all the operational cost
     - **Orchestration**: A dedicated service acts as a centralized state machine coordinator. It explicitly commands participant services to execute transactions and handles compensating actions if a step fails. Ideal for complex multi-step enterprise business processes.
   </Accordion>
 
-  <Accordion title="3. How does the Transactional Outbox pattern eliminate the Dual-Write problem?">
+  <Accordion title="3. How does gRPC improve throughput over HTTP REST in internal service meshes?">
+    gRPC operates over HTTP/2, allowing multiple concurrent requests and responses to be multiplexed across a single long-lived TCP connection without head-of-line blocking. 
+    
+    It serializes data using binary Protocol Buffers (Protobuf) instead of verbose text-based JSON. Protobuf payloads are up to 70% smaller and deserialize up to 10x faster because field names are replaced with lightweight numeric tags, dramatically reducing CPU consumption and network latency in high-traffic microservices.
+  </Accordion>
+
+  <Accordion title="4. How does the Transactional Outbox pattern eliminate the Dual-Write problem?">
     The Dual-Write problem occurs when an application attempts to write to a local database and publish a message to a network broker in the same method. Because these are two separate systems, one write can succeed while the other fails.
     
     The Transactional Outbox pattern solves this by writing both the domain entity and the outbound message into an `outbox_events` table inside the **exact same local ACID database transaction**. Because both writes are atomic within the local database, message loss is impossible. A Change Data Capture (CDC) tool like Debezium or an asynchronous polling worker then streams records reliably from the outbox table to Kafka.
   </Accordion>
 
-  <Accordion title="4. How do you solve cross-service queries in microservices without performing cross-database SQL joins?">
-    Cross-database joins are solved using **CQRS (Command Query Responsibility Segregation)** with read projections:
-    
-    Instead of joining tables across the network via HTTP, read-optimized services subscribe to domain events published by write services. The read service denormalizes and pre-aggregates the data into an optimized read store (PostgreSQL materialized view, Elasticsearch, or MongoDB). Queries are resolved with a fast, single-table fetch.
-  </Accordion>
-
-  <Accordion title="5. What is the structure of a W3C traceparent header, and why is it essential in microservices?">
-    The W3C `traceparent` header is formatted as `version-traceid-parentid-traceflags` (e.g. `00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01`). 
-    - `traceid`: Identifies the entire distributed transaction across all microservice hops.
-    - `parentid`: Identifies the immediate caller (span) that dispatched the request.
-    
-    It is essential because it allows monitoring systems (Zipkin, Jaeger, Tempo) to reconstruct the full end-to-end distributed waterfall of an operation across disparate HTTP calls, message queues, and database executions.
+  <Accordion title="5. What happens if a gRPC call does not specify a deadline?">
+    Without an explicit deadline, gRPC requests wait indefinitely for the server to respond. If a downstream service hangs due to a deadlock or network issue, calling threads remain locked, eventually exhausting the client's thread pool and cascading into a complete platform outage. Deadlines also propagate down the call tree, preventing downstream services from continuing expensive processing after the root caller has already timed out.
   </Accordion>
 </AccordionGroup>
 
 ---
 
-## 9. Done Checklist
+## 12. Done Checklist
 
 <Check>
-Cross-service physical database foreign keys and synchronous cross-database joins have been eliminated.
-</Check>
-<Check>
-Distributed workflows utilize the Saga pattern with explicit compensating transactions for rollback paths.
-</Check>
-<Check>
-The Transactional Outbox pattern with Change Data Capture (CDC) is implemented to prevent dual-write state corruption.
-</Check>
-<Check>
-API Gateway verifies JWT signatures at the perimeter edge and injects validated context headers (`X-User-Id`, `X-Tenant-Id`) for internal services.
-</Check>
-<Check>
-CQRS read projections are used for high-performance aggregate queries across multiple bounded contexts.
-</Check>
-<Check>
-W3C `traceparent` distributed trace headers are propagated across all HTTP and Kafka network boundaries.
+- [ ] Cross-service physical database foreign keys and synchronous cross-database joins have been eliminated.
+- [ ] Distributed workflows utilize the Saga pattern with explicit compensating transactions for rollback paths.
+- [ ] The Transactional Outbox pattern with Change Data Capture (CDC) is implemented to prevent dual-write state corruption.
+- [ ] High-throughput internal inter-service calls use gRPC over HTTP/2 with strict deadlines.
+- [ ] Distributed consumers implement idempotent message handling using PostgreSQL deduplication tables.
+- [ ] API Gateway verifies JWT signatures at the perimeter edge and injects validated context headers (`X-User-Id`, `X-Tenant-Id`) for internal services.
+- [ ] CQRS read projections are used for high-performance aggregate queries across multiple bounded contexts.
+- [ ] W3C `traceparent` distributed trace headers are propagated across all HTTP, gRPC, and Kafka network boundaries.
 </Check>

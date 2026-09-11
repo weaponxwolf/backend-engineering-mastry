@@ -11,6 +11,13 @@ However, if a payment system drops a $500 transfer, duplicates a payout, or lose
 
 Senior backend engineers at tier-1 companies (Stripe, Adyen, Uber, Amazon, Airbnb) never store money as a mutable `balance` column in a `users` table. They build **Immutable Double-Entry Financial Ledgers**.
 
+## Prerequisites: Before You Begin
+
+Before designing financial ledgers, ensure you understand:
+- Relational database ACID transactions and isolation levels (Serializable vs Read Committed).
+- SQL constraints: `CHECK`, foreign keys with `ON DELETE RESTRICT`, and unique constraints.
+- Java arithmetic precision (`BigDecimal` vs 64-bit integer minor units).
+
 ---
 
 ## 1. Why Mutating Balances Is an Enterprise Anti-Pattern
@@ -439,7 +446,89 @@ If this query returns **even a single row**, Prometheus triggers an immediate **
 
 ---
 
-## 10. Active Recall Interview Mastery
+## 10. Failure Modes & Edge Case Matrix
+
+| Failure Mode | Root Cause | Impact | Production Defense |
+| :--- | :--- | :--- | :--- |
+| **Floating-Point Rounding Leak** | Using `FLOAT`/`DOUBLE` for monetary sums | Cumulative penny rounding drift across transactions | Store 64-bit integer minor units (cents) or `BigDecimal(18, 4)`. |
+| **Imbalanced Transaction** | Application writes debit without corresponding credit | Ledger balance invariant violated | PostgreSQL deferred constraint trigger aborts transaction on mismatch. |
+| **Duplicate Webhook Processing** | Network retry re-delivers payment capture webhook | Double payment credited to user account | Enforce unique constraint on `(idempotency_key)` or `external_ref_id`. |
+| **Negative Balance Overdraft** | Concurrent debits race against remaining balance | Account balance drops below legal zero limit | Atomic check constraint `balance_cents >= 0` on account snapshot. |
+| **Full Table Scan on Balances** | Querying `SUM(amount)` over millions of historical rows | High CPU and slow API latency ($>5\text{ seconds}$) | Materialized balance snapshots updated periodically. |
+
+---
+
+## 11. Hands-on Practice Challenge & Integration Tests
+
+### The Lab: Enforcing the Double-Entry Zero-Sum Invariant
+
+**Objective**: Write a PostgreSQL constraint trigger that prevents any transaction from committing if the sum of its debits does not equal the sum of its credits, and verify it with automated tests.
+
+#### 1. The PostgreSQL Deferred Constraint Trigger
+
+```sql
+CREATE OR REPLACE FUNCTION verify_transaction_balance()
+RETURNS TRIGGER AS $$
+DECLARE
+    imbalance BIGINT;
+BEGIN
+    -- Sum debits (+) and credits (-) across the transaction
+    SELECT SUM(CASE WHEN direction = 'DEBIT' THEN amount_cents ELSE -amount_cents END)
+    INTO imbalance
+    FROM ledger_entries
+    WHERE transaction_id = NEW.transaction_id;
+
+    IF imbalance != 0 THEN
+        RAISE EXCEPTION 'Financial invariant violated: Transaction % has imbalance of % cents', 
+            NEW.transaction_id, imbalance;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Deferred constraint trigger checks balance at COMMIT time
+CREATE CONSTRAINT TRIGGER trg_verify_ledger_balance
+AFTER INSERT ON ledger_entries
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION verify_transaction_balance();
+```
+
+#### 2. The Verification Test (Proving Rejection of Unbalanced Writes)
+
+```java
+@SpringBootTest
+class LedgerZeroSumTest {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    @Test
+    void imbalancedTransaction_throwsException_andRollsBack() {
+        String txId = "TX-INVALID-100";
+
+        // Inserting an imbalanced entry: $50 DEBIT with no matching CREDIT
+        assertThrows(DataAccessException.class, () -> {
+            jdbcTemplate.update("""
+                INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_cents)
+                VALUES (?, ?, 'DEBIT', 5000)
+            """, txId, 101L);
+        });
+
+        // Verify zero entries were committed for this transaction
+        Integer count = jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM ledger_entries WHERE transaction_id = ?", 
+            Integer.class, txId
+        );
+        assertEquals(0, count);
+    }
+}
+```
+
+---
+
+## 12. Active Recall Interview Mastery
 
 <AccordionGroup>
   <Accordion title="1. Why should you never store money as a mutable balance column in a relational database?">
@@ -475,23 +564,13 @@ If this query returns **even a single row**, Prometheus triggers an immediate **
 
 ---
 
-## 11. Done Checklist
+## 13. Done Checklist
 
 <Check>
-All monetary balances are modeled as immutable append-only ledger entries; rows are never updated or deleted.
-</Check>
-<Check>
-Every financial transaction enforces the zero-sum invariant ($\sum \text{Debits} = \sum \text{Credits}$).
-</Check>
-<Check>
-All monetary values are stored as 64-bit integer minor units (cents) or typesafe `BigDecimal` instances.
-</Check>
-<Check>
-Foreign keys on ledger entries specify `ON DELETE RESTRICT` to prevent accidental deletion.
-</Check>
-<Check>
-Account balance reads utilize materialized snapshots for $O(1)$ sub-millisecond query performance.
-</Check>
-<Check>
-Nightly automated reconciliation queries monitor for ledger imbalance drift and trigger SEV-1 alerts upon variance.
+- [ ] All monetary balances are modeled as immutable append-only ledger entries; rows are never updated or deleted.
+- [ ] Every financial transaction enforces the zero-sum invariant ($\sum \text{Debits} = \sum \text{Credits}$) via deferred database triggers.
+- [ ] All monetary values are stored as 64-bit integer minor units (cents) or typesafe `BigDecimal` instances.
+- [ ] Foreign keys on ledger entries specify `ON DELETE RESTRICT` to prevent accidental deletion.
+- [ ] Account balance reads utilize materialized snapshots for $O(1)$ sub-millisecond query performance.
+- [ ] Nightly automated reconciliation queries monitor for ledger imbalance drift and trigger SEV-1 alerts upon variance.
 </Check>

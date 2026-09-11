@@ -4,6 +4,15 @@ sidebarTitle: "Transactions"
 description: "The definitive guide to Spring transactions. Deep dive into CGLIB AOP proxy mechanics, the self-invocation trap, HikariCP connection starvation deadlocks with REQUIRES_NEW, and dirty checking bypass."
 ---
 
+## Prerequisites: Before You Begin
+
+Before diving into transaction boundaries, ensure you understand:
+- Relational database ACID guarantees (Atomicity, Consistency, Isolation, Durability).
+- Spring IoC Container and Spring AOP proxy generation (CGLIB dynamic class proxies).
+- JDBC connection pools (HikariCP) and thread-to-connection binding via `ThreadLocal`.
+
+---
+
 ## 1. Mental Model: The Distributed Atomicity Illusion
 
 In backend engineering, data integrity is non-negotiable. If an e-commerce checkout charges a customer's credit card or decrements inventory, but crashes before saving the order record, your system has corrupted financial and business state.
@@ -369,9 +378,116 @@ public UserProfile getUserProfile(Long userId) {
 ```
 
 ### What `readOnly = true` Optimizes Behind the Scenes:
-1. **Hibernate Snapshot Bypass**: In a standard read-write transaction, Hibernate creates an in-memory snapshot copy of every loaded entity to detect mutations during dirty checking. Setting `readOnly = true` tells Hibernate to **skip snapshot creation**, reducing snapshot overhead for eligible entities. The memory saving depends on the workload; it is not a fixed 50%.
+1. **Hibernate Snapshot Bypass**: In a standard read-write transaction, Hibernate creates an in-memory snapshot copy of every loaded entity to detect mutations during dirty checking. Setting `readOnly = true` tells Hibernate to **skip snapshot creation**, reducing snapshot overhead for eligible entities.
 2. **PostgreSQL Read-Only Mode**: Sets the underlying JDBC transaction to read-only (`SET TRANSACTION READ ONLY`), allowing PostgreSQL to optimize internal lock queues and avoid reserving transaction IDs (XIDs).
-3. **Read-Replica Routing**: `readOnly = true` alone does not select a replica. You must implement routing, configure separate data sources, and ensure the route is selected before acquiring the connection. Replica lag also affects read-after-write behavior. See [Spring transaction settings](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/annotations.html).
+3. **Read-Replica Routing**: `readOnly = true` alone does not select a replica. You must implement dynamic data source routing with Spring's `AbstractRoutingDataSource`.
+
+---
+
+### 7.1 Dynamic Read/Write Replica Routing via `AbstractRoutingDataSource`
+
+In production, enterprise architectures scale read throughput by separating a single **Primary PostgreSQL Node** (handling all inserts, updates, deletes) from multiple **Standby Read Replicas**:
+
+```mermaid
+flowchart TD
+    Client[Incoming Request] --> Service[Spring Boot Service Layer]
+    Service -->|@Transactional readOnly=false| Router[RoutingDataSource]
+    Service -->|@Transactional readOnly=true| Router
+    Router --> LazyProxy[LazyConnectionDataSourceProxy]
+    LazyProxy -->|Writes / Mutations| Primary[(PostgreSQL Primary)]
+    LazyProxy -->|Reads / Queries| Standby[(PostgreSQL Read Replicas)]
+```
+
+#### The LazyConnectionDataSourceProxy Requirement (The Critical Gotcha)
+
+<Warning>
+**The Connection Borrow Timing Trap**:
+By default, Spring's `DataSourceTransactionManager` borrows a connection from the `DataSource` **before** the transaction interceptor determines whether the transaction is read-only!
+
+Without wrapping your routing data source in a `LazyConnectionDataSourceProxy`, the routing logic executes when `TransactionSynchronizationManager.isCurrentTransactionReadOnly()` is still `false`. As a result, **every query gets sent to the Primary, completely defeating read replication!**
+
+`LazyConnectionDataSourceProxy` defers actual connection acquisition from HikariCP until the first SQL statement is physically executed, ensuring the read-only flag is set.
+</Warning>
+
+#### Production Implementation:
+
+```java
+public enum DataSourceType {
+    PRIMARY,
+    REPLICA
+}
+
+public class ReplicationRoutingDataSource extends AbstractRoutingDataSource {
+    @Override
+    protected Object determineCurrentLookupKey() {
+        boolean isReadOnly = TransactionSynchronizationManager.isCurrentTransactionReadOnly();
+        return isReadOnly ? DataSourceType.REPLICA : DataSourceType.PRIMARY;
+    }
+}
+```
+
+```java
+@Configuration
+@EnableTransactionManagement
+public class DataSourceConfig {
+
+    @Bean
+    @ConfigurationProperties("spring.datasource.primary")
+    public DataSourceProperties primaryDataSourceProperties() {
+        return new DataSourceProperties();
+    }
+
+    @Bean
+    @ConfigurationProperties("spring.datasource.primary.hikari")
+    public HikariDataSource primaryDataSource() {
+        return primaryDataSourceProperties()
+                .initializeDataSourceBuilder()
+                .type(HikariDataSource.class)
+                .build();
+    }
+
+    @Bean
+    @ConfigurationProperties("spring.datasource.replica")
+    public DataSourceProperties replicaDataSourceProperties() {
+        return new DataSourceProperties();
+    }
+
+    @Bean
+    @ConfigurationProperties("spring.datasource.replica.hikari")
+    public HikariDataSource replicaDataSource() {
+        return replicaDataSourceProperties()
+                .initializeDataSourceBuilder()
+                .type(HikariDataSource.class)
+                .build();
+    }
+
+    @Bean
+    public DataSource routingDataSource(
+            @Qualifier("primaryDataSource") DataSource primary,
+            @Qualifier("replicaDataSource") DataSource replica) {
+        ReplicationRoutingDataSource routingDataSource = new ReplicationRoutingDataSource();
+        Map<Object, Object> targetDataSources = new HashMap<>();
+        targetDataSources.put(DataSourceType.PRIMARY, primary);
+        targetDataSources.put(DataSourceType.REPLICA, replica);
+        routingDataSource.setTargetDataSources(targetDataSources);
+        routingDataSource.setDefaultTargetDataSource(primary);
+        return routingDataSource;
+    }
+
+    @Primary
+    @Bean
+    public DataSource dataSource(@Qualifier("routingDataSource") DataSource routingDataSource) {
+        // Defers physical connection borrow until first statement execution
+        return new LazyConnectionDataSourceProxy(routingDataSource);
+    }
+}
+```
+
+#### The Replication Lag "Read-Your-Own-Writes" Consistency Hazard
+
+When a user writes data (e.g., submits a comment) and is immediately redirected to the view page, asynchronous PostgreSQL streaming replication may have a 50ms–500ms replication lag. If the view query routes to the replica, the user does not see their own newly created comment!
+
+**Production Mitigation**: Implement a **Session Stickiness Window** (e.g., using a short-lived HTTP cookie or Redis key `user:{id}:last_write`). If a user has performed a mutation within the last 3 seconds, force all incoming reads for that user session to hit the **Primary** data source, guaranteeing immediate read-your-own-writes consistency.
 
 ---
 
@@ -384,10 +500,90 @@ public UserProfile getUserProfile(Long userId) {
 | **HikariCP Starvation** | Nested `REQUIRES_NEW` exhausts pool under concurrent load | All threads block; 30s timeout causes blackout | Eliminate `REQUIRES_NEW` in web threads; decouple via `@Async` or Kafka. |
 | **Connection Leak** | External HTTP API call inside `@Transactional` | Slow remote API holds connection; pool depletes | Restrict transactions strictly to SQL queries via `TransactionTemplate`. |
 | **Dirty Checking Memory Spike** | Loading 10,000 entities in read-write transaction | Hibernate snapshots double heap memory | Annotate queries with `@Transactional(readOnly = true)`. |
+| **Replica Inconsistency** | Query hits replica during replication lag | User sees stale data immediately after mutation | Use Session Stickiness or `LazyConnectionDataSourceProxy` routing rules. |
 
 ---
 
-## 9. Senior Interview Questions & Active Recall
+## 9. Hands-on Practice Challenge & Integration Tests
+
+### The Lab: Reproducing and Defending the Self-Invocation Trap
+
+**Objective**: Write a test verifying that calling a `@Transactional` method internally bypasses proxy rollback, then refactor it using `TransactionTemplate` to guarantee atomic rollbacks.
+
+#### 1. The Broken Test (Proves Proxy Bypass)
+
+```java
+@Service
+public class OrderService {
+    @Autowired
+    private OrderRepository orderRepository;
+
+    public void processOrder(Order order) {
+        // Calling annotated method internally via 'this'
+        saveWithAudit(order);
+    }
+
+    @Transactional
+    public void saveWithAudit(Order order) {
+        orderRepository.save(order);
+        throw new RuntimeException("Simulated payment gateway failure!");
+    }
+}
+```
+
+```java
+@SpringBootTest
+class OrderServiceTransactionTest {
+
+    @Autowired
+    private OrderService orderService;
+
+    @Autowired
+    private OrderRepository orderRepository;
+
+    @Test
+    void internalCall_failsToRollback_corruptingDatabaseState() {
+        Order order = new Order("ORD-100", 5000);
+        
+        // When invoking processOrder, the internal saveWithAudit throws RuntimeException
+        assertThrows(RuntimeException.class, () -> orderService.processOrder(order));
+
+        // FATAL: Due to proxy bypass, the order was committed to the DB despite the exception!
+        assertEquals(1, orderRepository.count());
+    }
+}
+```
+
+#### 2. The Refactored Solution (Defended via Programmatic `TransactionTemplate`)
+
+```java
+@Service
+public class OrderService {
+    private final OrderRepository orderRepository;
+    private final TransactionTemplate transactionTemplate;
+
+    public OrderService(OrderRepository orderRepository, TransactionTemplate transactionTemplate) {
+        this.orderRepository = orderRepository;
+        this.transactionTemplate = transactionTemplate;
+    }
+
+    public void processOrder(Order order) {
+        // Enforces transaction boundary explicitly regardless of internal caller
+        transactionTemplate.execute(status -> {
+            orderRepository.save(order);
+            if (someFailureCondition()) {
+                status.setRollbackOnly();
+                throw new RuntimeException("Simulated failure!");
+            }
+            return null;
+        });
+    }
+}
+```
+
+---
+
+## 10. Senior Interview Questions & Active Recall
 
 <AccordionGroup>
   <Accordion title="1. How does Spring AOP implement @Transactional under the hood?">
@@ -405,11 +601,15 @@ public UserProfile getUserProfile(Long userId) {
   <Accordion title="4. What internal optimizations occur when you specify @Transactional(readOnly = true)?">
     In Hibernate, `readOnly = true` disables the creation of entity state snapshots in the Persistence Context. Because Hibernate knows the entities cannot be modified, it bypasses the CPU and memory cost of dirty checking during flush time. At the database level, it issues `SET TRANSACTION READ ONLY`, which avoids allocating transaction IDs (preventing XID wraparound) and allows database drivers to route queries directly to read-only replicas.
   </Accordion>
+
+  <Accordion title="5. Why is LazyConnectionDataSourceProxy mandatory when configuring read/write replica routing?">
+    Without `LazyConnectionDataSourceProxy`, Spring's `DataSourceTransactionManager` acquires a connection from the `DataSource` before method execution begins—at a point when `TransactionSynchronizationManager.isCurrentTransactionReadOnly()` is still `false`. Wrapping the routing data source in `LazyConnectionDataSourceProxy` defers actual connection acquisition from the pool until the first SQL statement is executed, by which time the transaction's read-only flag is active.
+  </Accordion>
 </AccordionGroup>
 
 ---
 
-## 10. Done Checklist
+## 11. Done Checklist
 
 <Check>
 - [ ] Diagram the 6-step lifecycle of a Spring CGLIB transaction proxy.
@@ -418,4 +618,5 @@ public UserProfile getUserProfile(Long userId) {
 - [ ] Keep external HTTP calls strictly outside database transaction boundaries using `TransactionTemplate`.
 - [ ] Prevent silent commit bugs by annotating `@Transactional(rollbackFor = Exception.class)`.
 - [ ] Optimize read-heavy queries by applying `@Transactional(readOnly = true)` to bypass Hibernate dirty checking.
+- [ ] Implement transparent Read/Write replica routing using `AbstractRoutingDataSource` and `LazyConnectionDataSourceProxy`.
 </Check>
