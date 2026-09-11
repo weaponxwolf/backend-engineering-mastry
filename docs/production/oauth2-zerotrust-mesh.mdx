@@ -1,168 +1,279 @@
 ---
 title: "OAuth 2.1, OIDC & Zero-Trust Service Mesh"
 sidebarTitle: "OAuth 2.1 & Zero-Trust Mesh"
-description: "Master enterprise identity federation and internal zero-trust security. Explore OAuth 2.1 Authorization Code with PKCE, M2M Client Credentials, mTLS with SPIFFE/SPIRE, and Envoy service mesh policies."
+description: "Master enterprise identity federation and internal zero-trust security. Explore physical network tapping, OAuth 2.1 Authorization Code with PKCE, M2M Client Credentials, mTLS with SPIFFE/SPIRE, and Envoy service mesh policies."
 ---
 
-## 1. Mental Model: Beyond Static Secrets to Zero-Trust
+# OAuth 2.1, OIDC & Zero-Trust Service Mesh
 
-In legacy architectures, systems relied on **Perimeter Security** (the "Castle and Moat" model):
-- A corporate firewall or VPN guards the perimeter.
-- Everything inside the internal network is implicitly trusted. Services communicate over plaintext HTTP using hardcoded database passwords or static API keys.
+In legacy enterprise architectures, software systems relied on the **Perimeter Security Model** (often called the "Castle and Moat" paradigm):
+- A network firewall, VPN, or reverse proxy guards the external perimeter.
+- Everything operating inside the internal corporate Virtual Private Cloud (VPC) is implicitly trusted.
+- Microservices communicate over unencrypted, plaintext HTTP, relying on static shared API keys or hardcoded database passwords stored in configuration files.
 
 ```mermaid
 flowchart TD
-    subgraph Broken Castle and Moat Model
-        Attacker[Compromised Container / Insider] -->|Inside Firewall| InternalNet[Internal Plaintext Network]
-        InternalNet -->|Unauthenticated HTTP| ServiceA[Billing Service]
-        InternalNet -->|Static Shared API Key| ServiceB[Database / Payment Gateway]
-        Note1["Lateral movement is trivial once perimeter is breached!"]
+    subgraph BrokenPerimeter["The Broken 'Castle and Moat' Model"]
+        Attacker["Compromised Container / Insider\n(e.g., SSRF or Log4j exploit)"]
+        Firewall["External Perimeter Firewall\n(Blocks External Internet)"]
+        InternalVPC["Internal VPC (Implicitly Trusted Plaintext Network)"]
+        
+        SvcA["Frontend Gateway"]
+        SvcB["Payment Service (Plaintext HTTP)"]
+        DB[("Customer Database (Static Password)")]
+
+        Firewall --> SvcA
+        Attacker -.->|Breaches Container| InternalVPC
+        InternalVPC -->|Unauthenticated HTTP| SvcB
+        InternalVPC -->|Shared Static Secret| DB
+        Note1["LATERAL MOVEMENT DISASTER:\nOnce the perimeter is breached, an attacker has unrestricted access to the entire cluster!"]
     end
 ```
 
-In modern **Zero-Trust Architecture** (NIST SP 800-207), the foundational axiom is:
-> **"Never Trust, Always Verify."** Network locality confers zero trust. Every single request—whether between an end-user and an API, or between two internal microservices—must be **cryptographically authenticated, authorized, and encrypted in transit**.
+In modern **Zero-Trust Architecture** (NIST SP 800-207), the foundational rule is:
+> **"Never Trust, Always Verify."** Network locality confers zero trust. Every single request—whether between an end-user and an API, or between two internal container pods sitting on the same physical Kubernetes worker node—must be **cryptographically authenticated, authorized, and encrypted in transit**.
 
 ---
 
-## 2. OAuth 2.1 & OpenID Connect (OIDC) Protocol Stack
+## Phase 1: Ground Floor (Physical First Principles)
 
-<CardGroup cols={2}>
-  <Card title="OAuth 2.1 (Authorization)" icon="key">
-    Delegated access protocol. Answers: **"What actions is this client allowed to perform on behalf of the user?"**
-    Emits opaque or cryptographically signed **Access Tokens** with defined scopes (`orders:read`, `payment:write`).
-  </Card>
-  <Card title="OpenID Connect - OIDC (Identity)" icon="id-card">
-    Identity layer built on top of OAuth 2.0. Answers: **"Who is the authenticated user?"**
-    Emits an **ID Token** (JWT containing user profile claims: `sub`, `email`, `roles`).
-  </Card>
-</CardGroup>
+To design secure distributed identity systems, you must understand the physical vulnerabilities of cloud networking, cryptographic silicon acceleration, and entropy decay.
 
-### Key OAuth 2.1 Modern Security Changes:
-1. **Deprecated**: The **Implicit Grant** (`response_type=token`) and **Resource Owner Password Credentials Grant** (`grant_type=password`) are completely removed due to token leakage in browser history and credential phishing risks.
-2. **Mandatory PKCE**: Proof Key for Code Exchange is now required for **all** Authorization Code clients (Single-Page Apps, Mobile apps, and server-rendered web applications).
+```mermaid
+flowchart TD
+    subgraph PhysicalNetworkLayer["Physical Network & OS Kernel Realities"]
+        Wire["Physical Fiber / Virtual Switch\nSubject to packet sniffing, ARP spoofing, and cloud tap mirrors"]
+        Kernel["Linux Kernel Networking Stack\niptables / eBPF packet inspection"]
+        Wire --> Kernel
+    end
+
+    subgraph SiliconCryptography["Physical Silicon Hardware Acceleration"]
+        AESNI["Intel / AMD AES-NI Instructions:\nSymmetric encryption executes in 0.5 cycles/byte (Hardware Fast)"]
+        AVX["AVX-512 / Vector Math:\nAsymmetric RSA / ECDSA math requires thousands of CPU cycles (Expensive)"]
+    end
+
+    subgraph EntropyDecay["The Entropy Law of Static Secrets"]
+        Static["Static Shared Secret:\nStored on disk, env vars, git history, memory core dumps\nProbability of compromise -> 1.0 over time!"]
+        Ephemeral["Ephemeral Ephemeral Keys (SPIFFE SVID):\nRotated every 60 minutes\nCompromised credential expires before attacker can exploit it"]
+    end
+```
+
+### 1. The Myth of the "Secure Internal Network"
+In cloud environments (AWS, GCP, Azure), virtual machine network interfaces (vNICs) share underlying physical hypervisors and top-of-rack physical switches. Unencrypted internal traffic between pods is vulnerable to:
+- **ARP Poisoning & DNS Spoofing**: Malicious containers can redirect internal traffic through local virtual switches.
+- **Sidecar & Container Escapes**: A container breach (e.g., remote code execution in an image processing library) grants immediate access to the host kernel network namespace.
+- **Lawful Intercept & Cloud Mirroring**: Cloud hypervisor packet mirroring taps allow inspection of unencrypted VPC packets.
+
+### 2. The Computational Cost of Cryptography
+- **Symmetric Encryption (AES-GCM)**: Modern x86 and ARM processors contain dedicated hardware instructions (`AES-NI` / `ARMv8 Crypto`). Encrypting active TCP payloads in transit runs at **over 5 GB/sec per core** with negligible CPU overhead ($< 1\%$).
+- **Asymmetric Cryptography (RSA / ECDSA)**: Negotiating handshakes and signing JWTs requires complex modular exponentiation and elliptic curve point multiplication. Generating an RSA-4096 signature takes **several milliseconds of raw CPU time**.
+- **The Zero-Trust Trade-off**: Systems use asymmetric cryptography (PKCE, Private Key JWT, mTLS handshakes) to establish identity once, and switch immediately to hardware-accelerated symmetric keys (AES-GCM) for data streaming.
 
 ---
 
-## 3. Authorization Code Flow with PKCE (RFC 7636)
+## Phase 2: The Naive Code (The Production Crashes)
 
-Why was PKCE invented? On mobile devices and single-page apps (SPAs), an attacker can register a malicious custom URI scheme (e.g., `myapp://oauth-callback`) to intercept the authorization code returned by the Identity Provider.
+### Crash Scenario 1: The Authorization Code Interception & Token Exfiltration
 
-PKCE eliminates code interception attacks using cryptographic challenge hashing:
+A development team builds a mobile banking application using standard OAuth 2.0 Authorization Code flow without PKCE:
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Client as Browser / Mobile Client
+    actor Victim as Customer Mobile Phone
+    participant MaliciousApp as Malicious App (Same Device)
+    participant Browser as Mobile System Browser
     participant IdP as Identity Provider (Keycloak / Okta)
-    participant API as Spring Boot Resource Server
+    actor Attacker as Attacker Server
 
-    Note over Client: 1. Generates high-entropy random Code_Verifier.<br/>Computes Code_Challenge = BASE64URL(SHA256(Code_Verifier))
-    Client->>IdP: 2. GET /authorize?response_type=code&code_challenge=xyz&code_challenge_method=S256
-    Note over IdP: User authenticates with MFA and consents
-    IdP-->>Client: 3. Redirects with Authorization Code: abc123
-    Client->>IdP: 4. POST /oauth/token (code=abc123 & code_verifier=secret123)
-    Note over IdP: 5. Hashes code_verifier and compares with code_challenge.<br/>Matches! Emits Access Token & Refresh Token.
-    IdP-->>Client: 6. Returns Access Token (RS256 JWT)
-    Client->>API: 7. GET /api/v1/orders (Bearer <Access_Token>)
-    Note over API: 8. Validates JWT signature via IdP JWKS public key
-    API-->>Client: 9. Returns 200 OK
+    Victim->>Browser: 1. Click "Login with Bank"
+    Browser->>IdP: 2. GET /oauth/authorize?client_id=bank_app&redirect_uri=bankapp://callback
+    Note over IdP: User enters username and password
+    IdP-->>Browser: 3. Redirects to: bankapp://callback?code=AUTH_CODE_XYZ
+    
+    Note over MaliciousApp: 4. Malicious app registered the same custom URI scheme: bankapp://* !<br/>OS launches Malicious App instead of genuine Banking App!
+    Browser->>MaliciousApp: Delivers AUTH_CODE_XYZ!
+    
+    MaliciousApp->>IdP: 5. POST /oauth/token (code=AUTH_CODE_XYZ)
+    Note over IdP: IdP verifies code and returns Access Token & Refresh Token!
+    IdP-->>MaliciousApp: Emits Access Token (Bearer Token)
+    MaliciousApp->>Attacker: 6. Exfiltrates Access Token to Attacker Server!
+    Note over Attacker: Attacker drains victim's bank account!
 ```
 
-### The PKCE Mathematical Handshake:
-1. **Code Verifier**: A cryptographically random string between 43 and 128 characters using unreserved characters (`[A-Z]`, `[a-z]`, `[0-9]`, `-`, `.`, `_`, `~`).
-2. **Code Challenge**:
-   $$\text{Code\_Challenge} = \text{Base64UrlEncode}\left( \text{SHA-256}(\text{Code\_Verifier}) \right)$$
-3. If an attacker intercepts the Authorization Code at Step 3, they cannot exchange it for an Access Token at Step 4 because they do not possess the original, unhashed `Code_Verifier`!
+#### What Happened in Production:
+- Mobile operating systems (iOS and Android) allow multiple applications to register custom URI schemes (e.g. `bankapp://callback`).
+- Because the developers omitted **Proof Key for Code Exchange (PKCE)**, anyone possessing the `code` parameter could exchange it for an Access Token.
+- A rogue game app installed on the user's phone intercepted the callback, exchanged the code, and stole the user's authentication tokens.
 
 ---
 
-## 4. Machine-to-Machine (M2M) Security & Private Key JWT
+### Crash Scenario 2: The Lateral Movement Cloud VPC Breach
 
-When Service A calls Service B without human user intervention (e.g., a background batch payment reconciler calling the Ledger API), how do services authenticate?
+A microservice architecture uses perimeter security with shared static API keys:
 
-### Anti-Pattern: Static Shared Client Secrets
-Storing a static client secret (`client_secret=super-secret-password`) in Kubernetes secrets or environment variables means:
-- Secrets inevitably leak into build logs, git repos, or container dumps.
-- Rotating the secret requires restarting all consumer microservices simultaneously.
+```java
+// DANGEROUS ANTI-PATTERN: Internal service accepting static shared secrets
+@RestController
+@RequestMapping("/internal/api/v1/payments")
+public class InternalPaymentController {
 
-### Production Solution: Private Key JWT (RFC 7523)
-Instead of sending a shared password across the network, Service A signs an ephemeral client assertion JWT using its own **asymmetric private key** (RS256 or ES256):
+    @Value("${internal.shared.secret}")
+    private String sharedSecret;
+
+    @PostMapping("/disburse")
+    public ResponseEntity<Void> disburseFunds(
+            @RequestHeader("X-Internal-Secret") String incomingSecret,
+            @RequestBody PayoutRequest request) {
+        
+        // FATAL FLAW: If secret matches, request is blindly trusted!
+        if (!sharedSecret.equals(incomingSecret)) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+
+        // Executes wire transfer
+        paymentService.executeWire(request);
+        return ResponseEntity.ok().build();
+    }
+}
+```
+
+#### What Happened in Production:
+1. An attacker exploited a file upload vulnerability in an internal marketing blog container sitting on the same Kubernetes cluster.
+2. The attacker inspected the environment variables and found `INTERNAL_SHARED_SECRET=super-secret-key-12345`.
+3. Because all internal services communicated over unencrypted HTTP without Mutual TLS or workload authorization, the attacker issued an HTTP request directly to `http://payment-service.default.svc.cluster.local/internal/api/v1/payments/disburse`.
+4. The payment service executed the wire transfers, resulting in a **$1.8 million unauthorized funds transfer**.
+
+---
+
+### Crash Scenario 3: The JWKS Key Rotation 401 Global Blackout
+
+A Spring Boot backend acts as an OAuth 2.0 Resource Server. To validate incoming JWTs, it fetches the public signing keys from Keycloak's JSON Web Key Set (JWKS) endpoint (`/protocol/openid-connect/certs`).
+
+```java
+// DANGEROUS ANTI-PATTERN: Static, un-refreshable JWKS configuration
+@Bean
+public JwtDecoder jwtDecoder() {
+    // Fetches public keys ONCE at application boot time and caches indefinitely!
+    return NimbusJwtDecoder.withJwkSetUri("https://auth.company.com/oauth2/jwks")
+            .build();
+}
+```
+
+#### What Happened in Production:
+- The security team performed an emergency cryptographic key rotation on the central Identity Provider, retiring old RS256 key `key-2025` and generating `key-2026`.
+- The Identity Provider began issuing user tokens signed with `key-2026`.
+- Every Spring Boot microservice in the cluster rejected the incoming tokens because their in-memory JWKS cache only recognized `key-2025`.
+- **Global Outage**: 100% of user API requests globally failed with `401 Unauthorized`. The outage persisted for 4 hours until all 180 microservices were manually rebooted.
+
+---
+
+## Phase 3: Under the Hood (Mechanics, Protocols & SPIFFE/SPIRE Architecture)
+
+### 1. Proof Key for Code Exchange (PKCE - RFC 7636)
+
+PKCE mathematically eliminates authorization code interception attacks using a cryptographic one-way hash function:
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant SvcA as Batch Service A (Client)
-    participant IdP as Central Keycloak / Okta
-    participant SvcB as Ledger Service B (Resource Server)
+    participant Client as Client Application (Browser / Mobile)
+    participant IdP as Identity Provider (Keycloak / Okta)
+    participant Resource as Spring Boot Resource Server
 
-    Note over SvcA: Signs client assertion JWT with its private key (1-min expiry)
-    SvcA->>IdP: POST /oauth/token (grant_type=client_credentials, client_assertion=<signed_jwt>)
-    Note over IdP: Validates signature using Service A's public key
-    IdP-->>SvcA: Emits short-lived Access Token (15 min)
-    SvcA->>SvcB: POST /api/v1/ledger/post (Bearer <Access_Token>)
-    SvcB-->>SvcA: 200 OK
+    Note over Client: 1. Generate high-entropy Code_Verifier (128 random chars)<br/>Compute Code_Challenge = Base64Url(SHA-256(Code_Verifier))
+    Client->>IdP: 2. GET /authorize?response_type=code&client_id=web-app&code_challenge=xyz789&code_challenge_method=S256
+    Note over IdP: User authenticates via MFA. IdP saves code_challenge "xyz789".
+    IdP-->>Client: 3. Redirect with Authorization Code: "AUTH_CODE_42"
+    
+    Client->>IdP: 4. POST /token (code="AUTH_CODE_42" & code_verifier="secret128charstring")
+    Note over IdP: 5. CRYPTOGRAPHIC VERIFICATION:<br/>Computes SHA-256(code_verifier). Matches saved code_challenge? YES!
+    IdP-->>Client: 6. Emits Access Token (JWT) & Refresh Token
+    Client->>Resource: 7. GET /api/v1/orders (Bearer <JWT>)
+    Resource-->>Client: 8. 200 OK
 ```
+
+#### The Mathematical Trapdoor:
+$$\text{Code\_Challenge} = \text{Base64UrlEncode}\left( \text{SHA-256}(\text{Code\_Verifier}) \right)$$
+- If an attacker intercepts the authorization code at Step 3, they cannot exchange it for an Access Token at Step 4.
+- Reversing SHA-256 to guess the 128-character `Code_Verifier` requires **$2^{256}$ operations**, which is computationally impossible under the laws of physics.
 
 ---
 
-## 5. Zero-Trust Transport: Mutual TLS (mTLS) & SPIFFE/SPIRE
+### 2. Machine-to-Machine Security: Private Key JWT (RFC 7523)
 
-Even with JWT tokens, plaintext TCP traffic between microservices is vulnerable to packet sniffing, Man-in-the-Middle (MitM) spoofing, and ARP poisoning within cloud VPCs or Kubernetes clusters.
-
-### Mutual TLS (mTLS) Handshake
-In standard one-way TLS (browsers visiting HTTPS sites), only the server presents a certificate. In **Mutual TLS (mTLS)**, both the client and the server present and cryptographically verify each other's certificates:
+To eliminate static client secrets in microservice-to-microservice calls, use **Private Key JWT**:
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Client as Service A (Client)
-    participant Server as Service B (Server)
+    participant SvcA as Batch Service A
+    participant IdP as Central Identity Provider (Keycloak)
+    participant SvcB as Ledger Service B
 
-    Client->>Server: 1. ClientHello
+    Note over SvcA: 1. Generates ephemeral Client Assertion JWT:<br/>• iss = "batch-service-a"<br/>• sub = "batch-service-a"<br/>• exp = now() + 60s<br/>• jti = UUID (Replay defense)<br/>Signs with Service A's PRIVATE RS256 Key
+    SvcA->>IdP: 2. POST /oauth/token<br/>grant_type=client_credentials<br/>client_assertion_type=jwt-bearer<br/>client_assertion=<signed_jwt>
+    Note over IdP: Validates signature against Service A's registered PUBLIC key
+    IdP-->>SvcA: 3. Emits short-lived Access Token (15 min)
+    SvcA->>SvcB: 4. POST /api/ledger (Bearer <Access_Token>)
+    SvcB-->>SvcA: 5. 200 OK
+```
+
+---
+
+### 3. Mutual TLS (mTLS) & SPIFFE / SPIRE
+
+While JWTs provide application-layer authorization, **Mutual TLS (mTLS)** secures the transport layer, authenticating both the client and server at the TCP socket level:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as Service A (Client Pod)
+    participant Server as Service B (Server Pod)
+
+    Client->>Server: 1. ClientHello (Supported TLS cipher suites)
     Server->>Client: 2. ServerHello + Server X.509 Certificate
     Note over Client: Validates server certificate against trusted Root CA
-    Server->>Client: 3. CertificateRequest (Server asks client for identity!)
-    Client->>Server: 4. Client X.509 Certificate + CertificateVerify (signed with private key)
+    Server->>Client: 3. CertificateRequest (Server demands client identity!)
+    Client->>Server: 4. Client X.509 Certificate + CertificateVerify (Signed with client private key)
     Note over Server: Validates client certificate against trusted Root CA
-    Note over Client,Server: 5. Cryptographic session keys negotiated.<br/>All traffic is encrypted and authenticated bi-directionally!
+    Note over Client,Server: 5. Symmetric session keys derived.<br/>All TCP packets encrypted bidirectionally!
 ```
 
-### SPIFFE / SPIRE: The Standard for Workload Identity
-Managing X.509 certificates manually across 1,000 microservice pods is operationally impossible. **SPIFFE (Secure Production Identity Framework for Everyone)** standardizes machine identities:
-
-- **SPIFFE ID**: A URI specifying the workload's domain and namespace:
-  `spiffe://cluster.internal/ns/production/sa/payment-service`
-- **SVID (SPIFFE Verifiable Identity Document)**: A short-lived X.509 certificate automatically rotated every **1 hour** by a local **SPIRE Agent** daemonset without service restarts.
+#### SPIFFE Workload Identity:
+Managing X.509 certificates manually across 5,000 container pods is impossible. **SPIFFE (Secure Production Identity Framework for Everyone)** standardizes machine identities:
+- **SPIFFE ID**: A standardized URI representing the workload:
+  `spiffe://prod.company.internal/ns/finance/sa/payment-service`
+- **SVID (SPIFFE Verifiable Identity Document)**: A short-lived X.509 certificate automatically rotated every **60 minutes** by a local **SPIRE Agent** daemon without restarting containers.
 
 ---
 
-## 6. Service Mesh Architecture: Envoy & Istio
+### 4. Service Mesh Architecture: Envoy & Istio
 
-Rather than implementing mTLS and certificate rotation in Java application code, enterprises deploy a **Service Mesh** (Istio / Linkerd) powered by **Envoy Sidecars**:
+Enterprises offload mTLS encryption, certificate rotation, and L7 authorization to **Envoy Sidecars**:
 
 ```mermaid
 flowchart LR
-    subgraph Pod A
-        AppA[Java Spring Boot App A] -->|Plaintext localhost:8080| EnvoyA[Envoy Sidecar Proxy A]
+    subgraph PodA["Kubernetes Pod A: Checkout Service"]
+        AppA["Java Spring Boot App"] -->|Plaintext localhost:8080| EnvoyA["Envoy Sidecar Proxy"]
     end
 
-    subgraph Pod B
-        EnvoyB[Envoy Sidecar Proxy B] -->|Plaintext localhost:8080| AppB[Java Spring Boot App B]
+    subgraph PodB["Kubernetes Pod B: Payment Service"]
+        EnvoyB["Envoy Sidecar Proxy"] -->|Plaintext localhost:8080| AppB["Java Spring Boot App"]
     end
 
     EnvoyA -->|Encrypted mTLS with SPIFFE SVID| EnvoyB
 ```
 
-### Istio L7 Authorization Policy Example
-Declaratively enforce that **only** the `checkout-service` can call the `payment-service`:
+#### Declarative Istio Authorization Policy:
+Enforce that **only** the `checkout-service` service account can execute payments:
 
 ```yaml
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
-  name: payment-rbac-policy
-  namespace: production
+  name: payment-strict-rbac
+  namespace: finance
 spec:
   selector:
     matchLabels:
@@ -171,20 +282,21 @@ spec:
   rules:
   - from:
     - source:
-        principals: ["spiffe://cluster.internal/ns/production/sa/checkout-service-sa"]
+        principals: ["spiffe://prod.company.internal/ns/ecommerce/sa/checkout-service-sa"]
     to:
     - operation:
         methods: ["POST"]
-        paths: ["/api/v1/payments/charge"]
+        paths: ["/api/v1/payments/disburse"]
 ```
-If an attacker compromises an analytics container inside the Kubernetes cluster, Envoy drops any lateral network connection to the payment service with `RBAC: access denied` at the transport layer before it ever reaches Java code.
 
 ---
 
-## 7. Production Spring Security 6 Resource Server Configuration
+### 5. Production Spring Security 6 Resource Server Configuration
+
+Below is the production-grade Spring Boot 3 configuration featuring automatic JWKS public key refresh, stateless session policies, and method-level RBAC:
 
 ```java
-package com.backend.mastery.security;
+package com.backend.security.config;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -193,14 +305,18 @@ import org.springframework.security.config.annotation.method.configuration.Enabl
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.oauth2.server.resource.authentication.JwtGrantedAuthoritiesConverter;
 import org.springframework.security.web.SecurityFilterChain;
 
+import java.time.Duration;
+
 @Configuration
 @EnableWebSecurity
-@EnableMethodSecurity // Enables @PreAuthorize("hasRole('ADMIN')")
-public class ResourceServerSecurityConfig {
+@EnableMethodSecurity // Enables @PreAuthorize("hasRole('PAYMENT_ADMIN')")
+public class OAuth2ResourceServerConfig {
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
@@ -217,62 +333,89 @@ public class ResourceServerSecurityConfig {
                 .anyRequest().authenticated()
             )
             .oauth2ResourceServer(oauth2 -> oauth2
-                .jwt(jwt -> jwt.jwtAuthenticationConverter(jwtAuthenticationConverter()))
+                .jwt(jwt -> jwt
+                    .jwtAuthenticationConverter(customJwtAuthenticationConverter())
+                )
             )
             .build();
     }
 
     @Bean
-    public JwtAuthenticationConverter jwtAuthenticationConverter() {
+    public JwtDecoder jwtDecoder() {
+        // PRODUCTION RESILIENCE: Configure dynamic JWKS cache eviction & refresh
+        return NimbusJwtDecoder.withJwkSetUri("https://auth.company.internal/oauth2/jwks")
+            .cacheDefaults() // Caches keys in RAM with automatic cache expiration
+            .build();
+    }
+
+    @Bean
+    public JwtAuthenticationConverter customJwtAuthenticationConverter() {
         JwtGrantedAuthoritiesConverter grantedAuthoritiesConverter = new JwtGrantedAuthoritiesConverter();
-        // Maps Keycloak realm roles or Okta groups from JWT claims
+        // Extract roles from Keycloak realm_access.roles or custom claims
         grantedAuthoritiesConverter.setAuthoritiesClaimName("roles");
         grantedAuthoritiesConverter.setAuthorityPrefix("ROLE_");
 
-        JwtAuthenticationConverter jwtAuthenticationConverter = new JwtAuthenticationConverter();
-        jwtAuthenticationConverter.setJwtGrantedAuthoritiesConverter(grantedAuthoritiesConverter);
-        return jwtAuthenticationConverter;
+        JwtAuthenticationConverter jwtConverter = new JwtAuthenticationConverter();
+        jwtConverter.setJwtGrantedAuthoritiesConverter(grantedAuthoritiesConverter);
+        return jwtConverter;
     }
 }
 ```
 
 ---
 
-## 8. Failure Modes & Edge Case Matrix
+## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
-| Attack / Failure Mode | Root Cause | Impact | Production Defense |
-| :--- | :--- | :--- | :--- |
-| **Code Interception** | Mobile / SPA client lacks client secret | Stolen authorization code exchanged for token | Enforce PKCE (`code_challenge_method=S256`) on all authorization requests. |
-| **Lateral Network Breach** | Plaintext HTTP internal network | Attacker pivots from breached container to payment DB | Implement mTLS with SPIFFE/SPIRE via Envoy sidecar service mesh. |
-| **JWKS Key Rotation Blackout** | Resource Server caches public keys indefinitely | IdP rotates RS256 signing key; all client requests fail 401 | Configure Spring Security with automatic JWKS cache refresh TTL (e.g., 15m). |
-| **BOLA / IDOR Attack** | Relying solely on token scopes without checking owner ID | User A reads User B's invoices (`GET /invoices/999`) | Enforce `@PreAuthorize("#userId == authentication.principal.claims['sub']")`. |
+| Question / Scenario | Junior Developer Answer | Senior / Staff Backend Engineer Answer |
+| :--- | :--- | :--- |
+| **Why does OAuth 2.1 mandate PKCE even for confidential server-side web applications?** | "PKCE was made for mobile apps, but OAuth 2.1 makes it required everywhere to be more secure." | "Originally, PKCE (RFC 7636) was designed for public clients (SPAs and mobile apps) that cannot safely protect a static client secret. However, OAuth 2.1 mandates PKCE across **all** Authorization Code clients to defend against **Authorization Code Injection Attacks**. In this attack, a malicious actor intercepts a valid authorization code belonging to their own account and injects it into a victim's client session. Without PKCE, the client redeems the code, binding the victim's session to the attacker's account. Because the client holds the cryptographically random `Code_Verifier` generated specifically for that transaction, injected codes fail verification." |
+| **What is the difference between an ID Token and an Access Token?** | "Both are JWTs with user information." | "They serve completely different architectural purposes in the OIDC/OAuth 2 protocol stack. An **ID Token** is an identity artifact issued by OpenID Connect intended **strictly for the client application**; it answers *'Who is the authenticated user?'* and must never be passed to resource servers to authorize API actions. An **Access Token** is an authorization credential issued by OAuth 2 intended **strictly for the Resource Server**; it answers *'What actions and scopes is this bearer permitted to execute?'*. Passing ID Tokens to backend APIs is a dangerous security anti-pattern." |
+| **How does a Service Mesh enforce Zero-Trust without modifying Java application code?** | "It uses proxies to make microservices run faster." | "An Istio/Envoy service mesh enforces Zero-Trust by intercepting all TCP traffic at the Linux network layer using `iptables` rules. When Pod A calls Pod B, the local Envoy sidecar intercepts the egress TCP packet, establishes an **encrypted Mutual TLS (mTLS) tunnel** with Pod B's Envoy sidecar, and presents an ephemeral X.509 certificate carrying its **SPIFFE Workload Identity**. The receiving sidecar validates the client certificate against the cluster Root CA and evaluates Layer 7 Authorization Policies before proxying plaintext traffic over localhost to the Java container." |
+| **Why should you use Private Key JWT instead of Client Secrets for machine-to-machine calls?** | "Private keys are harder to guess than passwords." | "Static client secrets are shared symmetrical passwords. If a secret is stolen from a container's environment variables, git history, or memory dump, the attacker can impersonate the client indefinitely until the secret is manually rotated across all services. **Private Key JWT (RFC 7523)** uses asymmetric cryptography: Service A holds a private key and signs an ephemeral assertion JWT valid for 60 seconds with a unique nonce (`jti`). The Identity Provider verifies the assertion against Service A's public key. The private key never leaves the client, eliminates shared secrets over the wire, and prevents replay attacks." |
+| **How do you prevent a global 401 outage when an Identity Provider rotates its JWT signing keys?** | "We restart the microservices when the key is rotated." | "Microservices acting as OAuth 2.0 Resource Servers must use dynamic JWKS decoders that support **Key ID (`kid`) cache lookups and on-demand cache revalidation**. When a token arrives signed with an unfamiliar `kid`, the Resource Server must not reject the token immediately; it must perform an asynchronous cache refresh against the IdP's JWKS endpoint to fetch newly published public keys, while enforcing rate-limiting to prevent JWKS cache denial-of-service attacks." |
 
 ---
 
-## 9. Senior Interview Questions & Active Recall
+## Production Debugging Checklist
 
 <AccordionGroup>
-  <Accordion title="Why is Proof Key for Code Exchange (PKCE) necessary even for backend-rendered confidential clients?">
-    While PKCE was originally invented to protect public clients (mobile apps and SPAs that cannot safely store a client secret), OAuth 2.1 mandates PKCE for confidential server-rendered clients as well. This prevents **Authorization Code Injection attacks**, where an attacker forces a victim to redeem a compromised authorization code belonging to the attacker, linking the victim's session to the attacker's account.
+  <Accordion title="1. Global 401 Unauthorized After IdP Key Rotation">
+    - [ ] Inspect the incoming JWT header: Check the `kid` (Key ID) and `alg` fields: `jwt.io`.
+    - [ ] Curl the Identity Provider JWKS endpoint: `curl https://auth.company.com/oauth2/jwks`. Verify whether the token's `kid` exists in the published keyset.
+    - [ ] Check the Spring Boot `JwtDecoder` bean: Ensure it uses dynamic cache refresh (`withJwkSetUri()`) rather than static in-memory keys.
   </Accordion>
-  <Accordion title="What is the difference between an ID Token and an Access Token?">
-    An **ID Token** is an OpenID Connect (OIDC) artifact formatted strictly as a JWT intended solely for the **client application** to know who the user is (name, email, subject ID). It must never be used to make authorized API calls. An **Access Token** is an OAuth 2.0 credential designed for the **Resource Server** (backend API) to grant access to specific endpoints and scopes.
+
+  <Accordion title="2. Diagnosing Envoy mTLS Certificate Handshake Failures">
+    - [ ] Check Envoy proxy logs on both client and server: `kubectl logs <pod-name> -c istio-proxy`.
+    - [ ] Look for `TLS error: 2048:certificate verify failed` or `SPIFFE ID mismatch`.
+    - [ ] Verify that SPIRE agents are actively running on the Kubernetes worker node and successfully renewing SVID certificates: `spire-agent healthcheck`.
   </Accordion>
-  <Accordion title="How does a Service Mesh (Istio / Envoy) enforce Zero-Trust without touching application code?">
-    Envoy sidecars run in the same Linux network namespace as the application container. Using `iptables` PREROUTING and OUTPUT rules, all incoming and outgoing TCP packets are transparently diverted through Envoy. Envoy negotiates mTLS with peer sidecars using ephemeral SPIFFE X.509 certificates and evaluates L7 Authorization Policies before forwarding traffic over localhost plaintext to the application.
+
+  <Accordion title="3. Authorization Policy Rejections (RBAC Access Denied)">
+    - [ ] Check the server's Envoy access logs: Look for `response_code: 403` and `response_flags: "UAEX"` (Unauthorized Access).
+    - [ ] Inspect the client pod's SPIFFE principal: Verify it matches the `principals` field in the Istio `AuthorizationPolicy` YAML.
   </Accordion>
 </AccordionGroup>
 
 ---
 
-## 10. Done Checklist
+## Done Checklist
 
 <Check>
-- [ ] Understand why perimeter "Castle and Moat" security is obsolete and state the core axiom of Zero-Trust.
-- [ ] Contrast OAuth 2.1 (Authorization) with OpenID Connect (Identity).
-- [ ] Diagram the complete Authorization Code Flow with PKCE and explain why `Code_Verifier` stops interception.
-- [ ] Replace static shared passwords in M2M communications with Private Key JWT (RFC 7523).
-- [ ] Explain the Mutual TLS (mTLS) handshake and how SPIFFE IDs model machine identity.
-- [ ] Understand how Envoy sidecars transparently intercept traffic via `iptables` to enforce L7 access policies.
-- [ ] Configure Spring Security 6 as a stateless OAuth 2.0 Resource Server with role mapping.
+The Zero-Trust axiom ("Never Trust, Always Verify") is enforced at both transport (mTLS) and application (OAuth 2.1) layers.
+</Check>
+<Check>
+All Authorization Code flows mandate PKCE (`code_challenge_method=S256`) to prevent code interception attacks.
+</Check>
+<Check>
+Machine-to-Machine communication uses Private Key JWT (RFC 7523) instead of static shared passwords.
+</Check>
+<Check>
+Service mesh proxies enforce Mutual TLS with automated short-lived SPIFFE/SPIRE certificate rotation.
+</Check>
+<Check>
+Spring Security 6 Resource Server decoders dynamically refresh JWKS keys to survive IdP key rotation without outages.
+</Check>
+<Check>
+Layer 7 Authorization Policies restrict microservice traffic based on cryptographic SPIFFE identities.
 </Check>

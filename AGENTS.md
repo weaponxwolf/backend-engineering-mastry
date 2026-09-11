@@ -1,7 +1,7 @@
-# AI Assistant Guidelines & Repository Documentation: Spring Backend Mastery
+# AI Assistant Guidelines & Repository Documentation: Backend Mastery
 
 ## Repository Overview
-This repository contains the comprehensive documentation site **Spring Backend Mastery**, built with **Mintlify** and **MDX**.
+This repository contains the comprehensive documentation site **Backend Mastery**, built with **Mintlify** and **MDX**.
 - **Goal**: Teach production-grade backend engineering in simple English (covering Java 21, Spring Boot 3, PostgreSQL, Docker, Microservices, and System Design) to a level that completely replaces physical engineering textbooks.
 - **Core Standard**: Follows the `Book Replacement Standard` defined in `docs/getting-started/book-standard.mdx` and the `Simple English Rule` in `docs/getting-started/simple-english-rule.mdx`.
 
@@ -823,14 +823,25 @@ All phases of the comprehensive documentation overhaul and book-replacement dept
         - `docs/system-design/multi-region-disaster-recovery.mdx`: Speed-of-light physical limit in silica glass ($204,000\text{ km/s}$), trans-Atlantic 85-110ms RTT math, 2PC cross-ocean connection pool collapse, Anycast BGP edge routing vs the DNS TTL caching blackhole, PostgreSQL WAL streaming lag, complete runnable Java CRDT implementations (PN-Counter and OR-Set), and Partitioned Active-Active home-region routing.
         - `docs/system-design/rate-limiter.mdx`: Hardware NIC ring buffers, interrupt storms (`ksoftirqd`), TCP listen backlog drops (`somaxconn`), Layer 4 firewall limitations vs Layer 7 application limits, in-memory horizontal scaling leaks, Redis check-then-act race conditions, atomic Lua scripts, and L1 Caffeine / L2 Redis multi-tier caching with batch token leasing.
         - `docs/advanced/message-queues.mdx`: Synchronous HTTP coupling costs, disk physics (mechanical seek vs sequential append, NVMe DMA throughput), the Dual-Write state corruption disaster, `enable.auto.commit` silent data loss, consumer `Thread.sleep` rebalance storms, zero-copy `sendfile()`, non-blocking multi-tier retry topics, and idempotent consumer deduplication.
-        - `docs/advanced/microservices.mdx`: In-memory method call ($\sim 2\text{ ns}$) vs network RPC ($\sim 5\text{ ms}$, $1,000,000\times$ slower gap), the 8 Fallacies of Distributed Computing, the Synchronous Distributed Monolith availability collapse ($0.995^5 \approx 97.5\%$), 2PC blocking row locks, Saga Choreography vs Orchestration, Transactional Outbox pattern with Debezium CDC, and gRPC over HTTP/2 with strict deadlines.
+      - **Batch 3 Core Java & JVM Mechanics**:
+        - `docs/java/java-core.mdx`: HotSpot JVM execution engine, object memory layout (12-byte header, Mark Word, Klass Pointer), Compressed OOPs 32GB boundary math, pass-by-value stack activation frames, String Pool byte[] compact representations, autoboxing heap churn in high-frequency loops, and mutable Record security breaches.
+        - `docs/java/jvm-performance-tuning.mdx`: PMU hardware counters vs software sampling, the Safepoint Bias blindspot and Counted Loop TTSP cluster freezes, off-heap DirectByteBuffer leaks, Generational ZGC Colored Pointers and JIT load barriers, and Native Memory Tracking (NMT) detail differentials.
+        - `docs/java/collections-exceptions.mdx`: 64-byte L1 CPU cache line spatial locality vs pointer chasing, disappearing mutable hash keys in HashSets/HashMaps, ConcurrentModificationException modCount mechanics, fillInStackTrace CPU thread locks, and RFC 9457 ProblemDetail domain exception hierarchies.
+        - `docs/java/oop.mdx`: CPU vtables, indirect assembly calls (`call *%rax`), JIT monomorphic inlining vs megamorphic stalls, the Fragile Base Class cashback corruption disaster, Anemic Domain Models vs Rich Domain Models protecting invariants, and Hexagonal Ports and Adapters.
+      - **Batch 4 Distributed Systems & Scaled Infrastructure**:
+        - `docs/database/sharding-partitioning.mdx`: NVMe physical disk I/O, WAL `fsync` serialization bottlenecks, cross-shard Scatter-Gather cluster exhaustion, hot tenant/celebrity partition meltdowns, PostgreSQL declarative partitioning (Range, List, Hash), partition pruning, Spring Boot `AbstractRoutingDataSource`, and LSM-Trees vs B-Trees.
+        - `docs/advanced/realtime-websockets.mdx`: Linux kernel network stack (`sk_buff`, `epoll`), C1000K socket tuning (`nofile`, `tcp_rmem`, `tcp_wmem`), RFC 6455 framing, cross-pod silent message drop disaster, Redis Pub/Sub distributed backplanes, ping/pong zombie socket reclamation, and client exponential backoff with full jitter.
+        - `docs/advanced/distributed-batch-scheduling.mdx`: Quartz crystal clock drift and NTP synchronization skew, multi-pod cron duplicate billing stampedes, in-memory `findAll()` heap meltdowns, ShedLock distributed coordination (`lockAtMostFor`, `lockAtLeastFor`), Spring Batch 5 chunk-oriented processing ($O(1)$ RAM), and partitioned parallel workers.
+        - `docs/system-design/distributed-locks-consensus.mdx`: Distributed asynchrony (STW GC pauses, network delays, clock jumps), Redis `SETNX` TTL double-spend disaster, Redis master failover split-brain, 4-node Raft deadlock, Martin Kleppmann monotonic Fencing Tokens with storage-level validation, and Raft consensus mechanics.
+        - `docs/production/oauth2-zerotrust-mesh.mdx`: Physical network packet sniffing, OAuth 2.1 Authorization Code with PKCE mathematical proof, lateral movement VPC breach, JWKS key rotation 401 blackouts, Private Key JWT (RFC 7523), and mTLS with SPIFFE/SPIRE workload identities via Envoy sidecars.
+        - `docs/system-design/webhook-engine-workflows.mdx`: TCP socket timeout limits, timing side-channel attacks on signatures, outbound thread pool starvation, webhook replay financial credit attacks, Stripe-grade HMAC-SHA256 timestamped signatures, constant-time verification (`MessageDigest.isEqual`), 72-hour jittered backoff, and Temporal deterministic event sourcing replay.
 
 ---
 
 ## Final Verification Summary
 - `npm run check` (`npm run test:audit` + `npm run audit` + `npm run validate` + `npm run links`):
   - **Audit Tests**: 4/4 passing (nested navigation, duplicate route detection, metadata validation, code fence labeling).
-  - **Content Inventory**: 87 pages, 34,157 lines, 987 code blocks, **0 structure errors**, **0 generic text fences**.
+  - **Content Inventory**: 87 pages, 35,641 lines, 1,025 code blocks, **0 structure errors**, **0 generic text fences**.
   - **Mintlify Validate**: Build validation passed cleanly (`navigation.tabs` with 9 major topics).
   - **Mintlify Broken Links**: `success no broken links found` (100% link and anchor integrity across all 87 MDX documents).
 - `npm run build` (`node scripts/build-vercel.mjs`):

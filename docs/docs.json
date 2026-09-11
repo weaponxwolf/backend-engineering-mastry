@@ -1,7 +1,7 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "theme": "maple",
-  "name": "Spring Backend Mastery",
+  "name": "Backend Mastery",
   "description": "Learn backend engineering from beginner to advanced using Java, Spring Boot, databases, microservices, and system design.",
   "appearance": {
     "default": "dark",

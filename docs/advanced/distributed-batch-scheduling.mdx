@@ -1,54 +1,186 @@
 ---
 title: "Distributed Batch Processing & Job Scheduling"
-description: "Master multi-pod cron scheduling with ShedLock, Spring Batch 5 chunk-oriented processing, skip/retry fault tolerance, and scaling pipelines to 50M records."
+sidebarTitle: "Batch & Scheduling"
+description: "Master multi-pod cron scheduling with ShedLock, Spring Batch 5 chunk-oriented processing, skip/retry fault tolerance, clock drift mechanics, and scaling pipelines to 50M records."
 ---
 
 # Distributed Batch Processing & Job Scheduling
 
-In enterprise backend engineering, workloads fall into two broad categories:
-1. **Online Transaction Processing (OLTP)**: Interactive REST APIs serving user requests in under 100 milliseconds.
-2. **Offline Batch Processing**: Scheduled, bulk data pipelines processing millions of records (nightly billing runs, end-of-month financial reconciliations, catalog synchronizations, and PDF invoice generation).
+In enterprise backend engineering, system workloads fall into two fundamentally distinct categories:
+1. **Online Transaction Processing (OLTP)**: Interactive, sub-100-millisecond REST APIs serving synchronous user actions (checkout, login, viewing product pages).
+2. **Offline Batch Processing**: Scheduled, bulk data pipelines operating on millions of records (nightly credit card billing, payroll disbursement, monthly financial reconciliation, search index rebuilds, and regulatory tax reporting).
 
-Running batch jobs in cloud environments introduces distributed coordination challenges: **preventing duplicate executions across multi-replica Kubernetes pods, processing multi-gigabyte datasets without JVM heap exhaustion, and ensuring that a single corrupt record does not abort an entire 10-hour job**.
+Running enterprise batch jobs in distributed, cloud-native environments introduces high-risk architectural failure modes:
+- **The Multi-Pod Cron Disaster**: Running `@Scheduled` on a multi-replica Kubernetes deployment causes all pods to trigger simultaneously, charging customers multiple times and causing database deadlock storms.
+- **The Heap Exhaustion Meltdown**: Fetching millions of records into memory (`findAll()`) crashes the JVM with `OutOfMemoryError: Java heap space` and freezes collocated web traffic.
+- **The 10-Hour Rollback Failure**: A single corrupted record at item 4,999,999 causes an unhandled exception that rolls back a 10-hour monolithic database transaction.
+
+Senior backend engineers do not write simple scripts or naive loops for bulk processing. They master **clock drift mechanics, distributed locking via ShedLock, Spring Batch 5 chunk-oriented state machines, and parallel partition scaling**.
 
 ---
 
-## 1. The Multi-Pod Cron Problem: Why `@Scheduled` Fails
+## Phase 1: Ground Floor (Physical First Principles)
 
-Spring Boot provides the `@Scheduled` annotation for executing recurring cron tasks:
-
-```java
-// DANGEROUS IN MULTI-POD KUBERNETES DEPLOYMENTS:
-@Scheduled(cron = "0 0 2 * * *") // Runs nightly at 2:00 AM
-public void runDailyBilling() {
-    billingService.chargeCustomerSubscriptions();
-}
-```
-
-### The Duplicate Execution Disaster
-If your Kubernetes deployment runs 5 replicas of the application:
-- At 02:00:00 AM, **all 5 pods simultaneously trigger the `runDailyBilling()` method**!
-- Unless guarded by distributed locks, customers will be charged 5 times, and concurrent database updates will cause deadlock storms.
+To design resilient scheduled batch systems, you must understand physical clock drift, streaming disk cursors, and database transaction undo logs.
 
 ```mermaid
 flowchart TD
-    subgraph MultiPodCluster["Kubernetes Multi-Pod Deployment (5 Replicas)"]
-        CronTimer["Cron Trigger (02:00:00 AM UTC)"]
-        CronTimer --> Pod1["Pod 1: Executes Billing Job"]
-        CronTimer --> Pod2["Pod 2: Executes Billing Job"]
-        CronTimer --> Pod3["Pod 3: Executes Billing Job"]
+    subgraph ServerClocks["Physical Quartz Clocks & Clock Drift"]
+        C1["Pod 1 Quartz Oscillator\nClock: 02:00:00.000"]
+        C2["Pod 2 Quartz Oscillator\nClock: 02:00:00.350 (+350ms Drift)"]
+        NTP["NTP Daemon (Network Time Protocol)\nApplies slew / stepping adjustments"]
+        NTP -.-> C1
+        NTP -.-> C2
     end
-    
-    Pod1 -->|DUPLICATE CHARGE!| Stripe["Payment Gateway"]
-    Pod2 -->|DUPLICATE CHARGE!| Stripe
-    Pod3 -->|DUPLICATE CHARGE!| Stripe
+
+    subgraph MemoryVsDisk["Memory Footprint: Buffered vs Streaming Cursor"]
+        Naive["Naive findAll():\nReads 10M rows into RAM\nHeap: 16 GB -> JVM OOM Crash!"]
+        Cursor["Streaming JDBC Cursor / Paging:\nFetches 500 rows at a time\nHeap: 25 MB Constant (O(1) RAM)"]
+    end
+
+    subgraph MVCC_Logs["PostgreSQL MVCC & WAL Behavior"]
+        LongTx["10-Hour Monolithic Transaction:\n• Holds undo snapshot open\n• Prevents autovacuum cleanup\n• Causes massive table bloat"]
+        ChunkTx["Chunked 500-Row Transactions:\n• Commits every 200ms\n• Flushes WAL cleanly\n• Zero vacuum bloat"]
+    end
 ```
+
+### 1. The Physical Reality of Clock Drift
+No two computer servers share the exact same physical time. Server hardware clocks rely on quartz crystals that vibrate at frequencies sensitive to ambient data center temperature, voltage fluctuations, and component age:
+- Even when synchronized via the Network Time Protocol (NTP), physical servers in the same cluster routinely drift by **$10\text{ to }200\text{ milliseconds}$**.
+- If a cron job finishes in $50\text{ ms}$ on Pod 1, Pod 2's clock might trigger $100\text{ ms}$ later, seeing the job as "ready to run again" within the same scheduled minute!
+- This physical drift requires distributed locks to enforce a **minimum lock duration (`lockAtLeastFor`)** to prevent re-execution across drifting clocks.
+
+### 2. Streaming Cursors vs In-Memory Buffering
+- Loading 10,000,000 rows into a Java `List<Order>` requires allocating millions of HotSpot object headers, internal pointers, and string byte arrays. A 2GB database table balloons into **over 12GB of JVM heap memory**, triggering continuous Stop-The-World GC pauses.
+- **Streaming Cursors**: Spring Batch opens a database cursor (`FETCH FORWARD 500`) or keyset pagination query. The JVM retains only the current **Chunk of 500 records** in memory ($O(1)$ memory consumption), processes them, writes them, commits the transaction, and reclaims heap space immediately.
+
+### 3. MVCC Snapshot Duration & Vacuum Bloat
+Holding a database transaction open for 6 hours while a batch job runs is catastrophic in PostgreSQL. Under Multi-Version Concurrency Control (MVCC), PostgreSQL cannot clean up dead tuples (`VACUUM`) created by concurrent OLTP web traffic if the dead tuples were modified after the batch job's transaction began (`xmin` horizon). The table bloats by gigabytes, degrading user-facing API queries.
 
 ---
 
-## 2. Distributed Scheduling with ShedLock
+## Phase 2: The Naive Code (The Production Crashes)
 
-For lightweight periodic jobs, the production standard is **ShedLock**: an open-source library that uses a shared database table to guarantee that a scheduled task executes **at most once** across a multi-node cluster.
+### Crash Scenario 1: The Multi-Pod Duplicate Billing Stampede
+
+A development team implements a nightly subscription billing job using Spring's standard `@Scheduled` annotation:
+
+```java
+// DANGEROUS ANTI-PATTERN: @Scheduled in a multi-replica Kubernetes cluster
+@Component
+public class SubscriptionBillingCron {
+
+    @Autowired
+    private BillingService billingService;
+
+    // Runs nightly at 02:00:00 AM UTC
+    @Scheduled(cron = "0 0 2 * * *")
+    public void executeNightlyBilling() {
+        // FATAL: In Kubernetes with 4 pod replicas,
+        // ALL 4 PODS TRIGGER SIMULTANEOUSLY AT 02:00:00 AM!
+        billingService.chargeAllActiveSubscriptions();
+    }
+}
+```
+
+```mermaid
+flowchart TD
+    subgraph K8s_Deployment["Kubernetes Cluster (4 Pod Replicas)"]
+        CronTrigger["Cron Trigger (02:00:00 AM UTC)"]
+        CronTrigger --> Pod1["Pod 1: Charges Customer A ($50)"]
+        CronTrigger --> Pod2["Pod 2: Charges Customer A ($50)"]
+        CronTrigger --> Pod3["Pod 3: Charges Customer A ($50)"]
+        CronTrigger --> Pod4["Pod 4: Charges Customer A ($50)"]
+    end
+
+    Stripe["Payment Gateway (Stripe)"]
+    Pod1 --> Stripe
+    Pod2 --> Stripe
+    Pod3 --> Stripe
+    Pod4 --> Stripe
+    
+    Result["DISASTER: Customer charged $200 instead of $50!\nOver-drafted bank accounts; credit card dispute fees!"]
+    Stripe --> Result
+```
+
+#### What Happened in Production:
+- The service scaled to 4 replicas in production.
+- At 02:00:00 AM, all 4 pods triggered the billing method within 15 milliseconds of each other.
+- 50,000 customers were charged 4 times in parallel, generating thousands of furious support tickets, bank overdraft fees, and payment gateway chargeback penalties.
+
+---
+
+### Crash Scenario 2: The In-Memory `findAll()` Heap Meltdown
+
+A developer writes a batch reconciliation script to verify ledger balances:
+
+```java
+// DANGEROUS ANTI-PATTERN: Loading entire dataset into JVM heap
+@Service
+public class LedgerReconciliationService {
+
+    @Autowired
+    private AccountRepository accountRepo;
+
+    public void reconcileAllAccounts() {
+        // IN STAGING (5,000 records): Takes 200ms. Everything looks fine!
+        // IN PRODUCTION (12,000,000 records): FATAL HEAP EXHAUSTION!
+        List<Account> accounts = accountRepo.findAll(); 
+
+        for (Account account : accounts) {
+            verifyBalanceIntegrity(account);
+        }
+    }
+}
+```
+
+#### What Happened in Production:
+- In production, the `accounts` table held 12 million records.
+- Hibernate instantiated 12 million managed entity instances in the First-Level Cache (Persistence Context).
+- Within 4 seconds, JVM heap consumption jumped from 1.2GB to 8GB.
+- The JVM locked into continuous **Full GC pauses (99.8% GC CPU overhead)**, preventing health checks from responding.
+- Kubernetes killed the pod with `Exit Code 137 (OOMKilled)`, causing the job to crash midway every night.
+
+---
+
+### Crash Scenario 3: The Unhandled Dirty Record 10-Hour Abort
+
+A developer wraps a 5-million-row processing job in a single `@Transactional` method:
+
+```java
+// DANGEROUS ANTI-PATTERN: Monolithic transaction across millions of records
+@Service
+public class PayrollBatchService {
+
+    @Transactional // A single database transaction!
+    public void processPayrollBatch(List<Employee> employees) {
+        for (Employee emp : employees) {
+            // Processing takes 8 hours for 5 million employees...
+            calculateTax(emp);
+            generatePaystub(emp);
+            updateDisbursementRecord(emp);
+            // AT RECORD 4,999,998: emp.getBankDetails() is null!
+            // Throws NullPointerException!
+        }
+        // FATAL: The entire 8-hour transaction rolls back!
+        // All 4,999,997 previous records are discarded!
+    }
+}
+```
+
+#### What Happened in Production:
+- The payroll run processed records for 7 hours and 45 minutes.
+- At record 4,999,998, a legacy employee profile with corrupted foreign keys threw a `NullPointerException`.
+- Spring's transaction interceptor caught the unchecked exception and issued a database `ROLLBACK`.
+- **The entire 8 hours of work was undone in 30 seconds**. Zero employees received payroll that morning, causing an executive-level escalation.
+
+---
+
+## Phase 3: Under the Hood (Mechanics, State Machines & Spring Batch 5)
+
+### 1. Distributed Scheduling with ShedLock
+
+To guarantee that a recurring cron executes **at most once** across a multi-pod cluster, use **ShedLock**:
 
 ```mermaid
 sequenceDiagram
@@ -58,42 +190,41 @@ sequenceDiagram
     participant Pod2 as Application Pod 2
     participant DB as PostgreSQL (shedlock Table)
 
-    par Simultaneous Clock Triggers
-        Cron->>Pod1: Trigger Job
-        Cron->>Pod2: Trigger Job
+    par Clock Fire
+        Cron->>Pod1: 02:00:00.000 AM
+        Cron->>Pod2: 02:00:00.080 AM
     end
 
-    Pod1->>DB: INSERT INTO shedlock (name, locked_until, locked_at) VALUES ('billing_job', ...)
-    Pod2->>DB: INSERT INTO shedlock (name, locked_until, locked_at) VALUES ('billing_job', ...)
-    
-    Note over DB: Pod 1 WINS the lock! Primary Key constraint blocks Pod 2!
-    DB-->>Pod1: Lock Granted (1 row inserted)
-    DB-->>Pod2: Lock Denied (0 rows / constraint error)
-    
-    Pod1->>Pod1: Executes Billing Job cleanly
-    Pod2->>Pod2: Skips execution safely
+    Pod1->>DB: INSERT INTO shedlock (name, lock_until, locked_at, locked_by) VALUES ('BillingJob', now() + 15m, now(), 'pod-1')
+    Note over DB: Pod 1 acquires lock! Primary Key constraint satisfied.
+    DB-->>Pod1: 1 row affected (Lock Granted!)
+
+    Pod2->>DB: INSERT INTO shedlock (...) VALUES ('BillingJob', ...)
+    Note over DB: Primary Key 'BillingJob' exists and lock_until > now()!
+    DB-->>Pod2: 0 rows affected / Duplicate Key (Lock Denied!)
+
+    Pod1->>Pod1: Executes billing job cleanly
+    Pod2->>Pod2: Skips execution safely and exits
 ```
 
-### 2.1 The Critical `@SchedulerLock` Parameters
-ShedLock provides two essential safety guardrails:
+#### ShedLock Guardrails: `lockAtMostFor` and `lockAtLeastFor`
 
 ```java
 @Scheduled(cron = "0 0 2 * * *")
 @SchedulerLock(
-    name = "DailyBillingJob",
-    lockAtMostFor = "PT15M",  // Maximum lock duration (safety net against pod crashes)
-    lockAtLeastFor = "PT5M"   // Minimum lock duration (safety net against clock skew)
+    name = "NightlyBillingJob",
+    lockAtMostFor = "PT30M", // Crash protection (max lock duration)
+    lockAtLeastFor = "PT5M"  // Clock skew protection (min lock duration)
 )
-public void runDailyBilling() {
+public void runBillingJob() {
     billingService.chargeCustomerSubscriptions();
 }
 ```
 
-- `lockAtMostFor`: If Pod 1 acquires the lock and immediately suffers a kernel panic or OOMKill, the lock automatically expires after 15 minutes, preventing the job from being permanently locked out of future runs.
-- `lockAtLeastFor`: If Pod 1 completes the job in 3 seconds, it **holds the lock for at least 5 minutes**. This prevents other pods whose physical clocks lag by 2 seconds from immediately re-acquiring the lock and executing the job a second time!
+- **`lockAtMostFor = "PT30M"`**: If Pod 1 acquires the lock and immediately suffers a kernel panic or container kill, the lock automatically expires after 30 minutes. This guarantees that tomorrow's run will not be permanently locked out.
+- **`lockAtLeastFor = "PT5M"`**: If Pod 1 completes the entire job in 4 seconds, it **continues to hold the lock for at least 5 minutes**. This prevents other pods whose clocks lag by a few seconds from immediately re-acquiring the lock and running the job a second time!
 
-### 2.2 PostgreSQL ShedLock Table DDL
-
+#### PostgreSQL ShedLock Table DDL:
 ```sql
 CREATE TABLE shedlock (
     name VARCHAR(64) NOT NULL PRIMARY KEY,
@@ -105,205 +236,203 @@ CREATE TABLE shedlock (
 
 ---
 
-## 3. Enterprise Spring Batch 5: Architecture & Concepts
+### 2. Enterprise Spring Batch 5: Architecture & State Machine
 
-When processing tens of millions of records, simple cron jobs fail. Storing millions of objects in a Java `List` causes `OutOfMemoryError: Java heap space`.
-
-**Spring Batch** is a robust framework designed for enterprise bulk processing:
+Spring Batch is an enterprise framework designed to process millions of records with constant memory and full crash recovery.
 
 ```mermaid
 flowchart TD
-    subgraph SpringBatchArchitecture["Spring Batch Core Architecture"]
-        Launcher["JobLauncher"] --> Job["Job: billingProcessingJob"]
+    subgraph SpringBatchCore["Spring Batch 5 Architecture"]
+        Launcher["JobLauncher"] --> Job["Job: statementProcessingJob"]
         Job --> Step1["Step 1: Chunk-Oriented Processing"]
         
-        subgraph ChunkStep["Chunk Pipeline (Repeat until Reader empty)"]
-            Reader["ItemReader\n(Reads 1 record at a time)"]
-            Processor["ItemProcessor\n(Transforms & validates)"]
-            Writer["ItemWriter\n(Writes full chunk in 1 DB transaction)"]
+        subgraph ChunkCycle["Chunk Processing Loop (Repeats until Reader returns null)"]
+            Reader["ItemReader\n(Streams 1 item via JDBC Cursor)"]
+            Processor["ItemProcessor\n(Transforms & validates 1 item)"]
+            Writer["ItemWriter\n(Writes 500 items in ONE DB Transaction)"]
             
-            Reader -->|1 Item| Processor
-            Processor -->|1 Item| Writer
+            Reader -->|Single Item| Processor
+            Processor -->|Single Item| Writer
         end
         
-        Step1 --> JobRepo["JobRepository (PostgreSQL Metadata Tables)"]
+        Step1 --> JobRepo["JobRepository\n(Metadata: BATCH_JOB_EXECUTION, BATCH_STEP_EXECUTION)"]
     end
 ```
 
-### 3.1 The 5 Core Concepts of Spring Batch
-1. **Job**: An explicit state machine representing the end-to-end batch process (e.g. `MonthlyStatementJob`).
-2. **Step**: An independent phase within a Job (e.g. Step 1: Validate Accounts $\rightarrow$ Step 2: Calculate Interest $\rightarrow$ Step 3: Send Invoices).
-3. **ItemReader**: Reads records one by one from a cursor or paging stream without loading the entire dataset into memory.
-4. **ItemProcessor**: Encapsulates business logic, transformations, and data enrichment. If an item is invalid, returning `null` skips the item.
-5. **ItemWriter**: Accepts a batch of processed items (a **Chunk**) and writes them in a single database transaction.
+#### The 5 Core Building Blocks:
+1. **`Job`**: The end-to-end batch workflow (e.g. `MonthlyStatementJob`).
+2. **`Step`**: An independent phase within the Job. A Job can execute sequential or conditional steps.
+3. **`ItemReader`**: Reads records one by one using a database cursor or keyset pagination.
+4. **`ItemProcessor`**: Applies transformations and business rules. Returning `null` discards the item cleanly.
+5. **`ItemWriter`**: Receives an entire **Chunk** of processed items (e.g. 500 items) and writes them in a single batch database transaction (`addBatch()` / `executeBatch()`).
 
 ---
 
-## 4. Chunk-Oriented Processing & Transaction Boundaries
-
-The defining feature of Spring Batch is **Chunk-Oriented Processing**:
+### 3. Chunk-Oriented Processing & Transaction Boundaries
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Step as Chunk Step (chunk size = 500)
-    participant Reader as JdbcPagingItemReader
-    participant Processor as UserStatementProcessor
-    participant Writer as JpaItemWriter
+    participant Step as Chunk Step (chunk = 500)
+    participant Reader as JdbcCursorItemReader
+    participant Processor as UserProcessor
+    participant Writer as JdbcBatchItemWriter
     participant DB as PostgreSQL Database
 
     loop 500 Times
         Step->>Reader: read()
         Reader-->>Step: Item
         Step->>Processor: process(Item)
-        Processor-->>Step: ProcessedItem (or null to filter)
+        Processor-->>Step: ProcessedItem (or null)
     end
-    
-    Note over Step,DB: Single Transaction: Commits exactly 500 records at once!
+
+    Note over Step,DB: Exactly ONE Database Transaction per 500 items!
     Step->>DB: BEGIN TRANSACTION
     Step->>Writer: write(List of 500 ProcessedItems)
-    Writer->>DB: Batch INSERT/UPDATE 500 rows
+    Writer->>DB: PreparedStatement.executeBatch()
     Step->>DB: COMMIT TRANSACTION
-    Step->>DB: Record StepExecution Offset in BATCH_STEP_EXECUTION
+    Step->>DB: Update offset in BATCH_STEP_EXECUTION table
 ```
 
-### Why Chunk-Oriented Processing Is Mandatory for Large Datasets:
-- **Constant Memory Footprint ($O(1)$ RAM)**: Even if the database contains 100 million rows, memory usage is capped at the size of one single chunk (e.g. 500 records).
-- **Restartability**: If a failure occurs at record 4,500,210, the job stores its progress in the `BATCH_STEP_EXECUTION` metadata table. Upon restart, Spring Batch **skips the first 4.5 million records** and resumes from the exact failed chunk!
+#### Why Chunking Guarantees Constant Memory ($O(1)$ RAM)
+Regardless of whether your table contains 10,000 or 100,000,000 records, the JVM heap holds at most 500 active records at any millisecond. When the writer commits, references are cleared and memory is reclaimed by the garbage collector.
 
 ---
 
-## 5. Fault Tolerance: Skip and Retry Policies
+### 4. Fault Tolerance: Declarative Skip & Retry Policies
 
-In enterprise data pipelines, dirty data (e.g. missing postal codes or malformed foreign keys) is common. If a batch pipeline processing 10 million records throws an unhandled exception at record 9,999,999, aborting the entire 8-hour run is unacceptable.
-
-Spring Batch provides declarative **Skip and Retry Policies**:
+To prevent a single corrupted record from aborting a multi-million row batch run:
 
 ```java
-@Bean
-public Step billingStep(JobRepository jobRepository, PlatformTransactionManager transactionManager) {
-    return new StepBuilder("billingStep", jobRepository)
-        .<Customer, Invoice>chunk(500, transactionManager)
-        .reader(customerItemReader())
-        .processor(customerInvoiceProcessor())
-        .writer(invoiceItemWriter())
-        .faultTolerant()
-        // Skip specific non-fatal business exceptions
-        .skip(InvalidCustomerAddressException.class)
-        .skip(PaymentValidationException.class)
-        .skipLimit(100) // Abort only if bad records exceed 100
-        // Automatically retry transient network errors
-        .retry(HttpTimeoutException.class)
-        .retryLimit(3)
-        .listener(new CustomSkipListener()) // Log skipped records for audit
-        .build();
-}
-```
+package com.backend.batch.config;
 
-### Custom Skip Listener (Audit Trail)
-When a record is skipped, it must be recorded in an audit table so developers can inspect and fix the dirty data:
+import com.backend.batch.exception.InvalidRecordException;
+import org.springframework.batch.core.Step;
+import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.transaction.PlatformTransactionManager;
 
-```java
-public class CustomSkipListener implements SkipListener<Customer, Invoice> {
-    private static final Logger log = LoggerFactory.getLogger(CustomSkipListener.class);
+import java.net.SocketTimeoutException;
 
-    @Override
-    public void onSkipInProcess(Customer customer, Throwable t) {
-        log.warn("Skipping customer ID {} due to validation error: {}", 
-                customer.getId(), t.getMessage());
-        // Insert into batch_skipped_records table for manual triage
+@Configuration
+public class BatchJobConfiguration {
+
+    @Bean
+    public Step paymentReconciliationStep(
+            JobRepository jobRepository,
+            PlatformTransactionManager transactionManager,
+            CustomerItemReader reader,
+            CustomerItemProcessor processor,
+            InvoiceItemWriter writer,
+            AuditSkipListener skipListener) {
+
+        return new StepBuilder("paymentReconciliationStep", jobRepository)
+            .<Customer, Invoice>chunk(500, transactionManager)
+            .reader(reader)
+            .processor(processor)
+            .writer(writer)
+            .faultTolerant()
+            // 1. Skip non-fatal business data validation errors
+            .skip(InvalidRecordException.class)
+            .skipLimit(100) // Abort only if bad records exceed 100
+            // 2. Retry transient network glitches
+            .retry(SocketTimeoutException.class)
+            .retryLimit(3)
+            // 3. Log skipped records to audit table for manual triage
+            .listener(skipListener)
+            .build();
     }
 }
 ```
 
 ---
 
-## 6. Scaling Batch Pipelines to 50M+ Records
+### 5. Scaling to 50M+ Records: Partitioned Steps
 
-When single-threaded chunk processing is too slow to meet nightly batch SLAs (e.g. 50 million records taking 14 hours), Spring Batch provides three scaling strategies:
+When single-threaded batch processing cannot meet nightly SLAs (e.g. 50 million records taking 12 hours), scale execution using **Range Partitioning**:
 
 ```mermaid
 flowchart TD
-    subgraph Strategies["Spring Batch Scaling Topologies"]
-        Multi["1. Multi-Threaded Step\nParallel chunk threads reading from synchronized reader\n(Same JVM process)"]
-        Part["2. Partitioned Step\nDivides dataset into N ranges (e.g. ID 1-1M, 1M-2M)\nMaster distributes to Worker Steps"]
-        Remote["3. Remote Chunking\nMaster reads items; sends chunks over Kafka to remote worker pods"]
-    end
+    MasterStep["Master Step (Job Coordinator)"]
+    Partitioner["ColumnRangePartitioner\n(Splits IDs: 1 to 40,000,000)"]
+    
+    MasterStep --> Partitioner
+    
+    Partitioner --> W1["Worker 1 (Thread 1):\nProcesses IDs 1 - 10,000,000"]
+    Partitioner --> W2["Worker 2 (Thread 2):\nProcesses IDs 10,000,001 - 20,000,000"]
+    Partitioner --> W3["Worker 3 (Thread 3):\nProcesses IDs 20,000,001 - 30,000,000"]
+    Partitioner --> W4["Worker 4 (Thread 4):\nProcesses IDs 30,000,001 - 40,000,000"]
 ```
-
-### 6.1 Partitioning by Primary Key Range
-The most effective way to scale relational batch jobs is **Range Partitioning**:
 
 ```java
 @Bean
-public Step masterStep(JobRepository jobRepository, Step workerStep) {
-    return new StepBuilder("masterStep", jobRepository)
-        .partitioner("workerStep", new ColumnRangePartitioner("customers", "id"))
+public Step partitionedMasterStep(JobRepository jobRepository, Step workerStep) {
+    return new StepBuilder("partitionedMasterStep", jobRepository)
+        .partitioner("workerStep", new ColumnRangePartitioner("customer_orders", "id"))
         .step(workerStep)
-        .gridSize(8) // Split work across 8 parallel worker threads
+        .gridSize(8) // 8 parallel worker threads
         .taskExecutor(new SimpleAsyncTaskExecutor("batch-worker-"))
         .build();
 }
 ```
-
-The master step divides the table:
-- Thread 1 processes IDs `1` to `6,250,000`.
-- Thread 2 processes IDs `6,250,001` to `12,500,000`.
-- Result: **Throughput scales linearly with available CPU cores and database connection pools!**
+Each worker step operates completely independently on non-overlapping primary key ranges with its own private database connection, scaling throughput linearly with available CPU cores!
 
 ---
 
-## 7. Active Recall Interview Mastery
+## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
+
+| Question / Scenario | Junior Developer Answer | Senior / Staff Backend Engineer Answer |
+| :--- | :--- | :--- |
+| **Why is `@Scheduled` dangerous in a multi-pod Kubernetes deployment?** | "Because it runs in the background and might use too much CPU on the server." | "In a multi-pod deployment, every pod runs an identical copy of the application context. At the scheduled cron time, **every pod triggers the method simultaneously**, causing duplicate processing, double charges on external gateways, and database deadlocks. We use **ShedLock** with a centralized database lock table: the first pod to acquire the lock row executes the job; all other pods fail the atomic `INSERT`/`UPDATE` check and exit cleanly." |
+| **What is the difference between `lockAtMostFor` and `lockAtLeastFor` in ShedLock?** | "They specify how long the job is allowed to run." | "`lockAtMostFor` is a **crash safety net**: if the pod holding the lock dies midway through execution (e.g. OOMKill or hardware failure), the lock automatically expires after this duration, preventing future runs from being permanently blocked. `lockAtLeastFor` is a **clock skew safety net**: if the job finishes in 2 seconds, it holds the lock for a guaranteed minimum time to prevent other pods whose physical clocks lag by a few milliseconds from immediately re-acquiring the lock and executing a duplicate run." |
+| **How does Chunk-Oriented Processing in Spring Batch prevent OutOfMemoryErrors?** | "It breaks the data into smaller pieces so it's easier to process." | "Traditional methods load an entire collection into RAM via `findAll()`, which scales memory consumption with dataset size ($O(N)$ RAM) and triggers OutOfMemoryErrors. Chunk-Oriented Processing uses an `ItemReader` backed by a streaming database cursor to stream items one by one. The engine accumulates items up to the configured chunk size (e.g. 500), processes them, passes the list to the `ItemWriter` to commit in a **single database transaction**, and clears the persistence context. Memory usage remains constant ($O(1)$ RAM) whether processing 1,000 or 100,000,000 rows." |
+| **How does Spring Batch achieve job restartability after a crash?** | "It uses a try-catch block and logs where it stopped." | "Spring Batch maintains an internal relational state machine across dedicated metadata tables (`BATCH_JOB_EXECUTION`, `BATCH_STEP_EXECUTION`). Every time a chunk commits, the current reader offset and execution context are persisted transactionally. If the pod crashes at item 4,500,210, restarting the job with the same Job Parameters reads the metadata, skips the 4.5 million already-committed records, and **resumes execution from the exact chunk where the failure occurred**." |
+| **What is the difference between a Multi-Threaded Step and a Partitioned Step in Spring Batch?** | "Both run threads in parallel to make the batch run faster." | "A **Multi-Threaded Step** uses a single shared `ItemReader` that distributes chunks across a thread pool within the same JVM; this requires the reader to be strictly synchronized/thread-safe, items lose sequential ordering, and restarts cannot guarantee precise chunk offsets. A **Partitioned Step** divides the dataset into independent, non-overlapping subsets (e.g. primary key ranges). Each worker thread runs its own isolated Step instance with its own dedicated reader, eliminating lock contention and enabling linear horizontal scaling across threads or remote nodes." |
+
+---
+
+## Production Debugging Checklist
 
 <AccordionGroup>
-  <Accordion title="1. Why does Spring @Scheduled fail in a Kubernetes cluster? How does ShedLock solve it?">
-    In Kubernetes, multiple replica pods run identical copies of the application. At the designated cron time, all pods trigger the scheduled method simultaneously, resulting in duplicate work, double charges, and database deadlocks. 
-    
-    ShedLock coordinates execution using a shared database table. The first pod to reach the trigger time acquires an exclusive lock record in the `shedlock` table. All other pods fail to acquire the lock and exit cleanly without executing the job.
+  <Accordion title="1. ShedLock Duplicate Execution / Lock Failure">
+    - [ ] Check server clock synchronization across Kubernetes nodes: `chronyc tracking` or `ntpstat`. Ensure clock skew is under $50\text{ ms}$.
+    - [ ] Verify that `lockAtLeastFor` is configured and exceeds maximum possible clock drift between cluster nodes.
+    - [ ] Check the `shedlock` table in PostgreSQL: Ensure `name` is the primary key and timestamps use UTC (`TIMESTAMP WITH TIME ZONE`).
   </Accordion>
 
-  <Accordion title="2. What is the purpose of lockAtMostFor and lockAtLeastFor in ShedLock?">
-    - `lockAtMostFor`: Guarantees that if the pod holding the lock crashes or dies midway through execution, the lock automatically expires after this duration, preventing permanent deadlocks.
-    - `lockAtLeastFor`: Guarantees that the lock is retained for a minimum time even if the job finishes in milliseconds. This prevents other pods whose clocks are slightly behind from re-acquiring the lock and running the job a second time within the same window.
+  <Accordion title="2. Spring Batch Slow Performance / Transaction Bottlenecks">
+    - [ ] Verify that chunk size is appropriately tuned: Chunks smaller than 100 incur excessive transaction commit overhead; chunks larger than 2,000 increase memory pressure. Ideal range is 500 to 1,000.
+    - [ ] Ensure the `ItemWriter` uses JDBC batch execution (`PreparedStatement.executeBatch()`) rather than individual `INSERT` statements.
+    - [ ] Check if the reader query has an index on the ordering column to prevent full table scans on every page fetch.
   </Accordion>
 
-  <Accordion title="3. How does Chunk-Oriented Processing in Spring Batch prevent OutOfMemoryErrors?">
-    Instead of loading millions of database records into an in-memory collection (`List<Entity>`), an `ItemReader` streams records one by one. 
-    
-    Spring Batch accumulates records up to the configured chunk size (e.g. 500 records), processes them, and passes the 500-item batch to the `ItemWriter`. The writer commits the transaction and clears the persistence context. Memory usage remains constant regardless of whether the dataset contains 1,000 or 100,000,000 rows.
-  </Accordion>
-
-  <Accordion title="4. How does Spring Batch handle job restartability after a mid-process crash?">
-    Spring Batch maintains job state inside metadata tables (`BATCH_JOB_EXECUTION`, `BATCH_STEP_EXECUTION`). Every time a chunk commits, Spring Batch records the reader's current offset and checkpoint index. 
-    
-    When a failed job is restarted with the same Job Parameters, Spring Batch reads the metadata, skips the millions of records that were already committed, and resumes execution from the exact chunk where the failure occurred.
-  </Accordion>
-
-  <Accordion title="5. What is the difference between Multi-Threaded Steps and Partitioned Steps in Spring Batch?">
-    - **Multi-Threaded Step**: A single `ItemReader` reads items and distributes chunks across multiple worker threads in the same JVM. Crucial limitation: The `ItemReader` must be strictly thread-safe, and items are no longer processed in sequential order.
-    - **Partitioned Step**: The dataset is divided into distinct, non-overlapping partitions (e.g. by customer ID ranges). Each worker thread runs its own independent Step with its own private `ItemReader`. This delivers superior scaling because worker steps operate completely independently without reader lock contention.
+  <Accordion title="3. Investigating Skipped Records in Production">
+    - [ ] Inspect the `BATCH_STEP_EXECUTION` table: Check `READ_COUNT`, `WRITE_COUNT`, `COMMIT_COUNT`, and `SKIP_COUNT`.
+    - [ ] Query the custom `batch_skipped_records` audit table to identify validation error patterns and fix upstream dirty data.
   </Accordion>
 </AccordionGroup>
 
 ---
 
-## 8. Done Checklist
+## Done Checklist
 
 <Check>
-Recurring crons running across multiple container pods are guarded by ShedLock to ensure at-most-once execution.
+All scheduled crons running across multi-replica pods are guarded by ShedLock to ensure at-most-once execution.
 </Check>
 <Check>
-`@SchedulerLock` configures both `lockAtMostFor` (crash protection) and `lockAtLeastFor` (clock skew protection).
+`@SchedulerLock` configures both `lockAtMostFor` (crash protection) and `lockAtLeastFor` (clock drift defense).
 </Check>
 <Check>
-Bulk data pipelines process data in constant-memory chunks via Spring Batch 5 rather than naive in-memory collections.
+Bulk pipelines process datasets in constant-memory chunks via Spring Batch 5 rather than naive in-memory collections.
 </Check>
 <Check>
-Batch jobs declare explicit skip and retry policies to prevent isolated dirty records from aborting multi-hour runs.
+Batch jobs define explicit Skip and Retry policies to prevent isolated bad records from aborting multi-hour runs.
 </Check>
 <Check>
-High-volume datasets (50M+ rows) utilize partitioned steps to scale linearly across CPU cores.
+High-volume datasets (10M+ rows) use Partitioned Steps to distribute work across CPU cores via key range partitioning.
 </Check>
 <Check>
-Failed batch records are logged to audit tables for developer triage and manual replay.
+Skipped records are captured by an audit listener and stored in a database table for developer triage.
 </Check>

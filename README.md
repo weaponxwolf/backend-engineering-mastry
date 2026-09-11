@@ -1,6 +1,6 @@
-# Spring Backend Mastery
+# Backend Mastery
 
-A Java 21 and Spring Boot course with executable starter labs, practical assessments, and advanced reference chapters.
+A comprehensive backend engineering course and documentation platform with Java 21, Spring Boot, databases, distributed systems, and production engineering.
 
 Start with [Your First Program](docs/getting-started/first-program.mdx), follow the [roadmap](docs/getting-started/backend-roadmap.mdx), and use the [assessments](docs/getting-started/mastery-assessments.mdx) to test independent skill.
 

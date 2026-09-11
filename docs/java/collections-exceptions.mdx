@@ -1,21 +1,210 @@
 ---
 title: "Collections Framework Internals & Exception Architecture"
-description: "Master Java data structures and error handling: HashMap red-black treeification internals, ArrayList memory growth, ConcurrentModificationException, and RFC 9457 exception hierarchies."
+sidebarTitle: "Collections & Exceptions"
+description: "Master Java data structures and error handling: HashMap red-black treeification internals, ArrayList memory growth, ConcurrentModificationException, CPU cache line locality, and RFC 9457 exception hierarchies."
 ---
 
 # Collections Framework Internals & Exception Architecture
 
-In backend engineering, choosing the wrong data structure or mishandling exceptions leads directly to production incidents:
-- High CPU spikes caused by $O(N)$ linear scans across linked structures.
-- Silent hash collisions and lost entries caused by violating the `equals` and `hashCode` contract.
-- Thread crashes triggered by `ConcurrentModificationException`.
-- Severe memory allocation overhead caused by throwing exceptions inside high-frequency loops.
+In enterprise backend engineering, selecting the wrong data structure or treating exceptions as flow control leads directly to severe production outages:
+- High CPU spikes caused by $O(N)$ linear scans across linked structures and cache misses.
+- Silent memory leaks and orphaned entries caused by mutating objects used as `HashMap` or `HashSet` keys.
+- Thread worker crashes triggered by `ConcurrentModificationException`.
+- Complete CPU exhaustion caused by throwing exceptions inside high-frequency loops, forcing the JVM to repeatedly execute expensive native stack walks (`fillInStackTrace`).
 
-This guide provides an exhaustive, production-grade manual for the Java Collections Framework (JCF) internals, CPU cache locality, modern immutable factories, and robust domain exception hierarchies in Spring Boot 3.
+Senior engineers understand the physical silicon reality of collections (CPU cache lines, spatial locality, and pointer chasing) and design resilient, RFC 9457-compliant domain error architectures.
 
 ---
 
-## Collections Hierarchy & Big-O Complexity
+## Phase 1: Ground Floor (Physical First Principles)
+
+To write high-throughput Java backend code, you must understand how the CPU hardware interacts with objects allocated across physical memory.
+
+```mermaid
+flowchart TD
+    subgraph CPUMemoryInterface["CPU Core & Cache Line Transfer"]
+        CPU["CPU Execution Core\nRegisters (RAX, RDI, RSI)"]
+        L1D["L1 Data Cache (32KB)\nTransfers 64-BYTE CACHE LINES in 1 ns"]
+        RAM["Physical RAM (DDR5)\nLatency: 60 - 100 ns"]
+
+        CPU <-->|1 ns| L1D
+        L1D <-->|Cache Line Fill (64 Bytes)| RAM
+    end
+
+    subgraph DataStructuresInRAM["Memory Layout Comparison"]
+        subgraph ArrayListLayout["ArrayList: Contiguous Memory (High Spatial Locality)"]
+            A0["[0] 4B Ref"] --- A1["[1] 4B Ref"] --- A2["[2] 4B Ref"] --- A3["[3] 4B Ref"]
+            NoteA["Single 64-byte L1 cache line fetch loads 16 consecutive references!\nCPU Hardware Pre-fetcher operates at peak efficiency!"]
+        end
+
+        subgraph LinkedListLayout["LinkedList: Scattered Memory (Zero Locality)"]
+            N1["Node 1 (0x1000)"] -.->|Pointer Jump 80ns| N2["Node 2 (0x8400)"]
+            N2 -.->|Pointer Jump 80ns| N3["Node 3 (0x2100)"]
+            NoteB["Every node dereference stalls the CPU waiting for RAM!\nConstant L1/L2 Cache Misses!"]
+        end
+    end
+```
+
+### 1. The 64-Byte Cache Line Truth
+When a CPU core reads an address from main memory, it does not fetch a single byte or a single 32-bit reference. It fetches a contiguous block of **64 bytes** called a **Cache Line**.
+- **Contiguous Arrays (`ArrayList`, `ArrayDeque`)**: Elements are stored back-to-back in physical RAM. When the CPU accesses `array[0]`, the hardware pre-fetcher automatically pulls `array[1]` through `array[15]` into the L1 cache ahead of time. Iteration executes in $\approx 1\text{ CPU cycle}$ per element.
+- **Node-Based Structures (`LinkedList`, `TreeMap`)**: Each node is an independent heap object allocated at an arbitrary memory address. Traversing a linked list requires the CPU to dereference a memory pointer, wait $60\text{ to }100\text{ nanoseconds}$ for RAM to respond, only to discover the next node is somewhere else entirely. This is called **Pointer Chasing**.
+
+### 2. The Physical Cost of Exceptions (`fillInStackTrace`)
+When an exception is thrown via `throw new CustomException()`, the expensive operation is **not** instantiating the Java object. 
+
+The bottleneck is the native JVM method `Throwable.fillInStackTrace()`:
+1. HotSpot suspends the executing thread's instruction flow.
+2. The JVM walks backward through the native C++ call stack, inspecting the activation frames and register states for every method currently on the call stack.
+3. It allocates native symbol tables and resolves class names, method names, and line numbers.
+4. On a call stack of depth 40 (typical in Spring Boot filter chains), instantiating an exception is **$100\times \text{ to } 1,000\times$ slower** than creating a standard Java object.
+
+---
+
+## Phase 2: The Naive Code (The Production Crashes)
+
+### Crash Scenario 1: The Disappearing Object in `HashSet` / `HashMap`
+
+A developer implements a session management cache using a `HashSet` or `HashMap`. The key object is mutable.
+
+```java
+// DANGEROUS ANTI-PATTERN: Mutable Hash Key
+public class UserSession {
+    private String sessionId;
+    private String status;
+    private Instant lastAccessTime;
+
+    public UserSession(String sessionId, String status, Instant lastAccessTime) {
+        this.sessionId = sessionId;
+        this.status = status;
+        this.lastAccessTime = lastAccessTime;
+    }
+
+    // HashCode generated from ALL fields!
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof UserSession that)) return false;
+        return Objects.equals(sessionId, that.sessionId) &&
+               Objects.equals(status, that.status) &&
+               Objects.equals(lastAccessTime, that.lastAccessTime);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(sessionId, status, lastAccessTime);
+    }
+
+    // Mutator method called during request handling
+    public void updateAccess(Instant now) {
+        this.lastAccessTime = now; // FATAL: Mutates the hash code!
+    }
+}
+```
+
+```mermaid
+flowchart TD
+    subgraph Step1["Step 1: Put into HashSet"]
+        H1["Initial Hash: 0x9A4F\nBucket Index: 7"] --> B7["Bucket 7: UserSession (lastAccess = 10:00)"]
+    end
+
+    subgraph Step2["Step 2: Object Field Mutated"]
+        Mutate["session.updateAccess(10:05)\nHash code changes to: 0x3B12!"]
+    end
+
+    subgraph Step3["Step 3: Attempt Lookup or Removal"]
+        Lookup["set.contains(session) or set.remove(session)"]
+        H2["New Hash: 0x3B12\nChecks Bucket Index: 2"]
+        B2["Bucket 2: null"]
+        Lookup --> H2 --> B2
+        Result["RESULT: Returns FALSE!\nObject is permanently orphaned in Bucket 7!\nMemory leaks forever!"]
+    end
+    Step1 --> Step2 --> Step3
+```
+
+#### What Happened in Production:
+1. The session was placed into the `HashSet`, landing in bucket index `7` based on its hash at 10:00.
+2. An incoming HTTP request called `session.updateAccess(10:05)`, silently altering `lastAccessTime` and changing its hash code.
+3. When the session expired, the cleanup worker called `activeSessions.remove(session)`.
+4. The JVM recalculated the bucket index using the **new hash code**, checking bucket `2`.
+5. Bucket `2` was empty. `remove()` returned `false`.
+6. The session was never removed from bucket `7`. Over weeks, thousands of orphaned sessions accumulated, leading to an **unrecoverable heap OutOfMemoryError**.
+
+---
+
+### Crash Scenario 2: The `ConcurrentModificationException` Web Crash
+
+```java
+// DANGEROUS ANTI-PATTERN: Structural mutation during iteration
+@Service
+public class OrderNotificationService {
+
+    private final List<NotificationSubscriber> subscribers = new ArrayList<>();
+
+    public void broadcastOrderEvent(OrderEvent event) {
+        // Enhanced for-loop implicitly creates an Iterator
+        for (NotificationSubscriber subscriber : subscribers) {
+            try {
+                subscriber.onEvent(event);
+            } catch (SubscriptionExpiredException ex) {
+                // FATAL BUG: Removing directly from the list while iterating!
+                subscribers.remove(subscriber); 
+            }
+        }
+    }
+}
+```
+
+#### What Happened in Production:
+- `ArrayList` tracks an internal integer counter called `modCount` that increments every time `add()` or `remove()` is called.
+- When the `for` loop begins, it creates an `Iterator` with `expectedModCount = modCount`.
+- When an expired subscriber throws an exception, `subscribers.remove(subscriber)` mutates `modCount`.
+- On the very next iteration, `iterator.next()` detects `modCount != expectedModCount` and immediately throws `ConcurrentModificationException`.
+- The notification loop crashes midway, leaving remaining customers without critical order confirmation emails.
+
+---
+
+### Crash Scenario 3: The Flow-Control Exception CPU Meltdown
+
+An API receives a batch of 5,000 order lines. For every line item, the service verifies inventory using domain exceptions for control flow:
+
+```java
+// DANGEROUS ANTI-PATTERN: Exceptions used as normal business control flow
+@Service
+public class InventoryService {
+
+    public void validateCartItems(List<CartItem> items) {
+        for (CartItem item : items) {
+            try {
+                verifyStock(item.getProductId(), item.getQuantity());
+            } catch (OutOfStockException ex) {
+                // Handled as normal business flow!
+                item.markOutOfStock();
+            }
+        }
+    }
+
+    private void verifyStock(Long productId, int quantity) {
+        int available = stockRepository.getStock(productId);
+        if (available < quantity) {
+            // FATAL: Traverses entire 40-frame Spring stack for normal business check!
+            throw new OutOfStockException(productId, quantity, available);
+        }
+    }
+}
+```
+
+#### What Happened in Production:
+- During flash sales, 40% of requested items are out of stock.
+- The service throws **80,000 exceptions per second**.
+- All CPU cores become locked at $100\%$ utilization inside HotSpot's `JVM_FillInStackTrace` C++ routine.
+- Throughput collapses from 8,000 requests/sec down to 95 requests/sec, causing upstream API gateways to time out.
+
+---
+
+## Phase 3: Under the Hood (Mechanics, Bytecode & Algorithms)
+
+### 1. Collections Hierarchy & Big-O Reference Matrix
 
 ```mermaid
 graph TD
@@ -37,190 +226,120 @@ graph TD
     Map["java.util.Map (Key-Value)"] --> HM["HashMap (Bucket Table + Red-Black Trees)"]
     Map --> LHM["LinkedHashMap (Doubly Linked Buckets)"]
     Map --> TM["TreeMap (Red-Black Key Ordering)"]
-    Map --> CHM["ConcurrentHashMap (Lock-Free CAS + Bucket Locking)"]
+    Map --> CHM["ConcurrentHashMap (Lock-Free CAS + Bucket Locks)"]
 ```
 
-### Time & Space Complexity Reference Matrix
-
-| Data Structure | Get / Lookup | Add / Insert | Delete / Remove | Space Complexity | Best Production Use Case |
+| Data Structure | Get / Lookup | Add / Insert | Delete / Remove | Memory Locality | Production Verdict |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`ArrayList`** | **$O(1)$** (Direct index) | **$O(1)$ amortized** | $O(N)$ (Array copy shift) | Low ($O(N)$ contiguous) | Default choice for indexed read lists and API DTO lists |
-| **`ArrayDeque`** | $O(N)$ | **$O(1)$** (Head/Tail) | **$O(1)$** (Head/Tail) | Low (Circular array) | High-performance LIFO stacks and FIFO queues |
-| **`LinkedList`** | $O(N)$ (Pointer traverse) | $O(1)$ (At head/tail) | $O(1)$ (With iterator) | High (3 pointers/node) | **Avoid in modern backends** (Poor CPU cache locality) |
-| **`HashSet`** | **$O(1)$** (Average) | **$O(1)$** (Average) | **$O(1)$** (Average) | Moderate (HashMap backed) | Fast uniqueness checks, membership testing |
-| **`TreeSet`** | $O(\log N)$ | $O(\log N)$ | $O(\log N)$ | Moderate (Red-Black tree) | Sorted sets, range queries (`subSet`, `tailSet`) |
-| **`HashMap`** | **$O(1)$** (Average) | **$O(1)$** (Average) | **$O(1)$** (Average) | Moderate ($O(N)$ buckets) | High-speed key-value lookups, caching, mappings |
-| **`LinkedHashMap`**| **$O(1)$** (Average) | **$O(1)$** (Average) | **$O(1)$** (Average) | Higher (Extra linked pointers) | Stable insertion-order responses, LRU memory caches |
-| **`TreeMap`** | $O(\log N)$ | $O(\log N)$ | $O(\log N)$ | Moderate (Red-Black tree) | Naturally sorted keys, prefix key scanning |
-| **`ConcurrentHashMap`**| **$O(1)$** (Average) | **$O(1)$** (CAS / Sync) | **$O(1)$** | Moderate | High-concurrency multithreaded caching |
+| **`ArrayList`** | **$O(1)$** | **$O(1)$ amortized** | $O(N)$ shift | **Superb** (Contiguous) | **Default choice** for lists, DTOs, and API responses |
+| **`ArrayDeque`** | $O(N)$ | **$O(1)$** | **$O(1)$** | **Superb** (Circular array) | **Default choice** for FIFO queues and LIFO stacks |
+| **`LinkedList`** | $O(N)$ | $O(1)$ at ends | $O(1)$ with iter | **Terrible** (Scattered) | **Strictly avoid**: Pointer chasing ruins CPU caching |
+| **`HashMap`** | **$O(1)$** | **$O(1)$** | **$O(1)$** | Moderate | **Default choice** for key-value lookups |
+| **`HashSet`** | **$O(1)$** | **$O(1)$** | **$O(1)$** | Moderate | **Default choice** for membership testing & uniqueness |
+| **`ConcurrentHashMap`**| **$O(1)$** | **$O(1)$** | **$O(1)$** | Moderate | High-concurrency multithreaded caching |
+| **`TreeSet` / `TreeMap`**| $O(\log N)$ | $O(\log N)$ | $O(\log N)$ | Poor (Tree pointers) | Range queries (`subMap`, `tailSet`), sorted keys |
 
 ---
 
-## `HashMap` Internals: From Buckets to Red-Black Trees
+### 2. `HashMap` Internals: From Buckets to Red-Black Trees
 
-In Java 8+, `java.util.HashMap` was completely re-engineered to protect backend systems from **HashDoS (Hash Denial of Service) attacks**, where malicious clients send millions of colliding keys to force $O(N)$ linked list searches.
+To protect systems from **HashDoS attacks** (where malicious payloads send millions of colliding keys to force $O(N)$ linked list searches), HotSpot re-engineered `HashMap` with balanced Red-Black trees.
 
 ```mermaid
 graph TD
-    subgraph HashMap Internal Table [Node Array table of size 16]
+    subgraph HashMapInternalTable["HashMap Internal Node Table (Capacity = 16)"]
         B0["Bucket 0: null"]
-        B1["Bucket 1: Node A -> Node B (Linked List under 8 nodes)"]
-        B2["Bucket 2: TreeNode Root<br/>(Red-Black Tree: 8 or more nodes!)"]
+        B1["Bucket 1: Node A -> Node B (Singly Linked List under 8 elements)"]
+        B2["Bucket 2: TreeNode Root (Red-Black Tree: 8 or more elements!)"]
         B3["Bucket 3: null"]
     end
-    K["Key: put(k, v)"] --> H["1. Hash Function:<br/>(h = key.hashCode()) ^ (h >>> 16)"]
-    H --> IDX["2. Bucket Index:<br/>index = (table.length - 1) & hash"]
+    K["Key: put(k, v)"] --> H["1. Hash Spreading Function:<br/>(h = key.hashCode()) ^ (h >>> 16)"]
+    H --> IDX["2. Fast Bitwise Index:<br/>index = (capacity - 1) & hash"]
     IDX --> B2
 ```
 
-### The 4 Phases of a `put()` Operation
+#### Step 1: The Hash Spreading Function
+Raw `hashCode()` integers may have poor bit distribution. Java mixes the high 16 bits into the low 16 bits using XOR:
+```java
+static final int hash(Object key) {
+    int h;
+    return (key == null) ? 0 : (h = key.hashCode()) ^ (h >>> 16);
+}
+```
 
-1. **Hash Spreading Function**:
-   Raw `hashCode()` integers may have poor distribution. Java applies a bitwise XOR shift to mix the high-order bits into the low-order bits:
-   ```java
-   static final int hash(Object key) {
-       int h;
-       return (key == null) ? 0 : (h = key.hashCode()) ^ (h >>> 16);
-   }
-   ```
-2. **Bitwise Modulo Index Calculation**:
-   Because the internal table capacity is always a power of 2 ($2^N$), PostgreSQL and Java calculate the bucket index using fast bitwise AND instead of slow hardware modulo division (`%`):
-   $$\text{index} = (\text{capacity} - 1) \ \& \ \text{hash}$$
-3. **Collision Handling & Treeification Thresholds**:
-   - **Chaining**: If two keys land in the same bucket, they form a singly-linked list.
-   - **Treeification Threshold = 8**: When a bucket's linked list grows to **8 nodes** and the total table capacity is at least **64**, Java converts the bucket from a linked list into a **Red-Black Tree** (`TreeNode<K, V>`). This transforms lookup time from $O(N)$ linear scan to $O(\log N)$ logarithmic time!
-   - **Untreeify Threshold = 6**: When table resizing reduces the elements in a tree bin to 6 or fewer, it is converted back to a linked list to save memory.
-4. **Resizing and Load Factor (0.75)**:
-   - **Initial Capacity**: 16 buckets.
-   - **Threshold**: $\text{Capacity} \times \text{Load Factor} = 16 \times 0.75 = 12$.
-   - When the 13th key is inserted, capacity doubles to 32, and all keys are rehashed using their new high-order bit.
+#### Step 2: Bitwise Modulo Index Calculation
+Because table capacity is always a power of 2 ($16, 32, 64, \dots, 2^N$), Java avoids the expensive hardware integer division instruction (`idiv`) and calculates the bucket index using bitwise AND:
+$$\text{index} = (\text{capacity} - 1) \ \& \ \text{hash}$$
 
-<Warning>
-**The `equals()` and `hashCode()` Invariant**:
-If two objects are equal according to `equals(Object)`, they **MUST** produce the exact same integer `hashCode()`.
-If you override `equals()` without overriding `hashCode()`, two identical objects will produce different hash codes, landing in different buckets. Your `map.get(key)` will return `null` even though the key exists!
-</Warning>
+#### Step 3: Treeification & Untreeification Thresholds
+- **Chaining**: In bucket collisions, entries form a singly linked list.
+- **Treeification Threshold = 8**: When a bucket reaches **8 nodes** AND total table capacity is at least **64**, the bucket converts from a linked list to a **Red-Black Tree** (`TreeNode<K, V>`). Search complexity drops from $O(N)$ to $O(\log N)$.
+- **Untreeify Threshold = 6**: When table resizing reduces the elements in a tree bin to 6 or fewer, it converts back to a linked list to save memory.
+- **Load Factor = 0.75**: Capacity doubles when $\text{size} > \text{capacity} \times 0.75$ (e.g., at 13 elements for a 16-bucket table).
 
 ---
 
-## `ArrayList` Memory Growth & The CPU Cache Locality Truth
+### 3. `ArrayList` Resizing & Zero-Copy Native Replication
 
-### Why `LinkedList` is an Anti-Pattern in Backend Engineering
-Decades ago, computer science textbooks taught that `LinkedList` is superior to `ArrayList` for insertions ($O(1)$ vs $O(N)$). On modern multi-core hardware, **this is completely false**:
-1. **CPU Cache Locality**: An `ArrayList` is a contiguous block of physical RAM. The CPU pre-fetches entire memory cache lines (64 bytes), making iteration blazing fast.
-2. **Pointer Chasing**: A `LinkedList` allocates small `Node` objects scattered arbitrarily across the heap. Iterating through a linked list forces the CPU to stall on continuous L1/L2 cache misses.
-3. **Memory Bloat**: Each `LinkedList.Node` requires 24 bytes of overhead (object header + forward pointer + backward pointer) to store a 4-byte reference!
-
-```mermaid
-graph LR
-    subgraph ArrayList Memory [Contiguous Array in RAM]
-        A0["[0] ObjRef"] --- A1["[1] ObjRef"] --- A2["[2] ObjRef"] --- A3["[3] ObjRef"]
-    end
-    subgraph LinkedList Memory [Scattered Heap Objects]
-        N1["Node A (Heap 0x10)"] -.->|Pointer Jump| N2["Node B (Heap 0x88)"]
-        N2 -.->|Pointer Jump| N3["Node C (Heap 0x34)"]
-    end
-```
-
-### `ArrayList` Amortized Expansion Math
-- Default initial capacity = 10 elements.
-- When full, `ArrayList` grows by **50%** ($1.5\text{x}$) using a bitwise right-shift:
+- **Default Initial Capacity**: 10 elements.
+- **Growth Math**: When full, `ArrayList` expands by **$50\%$** ($1.5\times$) using bitwise right-shift:
   ```java
-  int newCapacity = oldCapacity + (oldCapacity >> 1); // 10 -> 15 -> 22 -> 33
+  int newCapacity = oldCapacity + (oldCapacity >> 1); // 10 -> 15 -> 22 -> 33 -> 49
   ```
-- Elements are copied using low-level, zero-copy native memory replication: `System.arraycopy()`.
-- **Production Tip**: If you know you are fetching 10,000 items from a database, always pre-size the list: `new ArrayList<>(10_000)` to eliminate 14 redundant re-allocations and memory copies.
+- **Zero-Copy Memory Transfer**: Memory copying is performed by the JVM native method `System.arraycopy()`, which translates to vectorized SIMD CPU instructions (`vmovdqu` on x86_64) that copy 32 to 64 bytes per CPU cycle directly in hardware.
+
+<Tip>
+**Production Rule**: Always pre-size collections if the size is known:
+```java
+// Avoids 14 redundant memory reallocations and array copies
+List<UserDTO> users = new ArrayList<>(expectedUserCount);
+```
+</Tip>
 
 ---
 
-## Concurrent Modification & Iteration Hazards
+### 4. Resolving Concurrent Modification Safely
 
-Attempting to modify a collection while iterating over it throws `ConcurrentModificationException`:
+To safely remove elements while iterating:
 
 ```java
-// ANTI-PATTERN: Throws ConcurrentModificationException!
-List<String> names = new ArrayList<>(List.of("Alice", "Bob", "Charlie"));
-for (String name : names) {
-    if ("Bob".equals(name)) {
-        names.remove(name); // Modifies list while iterator is active!
-    }
-}
-```
+// SOLUTION 1: Modern removeIf (Cleanest and optimal)
+subscribers.removeIf(NotificationSubscriber::isExpired);
 
-### Why it Fails: The `modCount` Mechanism
-`ArrayList` maintains an internal integer `modCount` that increments on every structural modification (`add`, `remove`). When an `Iterator` is created, it takes a snapshot: `expectedModCount = modCount`.
-On every `iterator.next()`, it verifies:
-```java
-if (modCount != expectedModCount) {
-    throw new ConcurrentModificationException(); // Fail-fast check!
-}
-```
-
-### Safe Production Solutions
-```java
-// Solution 1: Use removeIf (Preferred, cleanest)
-names.removeIf("Bob"::equals);
-
-// Solution 2: Explicit Iterator.remove()
-Iterator<String> it = names.iterator();
+// SOLUTION 2: Explicit Iterator.remove()
+Iterator<NotificationSubscriber> it = subscribers.iterator();
 while (it.hasNext()) {
-    if ("Bob".equals(it.next())) {
-        it.remove(); // Safely updates both modCount and expectedModCount!
+    NotificationSubscriber sub = it.next();
+    if (sub.isExpired()) {
+        it.remove(); // Safely synchronizes expectedModCount = modCount!
     }
 }
 ```
 
 ---
 
-## Modern Immutable Collections: `List.of` vs `unmodifiableList`
+### 5. Modern Immutable Collections: `List.of()` vs `unmodifiableList()`
 
-Java 9 introduced compact, immutable collection factories:
-
-```java
-List<String> immutableList = List.of("A", "B", "C");
-Set<String> immutableSet = Set.of("ADMIN", "USER");
-Map<String, Integer> immutableMap = Map.of("key1", 100, "key2", 200);
-```
-
-### Structural Differences
-
-| Feature | `Collections.unmodifiableList(list)` | `List.of(...)` (Java 9+) |
+| Feature | `Collections.unmodifiableList(list)` | `List.of(...)` / `List.copyOf(...)` (Java 9+) |
 | :--- | :--- | :--- |
-| **Mechanism** | Read-only view wrapper around underlying list | Compact, dedicated internal class |
-| **True Immutability** | **No**: If the underlying list changes, the view changes! | **Yes**: Completely immutable, cannot be mutated |
+| **Mechanism** | Read-only wrapper view around existing list | Compact, dedicated internal array class |
+| **True Immutability** | **No**: If underlying list changes, the view changes! | **Yes**: Completely immutable |
 | **Null Tolerance** | Permits `null` if underlying list contains it | **Strictly Null-Hostile**: Throws `NullPointerException` |
 | **Memory Overhead** | Extra wrapper object on heap | Highly optimized zero-overhead field storage |
 
 ```java
-// DEFENSIVE COPYING PATTERN:
-// Return true immutable copies from domain entities:
+// PRODUCTION DEFENSIVE COPY:
 public List<OrderItem> getItems() {
-    return List.copyOf(this.items); // Guaranteed immutable snapshot
+    // Guaranteed immutable snapshot; cannot be modified by callers
+    return List.copyOf(this.items);
 }
 ```
 
 ---
 
-## Production Exception Architecture: Checked vs Unchecked
+### 6. Production Exception Architecture & RFC 9457 Problem Details
 
-```mermaid
-graph TD
-    Throwable["java.lang.Throwable"] --> Error["Error (OutOfMemory, StackOverflow)<br/>Fatal JVM crashes: Do NOT catch!"]
-    Throwable --> Exception["Exception"]
-    Exception --> Checked["Checked Exceptions (IOException, SQLException)<br/>Forced by compiler: Forces boilerplate"]
-    Exception --> RuntimeException["RuntimeException (Unchecked)<br/>Modern Standard: Clean domain errors"]
-```
-
-### Why Modern Architecture Rejects Checked Exceptions
-1. **Signature Pollution**: Checked exceptions force intermediate service interfaces to declare `throws IOException`, leaking low-level infrastructure concerns into business boundaries.
-2. **Incompatible with Functional Java**: Stream lambdas (`map`, `filter`) cannot throw checked exceptions without cumbersome try/catch wrappers.
-3. **Transaction Rollback Standard**: By default, Spring's `@Transactional` **only rolls back on Unchecked Exceptions (`RuntimeException`)**! A checked exception does **NOT** trigger database rollback unless explicitly declared with `@Transactional(rollbackFor = Exception.class)`.
-
----
-
-## Clean Domain Exception Hierarchy
-
-In modern Spring Boot backends, build a decoupled, typed business exception hierarchy that maps directly to HTTP status codes:
+Modern Spring Boot 3 services decouple internal domain exceptions from external HTTP representations using the **RFC 9457 (formerly RFC 7807) Problem Details standard**.
 
 ```mermaid
 classDiagram
@@ -229,63 +348,32 @@ classDiagram
         +String errorCode
         +String message
     }
-    class EntityNotFoundException {
-        +String entityType
-        +Object identifier
+    class ResourceNotFoundException {
+        +String resourceType
+        +Object resourceId
     }
-    class ConflictException {
-        +String resource
+    class BusinessRuleViolationException {
+        +String ruleCode
     }
-    class ValidationException {
-        +List~FieldError~ errors
+    class ConcurrencyConflictException {
+        +Long entityId
     }
 
-    DomainException <|-- EntityNotFoundException
-    DomainException <|-- ConflictException
-    DomainException <|-- ValidationException
+    DomainException <|-- ResourceNotFoundException
+    DomainException <|-- BusinessRuleViolationException
+    DomainException <|-- ConcurrencyConflictException
     RuntimeException <|-- DomainException
 ```
 
-### Implementation
-```java
-package com.example.common.exception;
+#### Why Backend Architecture Uses Unchecked Exceptions
+1. **Transaction Rollback Safety**: Spring's `@Transactional` **only rolls back on Unchecked Exceptions (`RuntimeException`) by default**. Checked exceptions do NOT trigger rollback unless declared with `@Transactional(rollbackFor = Exception.class)`.
+2. **Stream / Functional Compatibility**: Checked exceptions cannot be thrown from Java Stream lambdas (`map`, `filter`) without awkward wrapper try-catch boilerplate.
 
-public abstract class DomainException extends RuntimeException {
-    private final String errorCode;
-
-    protected DomainException(String message, String errorCode) {
-        super(message);
-        this.errorCode = errorCode;
-    }
-
-    public String getErrorCode() { return errorCode; }
-}
-
-public class OrderNotFoundException extends DomainException {
-    public OrderNotFoundException(Long orderId) {
-        super("Order not found with ID: " + orderId, "ORDER_NOT_FOUND");
-    }
-}
-
-public class InsufficientInventoryException extends DomainException {
-    public InsufficientInventoryException(Long productId, int requested, int available) {
-        super("Product %d has only %d units available (requested: %d)"
-              .formatted(productId, available, requested), "INSUFFICIENT_INVENTORY");
-    }
-}
-```
-
----
-
-## Global RFC 9457 Exception Handler in Spring Boot 3
-
-Translate domain exceptions into standardized `application/problem+json` HTTP responses:
+#### Production Global Exception Handler (`ProblemDetail`):
 
 ```java
-package com.example.common.error;
+package com.backend.common.exception;
 
-import com.example.common.exception.DomainException;
-import com.example.common.exception.OrderNotFoundException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -295,24 +383,34 @@ import java.net.URI;
 import java.time.Instant;
 
 @RestControllerAdvice
-public class GlobalExceptionHandler {
+public class GlobalApiExceptionHandler {
 
-    @ExceptionHandler(OrderNotFoundException.class)
-    public ProblemDetail handleOrderNotFound(OrderNotFoundException ex) {
+    @ExceptionHandler(ResourceNotFoundException.class)
+    public ProblemDetail handleNotFound(ResourceNotFoundException ex) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
-        problem.setTitle("Order Not Found");
-        problem.setType(URI.create("https://api.store.com/errors/not-found"));
+        problem.setTitle("Resource Not Found");
+        problem.setType(URI.create("https://api.domain.com/errors/not-found"));
+        problem.setProperty("error_code", ex.getErrorCode());
+        problem.setProperty("resource_id", ex.getResourceId());
+        problem.setProperty("timestamp", Instant.now());
+        return problem;
+    }
+
+    @ExceptionHandler(BusinessRuleViolationException.class)
+    public ProblemDetail handleBusinessViolation(BusinessRuleViolationException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_ENTITY, ex.getMessage());
+        problem.setTitle("Business Rule Violation");
+        problem.setType(URI.create("https://api.domain.com/errors/business-violation"));
         problem.setProperty("error_code", ex.getErrorCode());
         problem.setProperty("timestamp", Instant.now());
         return problem;
     }
 
     @ExceptionHandler(Exception.class)
-    public ProblemDetail handleUnhandled(Exception ex) {
-        // Fallback for uncaught server errors (500)
+    public ProblemDetail handleFallback(Exception ex) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(
-            HttpStatus.INTERNAL_SERVER_ERROR, 
-            "An unexpected server error occurred. Our engineers have been alerted."
+            HttpStatus.INTERNAL_SERVER_ERROR,
+            "An unexpected internal server error occurred."
         );
         problem.setTitle("Internal Server Error");
         problem.setProperty("timestamp", Instant.now());
@@ -323,26 +421,58 @@ public class GlobalExceptionHandler {
 
 ---
 
-## Active Recall & Interview Mastery
+## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
+
+| Question / Scenario | Junior Developer Answer | Senior / Staff Backend Engineer Answer |
+| :--- | :--- | :--- |
+| **Why is `LinkedList` considered an anti-pattern in high-throughput backend services?** | "`ArrayList` is faster because it uses indexes, while `LinkedList` has to traverse nodes one by one." | "`LinkedList` suffers from **poor CPU cache locality and pointer chasing**. An `ArrayList` is a contiguous block of RAM; the CPU hardware pre-fetcher loads entire 64-byte cache lines, making iteration execute at L1 speed ($\approx 1\text{ ns}$). `LinkedList` scatters nodes across the heap, forcing the CPU to stall on continuous L1/L2 cache misses while waiting for DDR5 RAM ($60\text{ - }100\text{ ns}$). Furthermore, each `LinkedList.Node` imposes 24 bytes of object header and pointer overhead just to store a 4-byte reference." |
+| **What happens if you mutate an object that is currently used as a key in a `HashMap`?** | "The map will update the key with the new values." | "The object becomes **permanently lost or orphaned inside the table**. The bucket index is calculated from `(capacity - 1) & hash(key)`. When a field that contributes to `hashCode()` is mutated, the hash code changes. Subsequent calls to `map.get(key)` or `map.remove(key)` calculate a completely different bucket index and return `null`. The old entry remains stuck in its original bucket, causing silent data corruption and uncollectible heap memory leaks. Hash keys must always be strictly immutable." |
+| **How does `HashMap` treeification defend against HashDoS security vulnerabilities?** | "It converts lists to trees when there are too many items to make searches faster." | "Prior to Java 8, colliding keys formed an unbounded singly linked list with $O(N)$ lookup time. Malicious clients could exploit predictable string hashing algorithms to send HTTP requests with thousands of colliding query parameters, forcing the web server into millions of $O(N)$ string comparisons and locking CPU cores at 100%. HotSpot mitigates this by converting any bucket with **$\ge 8$ nodes (in tables $\ge 64$ capacity)** into a balanced **Red-Black Tree**, guaranteeing $O(\log N)$ worst-case search complexity and completely neutralizing HashDoS." |
+| **Why should you never use exceptions for normal business control flow?** | "Throwing exceptions is bad practice and makes the code messy." | "The physical cost of `throw new Exception()` is dominated by HotSpot's native `fillInStackTrace()` routine, which halts thread execution to walk backwards through the entire C++ execution stack frame to resolve class and method symbols. In a Spring Boot microservice with 40 filter and proxy interceptors, throwing 50,000 exceptions per second will saturate CPU cores on stack walking alone. Normal business alternatives must return typed Result objects, records, or `Optional`." |
+| **What is the difference between `Collections.unmodifiableList(list)` and `List.of(...)`?** | "Both make a list that you cannot change." | "`Collections.unmodifiableList()` is merely a **read-only wrapper view** around an existing list. If another thread mutates the underlying list, the mutation is immediately reflected in the unmodifiable view, and it permits nulls. `List.of()` creates an **independent, genuinely immutable, compact collection** that has no underlying list to mutate, consumes less heap memory, and is strictly null-hostile (throws `NullPointerException` if any element is null)." |
+
+---
+
+## Production Debugging Checklist
 
 <AccordionGroup>
-  <Accordion title="1. Explain the internal put() process of a HashMap and how treeification prevents DoS attacks.">
-    When `put(k, v)` is invoked, the key's `hashCode()` is processed through a bitwise shift mixer and mapped to a bucket index using `(capacity - 1) & hash`. If a collision occurs, the entry is chained in a singly linked list. When a bucket's list reaches 8 nodes and the table has at least 64 buckets, the list is converted into a balanced Red-Black Tree. This guarantees that even if a malicious client deliberately generates thousands of keys that hash to the exact same bucket, search time degrades gracefully to $O(\log N)$ instead of $O(N)$ linear scans, neutralizing HashDoS attacks.
+  <Accordion title="1. High CPU in JVM_FillInStackTrace">
+    - [ ] Capture a 30-second CPU flame graph using `async-profiler`: `./asprof -d 30 -e cpu -f /tmp/cpu.html <PID>`.
+    - [ ] Search for wide frames containing `Throwable.fillInStackTrace` or `JVM_FillInStackTrace`.
+    - [ ] If found, identify the domain exception being thrown inside high-frequency loops and replace it with `Optional`, `Result`, or pre-allocated stackless exceptions (`class FastException extends RuntimeException { @Override public Throwable fillInStackTrace() { return this; } }`).
   </Accordion>
 
-  <Accordion title="2. Why is LinkedList almost always worse than ArrayList on modern computer hardware?">
-    Modern CPU cores rely heavily on L1 and L2 memory caches. Because `ArrayList` stores elements in a contiguous block of memory, the CPU hardware pre-fetcher loads entire cache lines (64 bytes) in advance, making array iterations blazing fast. `LinkedList` allocates nodes scattered across unpredictable memory addresses on the heap; traversing it requires dereferencing pointers (pointer chasing), which causes frequent CPU cache misses and execution stalls. Additionally, each linked node consumes 24 bytes of overhead for pointers.
+  <Accordion title="2. Diagnosing ConcurrentModificationException">
+    - [ ] Inspect the stack trace for `ArrayList$Itr.checkForComodification`.
+    - [ ] Check if a collection is being modified inside an enhanced `for` loop. Replace with `collection.removeIf(predicate)` or explicit `iterator.remove()`.
+    - [ ] Check if a shared non-concurrent collection (`ArrayList`, `HashMap`) is being accessed across multiple threads without synchronization. Replace with `CopyOnWriteArrayList` or `ConcurrentHashMap`.
   </Accordion>
 
-  <Accordion title="3. What causes a ConcurrentModificationException and how do you prevent it during iteration?">
-    `ConcurrentModificationException` is thrown by fail-fast iterators when they detect that a collection was structurally modified (added to or removed from) while iteration was in progress. The iterator tracks `expectedModCount` and compares it to the collection's `modCount` on every step. It is prevented by either using `list.removeIf(predicate)`, using the explicit `Iterator.remove()` method (which synchronizes `expectedModCount`), or by iterating over an immutable defensive copy.
-  </Accordion>
-
-  <Accordion title="4. Why should backend services prefer Unchecked Exceptions over Checked Exceptions?">
-    Checked exceptions force method signatures to declare `throws Exception`, which violates encapsulation by exposing infrastructure details (like `SQLException` or `IOException`) to upper business layers. They also break functional interfaces and Stream pipelines in Java. Furthermore, Spring's `@Transactional` boundary automatically triggers database rollback on unchecked exceptions (`RuntimeException`), whereas checked exceptions do not roll back transactions by default.
-  </Accordion>
-
-  <Accordion title="5. What is the difference between Collections.unmodifiableList() and List.of()?">
-    `Collections.unmodifiableList(list)` is merely a wrapper view around an existing mutable list. If the underlying list is modified elsewhere, those changes are immediately visible through the unmodifiable view. In contrast, `List.of()` creates a truly immutable, compact, standalone collection that cannot be altered under any circumstances, and is strictly null-hostile (throws `NullPointerException` if any element is null).
+  <Accordion title="3. Investigating Disappearing Keys in Maps">
+    - [ ] Verify that all objects used as `Map` keys or `Set` elements are **strictly immutable** (`record` or `final` fields).
+    - [ ] Verify that the class adheres to the `equals` and `hashCode` contract: If `a.equals(b)` is true, `a.hashCode() == b.hashCode()` MUST be true.
   </Accordion>
 </AccordionGroup>
+
+---
+
+## Done Checklist
+
+<Check>
+All collection iterations prioritize memory locality; `ArrayList` and `ArrayDeque` are used instead of `LinkedList`.
+</Check>
+<Check>
+Keys in `HashMap` and elements in `HashSet` are strictly immutable; fields contributing to `hashCode()` cannot be modified after insertion.
+</Check>
+<Check>
+Collections are pre-sized whenever size is known in advance to avoid redundant array reallocations and copies.
+</Check>
+<Check>
+Structural modifications during iteration use `removeIf()` or explicit `iterator.remove()` to prevent `ConcurrentModificationException`.
+</Check>
+<Check>
+Exceptions are never used for normal business control flow to avoid native `fillInStackTrace()` CPU saturation.
+</Check>
+<Check>
+API domain exceptions map to standard RFC 9457 `ProblemDetail` structures via `@RestControllerAdvice`.
+</Check>

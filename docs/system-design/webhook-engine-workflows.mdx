@@ -1,182 +1,263 @@
 ---
 title: "Stripe-Grade Webhook Delivery & Durable Workflows"
 sidebarTitle: "Webhooks & Durable Workflows"
-description: "Design a fault-tolerant webhook delivery platform and long-running workflow orchestrator. Explore HMAC-SHA256 signatures, multi-day jittered backoff, customer endpoint circuit breakers, and Temporal event replay."
+description: "Design a fault-tolerant webhook delivery platform and long-running workflow orchestrator. Explore TCP socket exhaustion, HMAC-SHA256 signatures, constant-time verification, multi-day jittered backoff, and Temporal event replay."
 ---
 
-## 1. Mental Model: The Hostile World of Outbound Webhooks
+# Stripe-Grade Webhook Delivery & Durable Workflows
 
-When your platform fires a webhook (e.g., Stripe notifying a merchant of a payment `charge.succeeded`), your backend must call an external HTTP endpoint operated by a third party.
+When an enterprise platform delivers an outbound webhook (e.g., Stripe notifying an e-commerce merchant of a `payment_intent.succeeded` event), the backend must issue an HTTP POST request across the public internet to an external server operated by a third party.
 
-Unlike internal microservices, external customer endpoints are fundamentally **hostile, unpredictable, and unreliable**:
-- Customer endpoints crash, suffer DNS failures, or deploy breaking changes.
-- Customer servers take 45 seconds to respond, threatening to exhaust your outbound thread pool.
-- Malicious or misconfigured customers fail to process webhooks and accuse your platform of dropping events.
+Unlike internal microservices running inside a monitored private cloud, external customer endpoints are fundamentally **unreliable, unpredictable, and hostile**:
+- Merchant servers crash, experience DNS misconfigurations, or suffer routing blackouts.
+- A merchant's unoptimized endpoint takes 45 seconds to process a webhook, threatening to **exhaust all outbound worker threads** and stall the entire platform.
+- Attackers intercept and replay captured webhook payloads to duplicate order credits and extract unauthorized funds.
+- Monolithic distributed transactions attempting to coordinate multi-step workflows across asynchronous services degenerate into brittle, unobservable "event spaghetti".
+
+Senior backend engineers design bulletproof webhook platforms using **cryptographic HMAC-SHA256 timestamped signatures, constant-time verification, per-destination concurrency limits, multi-day jittered backoff schedules, and Temporal-style durable code execution**.
+
+---
+
+## Phase 1: Ground Floor (Physical First Principles)
+
+To build a carrier-grade webhook and workflow platform, you must understand the physical networking characteristics of outbound HTTP calls and side-channel timing attacks.
 
 ```mermaid
 flowchart TD
-    subgraph Internal Reliable Platform
-        Pay[Payment Service] --> Event[Outbox / Event Queue]
-        Event --> Dispatcher[Outbound Webhook Worker]
+    subgraph HostServer["Outbound Dispatcher Node"]
+        Thread["Worker Thread (or Virtual Thread)"]
+        Socket["TCP Socket (Kernel File Descriptor)"]
+        Timer["Socket Read Timer (SO_TIMEOUT)"]
+        Thread --> Socket
+        Socket --> Timer
     end
 
-    subgraph Hostile Public Internet
-        Dispatcher -->|HTTP POST: Signed Payload| CustA[Customer A: Fast 200 OK]
-        Dispatcher -->|HTTP POST: 45s Socket Hang!| CustB["Customer B: Slow Leak<br/>(Exhausts Worker Threads)"]
-        Dispatcher -->|HTTP POST: 500 Server Error| CustC["Customer C: CrashLoop<br/>(Requires Multi-Day Retries)"]
+    subgraph InternetHostile["Public Internet Transits"]
+        Switch["Internet Routers & ISP Hops (Variable RTT: 10ms - 2,000ms)"]
+        CustomerServer["Customer Merchant Server\n• May drop SYN packets\n• May hang in 45s database lock\n• TCP Zero Window Stall"]
+        Socket --> Switch --> CustomerServer
+    end
+
+    subgraph TimingAttacks["Silicon Timing Side-Channel Vulnerability"]
+        StringEquals["String.equals() / strcmp:\nBails on first mismatched byte\nAttacker measures CPU clock cycles (0.5ns resolution)"]
+        ConstantTime["MessageDigest.isEqual():\nExamines EVERY byte regardless of mismatch\nZero timing variance"]
     end
 ```
 
-To deliver webhooks with 99.999% reliability, you must engineer:
-1. **Cryptographic Tamper-Proof Signatures**: Ensuring only your platform could have authored the payload.
-2. **Strict Worker Isolation & Timeouts**: Preventing slow customer endpoints from starving outbound worker capacity.
-3. **Multi-Day Exponential Backoff with Jitter**: Giving customers up to 72 hours to recover from outages.
-4. **Durable Workflow Orchestration**: Guaranteeing multi-step, long-running processes execute to completion even across pod restarts.
+### 1. The Physical Hazard of Unbounded TCP Sockets
+When an application executes an outbound HTTP POST without explicit socket boundaries:
+- **Connection Timeout**: If the customer's firewall drops TCP `SYN` packets silently, the operating system kernel retransmits `SYN` packets exponentially (`tcp_syn_retries`), leaving the socket hanging for up to **127 seconds**!
+- **Read Timeout (`SO_TIMEOUT`)**: If the customer's server accepts the connection but hangs waiting on an internal database lock, the calling socket waits indefinitely in `SocketInputStream.socketRead0()`.
+- Holding 500 threads in I/O wait queues exhausts the worker thread pool, causing internal queues to overflow and bringing down unrelated platform features.
+
+### 2. The Mechanics of Timing Attacks on Signatures
+When a customer server verifies an incoming cryptographic signature, a naive implementation uses standard string equality:
+```java
+// VULNERABLE: Breaks early on first mismatched character
+if (calculatedSignature.equals(incomingSignature)) { ... }
+```
+- If the first character mismatches, `String.equals()` returns in $1\text{ CPU cycle}$.
+- If the first 10 characters match, it returns in $10\text{ CPU cycles}$.
+- Over thousands of requests across a local or low-jitter network, an attacker measuring sub-microsecond latency variations can deduce the correct HMAC signature byte-by-byte without knowing the signing secret!
+- Defeating this requires **Constant-Time Byte Comparison** (`MessageDigest.isEqual`), which forces the CPU to evaluate every byte regardless of mismatch.
 
 ---
 
-## 2. Cryptographic Security: HMAC-SHA256 & Replay Defense
+## Phase 2: The Naive Code (The Production Crashes)
 
-Customers must be able to verify that an incoming webhook genuinely originated from your servers and was not intercepted, modified, or forged by an attacker.
+### Crash Scenario 1: The Outbound Thread Pool Starvation Meltdown
 
-### The Stripe Webhook Signature Standard (`Stripe-Signature` Header)
-Every outbound HTTP POST includes a cryptographic signature header containing:
-- `t` : A Unix epoch timestamp (in seconds).
-- `v1` : An HMAC-SHA256 hexadecimal digest of the timestamp combined with the raw JSON payload, signed with the customer's webhook signing secret (`whsec_...`).
+A developer writes an event listener to dispatch webhooks whenever an order is completed:
 
-$$\text{Signature} = \text{HMAC-SHA256}\left( \text{secret}, \text{timestamp} + "." + \text{raw\_json\_payload} \right)$$
+```java
+// DANGEROUS ANTI-PATTERN: Synchronous outbound dispatch with default timeouts
+@Component
+public class NaiveOrderEventListener {
+
+    @Autowired
+    private RestTemplate restTemplate; // Default RestTemplate: NO TIMEOUTS CONFIGURED!
+
+    @EventListener
+    public void onOrderCompleted(OrderCompletedEvent event) {
+        String merchantWebhookUrl = event.getMerchantWebhookUrl();
+        
+        // FATAL MISTAKE: Synchronous outbound call over the public internet!
+        // If merchant's server hangs for 60 seconds, this Tomcat thread is locked!
+        restTemplate.postForObject(merchantWebhookUrl, event.getPayload(), String.class);
+    }
+}
+```
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Engine as Webhook Dispatcher
-    participant Customer as Merchant Endpoint
+    actor Customer as Shopper (Browser)
+    participant Tomcat as Web Server (200 Worker Threads)
+    participant Merchant as Slow Merchant Endpoint (Hanging)
 
-    Note over Engine: 1. Captures timestamp: t = 1740837190<br/>2. Signed Payload = "1740837190.{\"id\":\"evt_101\"}"<br/>3. Computes HMAC-SHA256 with customer secret
-    Engine->>Customer: POST /webhook<br/>Stripe-Signature: t=1740837190,v1=5257a863e5e...
-    Note over Customer: 4. Checks timestamp: |current_time - t| <= 300s (Replay Check)<br/>5. Recomputes HMAC-SHA256 over raw payload<br/>6. Compares signatures using constant-time comparison
-    Customer-->>Engine: HTTP 200 OK
+    Customer->>Tomcat: POST /api/checkout (Order Submitted)
+    Tomcat->>Tomcat: Saves order in PostgreSQL
+    Tomcat->>Merchant: POST https://merchant.com/webhook (No Timeout Set!)
+    Note over Merchant: Merchant server database locked! Socket hangs indefinitely!
+    Note over Tomcat: Thread 1 BLOCKS waiting for response...
+    
+    loop 200 More Shoppers Submit Orders
+        Customer->>Tomcat: POST /api/checkout
+        Tomcat->>Merchant: POST https://merchant.com/webhook
+        Note over Tomcat: Threads 2 through 200 ALL BLOCK!
+    end
+
+    Note over Tomcat: THREAD POOL EXHAUSTION DISASTER: 200 of 200 worker threads FROZEN!<br/>Health checks fail! Unrelated login and cart APIs crash globally!
 ```
 
-### Replay Attack Prevention
-An attacker listening on public Wi-Fi could capture a valid webhook payload and replay it 100 times to grant a customer 100 subscriptions. 
-By binding the timestamp into the HMAC digest, customer servers reject any webhook where $| \text{System Time} - t | > 300\text{ seconds}$ (5 minutes), completely neutralizing replay attacks.
+#### What Happened in Production:
+1. A major merchant deployed an unindexed database query in their webhook handler, causing their server to stall for 90 seconds on every incoming request.
+2. Within 30 seconds of high Black Friday checkout volume, all 200 worker threads in the payment service were locked waiting on the merchant's hung sockets.
+3. The platform's incoming connection backlog filled, and Kubernetes liveness probes timed out (`504 Gateway Timeout`).
+4. The entire checkout platform crashed globally, losing hundreds of thousands of dollars in transactions.
 
 ---
 
-## 3. Worker Architecture: Timeouts, Concurrency & Circuit Breaking
+### Crash Scenario 2: The Webhook Replay & Duplicate Credit Heist
 
-### The 5-Second Rule
-Never allow an outbound HTTP connection to block indefinitely. Every outbound webhook call must be governed by strict socket boundaries:
-- **Connection Timeout**: 2 seconds.
-- **Read Timeout**: 5 seconds.
-- Total allowable execution window: **maximum 7 seconds**. If the customer has not returned an HTTP 2xx within 7 seconds, terminate the socket and schedule a retry.
+A cryptocurrency exchange platform sends webhooks to notify merchants of successful deposits:
+
+```java
+// DANGEROUS ANTI-PATTERN: Signature without timestamp binding
+public String generateVulnerableSignature(String payload, String secret) {
+    // Only hashes payload: No timestamp, no replay defense!
+    return hmacSha256(secret, payload);
+}
+```
+
+#### What Happened in Production:
+1. Customer deposited $10,000 into the exchange.
+2. The platform dispatched a valid webhook: `POST https://merchant.com/webhook` with signature `v1=abcd1234...`.
+3. An attacker intercepting network traffic on a public Wi-Fi access point captured the raw HTTP packet.
+4. The attacker used a simple curl script to **replay the exact same HTTP POST request 500 times** against the merchant's endpoint.
+5. Because the payload and signature matched perfectly, the merchant's receiver verified the HMAC and credited the attacker's account 500 times.
+6. The attacker withdrew **$5,000,000 in unearned merchandise** before the accounting reconciliation caught the fraud.
+
+---
+
+### Crash Scenario 3: The Workflow Non-Determinism Corruption Crash
+
+A developer implements an order fulfillment workflow using Temporal, but inserts non-deterministic calls inside the workflow definition:
+
+```java
+// DANGEROUS ANTI-PATTERN: Non-deterministic logic inside workflow definition
+public class OrderFulfillmentWorkflowImpl implements OrderFulfillmentWorkflow {
+
+    @Override
+    public void processOrder(Order order) {
+        // FATAL: System.currentTimeMillis() returns a DIFFERENT time on replay!
+        long timestamp = System.currentTimeMillis();
+
+        // FATAL: UUID.randomUUID() generates a DIFFERENT identifier on replay!
+        String trackingId = UUID.randomUUID().toString();
+
+        if (timestamp > 1740000000L) {
+            Workflow.newActivityStub(ShippingActivity.class).shipFast(trackingId);
+        } else {
+            Workflow.newActivityStub(ShippingActivity.class).shipStandard(trackingId);
+        }
+    }
+}
+```
+
+#### What Happened in Production:
+- During a Kubernetes rolling upgrade, the worker pod executing the workflow was restarted.
+- Temporal spun up a new pod and attempted to reconstruct the workflow state by **replaying the past Event History**.
+- On replay, `System.currentTimeMillis()` returned a newer timestamp, and `UUID.randomUUID()` generated a different UUID.
+- The replayed code attempted to branch differently than the recorded event history!
+- Temporal halted the process with a fatal `NonDeterministicWorkflowException`, permanently corrupting 14,000 active customer workflows.
+
+---
+
+## Phase 3: Under the Hood (Mechanics, Stripe-Grade Engine & Temporal Architecture)
+
+### 1. The Stripe Webhook Signature Standard (`Stripe-Signature`)
+
+To prevent tampering, payload forging, and replay attacks, every outbound webhook must include a composite signature header:
+
+```http
+POST /webhook/receiver HTTP/1.1
+Host: merchant.com
+Content-Type: application/json
+Stripe-Signature: t=1740837190,v1=5257a863e5e...
+```
+
+#### The Cryptographic Specification:
+1. Capture the current Unix epoch timestamp in seconds: $t$.
+2. Construct the signed string by concatenating the timestamp, a literal period, and the exact raw JSON byte payload:
+   $$\text{Signed Payload} = t + "." + \text{raw\_json\_body}$$
+3. Compute the HMAC-SHA256 signature using the merchant's unique signing secret:
+   $$\text{v1} = \text{HexEncode}\left( \text{HMAC-SHA256}(\text{webhook\_secret}, \text{Signed Payload}) \right)$$
+4. **Replay Validation**: The merchant verifies:
+   $$| \text{Current Time} - t | \le 300\text{ seconds}$$
+   If the timestamp is older than 5 minutes, the webhook is immediately discarded!
+
+---
+
+### 2. Outbound Worker Architecture: Concurrency Limits & Circuit Breakers
+
+To guarantee that a slow merchant cannot degrade the platform:
 
 ```mermaid
 flowchart TD
-    subgraph Outbound Webhook Worker Pool
-        Q[(Redis / PostgreSQL Queue)] --> Worker1[Worker Pod 1]
-        Q --> Worker2[Worker Pod 2]
-        
-        Worker1 --> RateLimiter{Per-Customer<br/>Concurrency Limiter}
-        RateLimiter -->|Slot Available (Max 5 concurrent)| Dispatch[HTTP POST to Customer]
-        RateLimiter -->|Limit Exceeded| Requeue[Requeue with Backoff]
-        
-        Dispatch --> Breaker{Customer Circuit Breaker}
-        Breaker -->|Closed (Healthy)| Send[Send Request]
-        Breaker -->|Open (Failing 100% of calls)| Skip[Skip attempt & sleep 1 hour]
+    subgraph EventQueue["Redis / PostgreSQL Event Outbox"]
+        Events["Outbox Events (Pending Delivery)"]
+    end
+
+    subgraph DispatcherPool["Isolated Webhook Dispatcher Workers"]
+        Worker["Worker Thread"]
+        Limiter{"Per-Merchant Concurrency Limiter\n(Max 5 in-flight requests per merchant)"}
+        Breaker{"Merchant Circuit Breaker\nState: Closed / Open / Half-Open"}
+        HTTP["HTTP Client\nConnect Timeout: 2s\nRead Timeout: 5s"]
+
+        Events --> Worker --> Limiter
+        Limiter -->|Slot Available| Breaker
+        Limiter -->|Slot Full (>= 5)| DelayQueue["Requeue to Backlog with Delay"]
+        Breaker -->|Closed (Healthy)| HTTP
+        Breaker -->|Open (Failing 100%)| Skip["Skip attempt; back off 1 hour"]
     end
 ```
 
-### Per-Customer Concurrency Limits
-If Customer X's servers are struggling and processing requests at only 1 request/second, flooding them with 500 concurrent webhook workers will crash their servers completely.
-- Enforce a **per-destination concurrency limit** (e.g., maximum 5 concurrent outbound sockets per merchant endpoint).
-- If Customer X already has 5 in-flight webhooks, remaining events stay queued, protecting both your thread pool and the customer's infrastructure.
+#### Strict Socket Limits (The 7-Second Ceiling):
+- **Connect Timeout**: 2 seconds.
+- **Read Timeout**: 5 seconds.
+- Total maximum execution window: **7 seconds**. If the customer has not returned an HTTP 2xx within 7 seconds, terminate the socket immediately.
 
 ---
 
-## 4. Multi-Day Exponential Backoff with Full Jitter
+### 3. Multi-Day Exponential Backoff with Full Jitter
 
-When a customer's server goes down over the weekend, a naive retry schedule (e.g., retrying every 5 minutes) creates two disasters:
-1. It hammers the customer's recovering servers with a thundering herd.
-2. It burns through the retry limit in 30 minutes, permanently abandoning the event.
+When a merchant server suffers an extended outage, naive retries (e.g. retrying every 5 minutes) will exhaust attempts in 30 minutes.
 
-Production webhook engines retry across a **72-hour window** using exponential backoff with full jitter:
+Production webhook engines retry across a **72-hour window** using randomized exponential backoff with full jitter:
 
 $$T_{\text{sleep}} = \text{random}\left(0, \min\left(M, B \cdot 2^{\text{attempt}}\right)\right)$$
 
 ```mermaid
 flowchart LR
-    E[Event Triggered] --> A1[Attempt 1: Immediate]
+    E[Event Triggered] --> A1["Attempt 1: Immediate"]
     A1 -->|Fails| A2["Attempt 2: ~5 mins (Jittered)"]
     A2 -->|Fails| A3["Attempt 3: ~30 mins"]
     A3 -->|Fails| A4["Attempt 4: ~2 hours"]
     A4 -->|Fails| A5["Attempt 5: ~8 hours"]
     A5 -->|Fails| A6["Attempt 6: ~24 hours"]
     A6 -->|Fails| A7["Attempt 7: ~72 hours"]
-    A7 -->|Fails| DLT[Dead-Letter Table & Merchant Alert]
+    A7 -->|Fails| DLT["Dead-Letter Queue & Customer Email Alert"]
 ```
 
 ---
 
-## 5. Moving Beyond Saga State Spaghetti: Durable Workflows
+### 4. Production Stripe-Grade Webhook Dispatcher Implementation
 
-In microservice architectures, developers often attempt to coordinate multi-step, long-running processes (e.g., User Onboarding: Send Email $\rightarrow$ Wait 3 days $\rightarrow$ Check Activity $\rightarrow$ Grant Discount) by publishing events across Apache Kafka.
-
-```mermaid
-flowchart TD
-    subgraph Fragile Event-Driven Saga
-        Step1[Signup Service] -->|signup.created| K1[Kafka]
-        K1 --> Step2[Email Worker]
-        Step2 -->|email.sent| K2[Kafka]
-        K2 --> Step3["Delay Worker (Stores in DB, polls every minute for 3 days)"]
-        Step3 -->|delay.expired| K3[Kafka]
-        K3 --> Step4[Analytics Worker]
-        Note1["State is scattered across 5 databases.<br/>No single person knows where a customer is stuck!"]
-    end
-```
-
-### The Limitations of Raw Event Choreography:
-1. **Lack of Central Observability**: Tracking where a transaction stalled requires querying logs across 6 microservices.
-2. **Complex Compensations**: If Step 4 fails, triggering reverse compensating transactions across Steps 3, 2, and 1 requires nested, error-prone event topologies.
-3. **Timer Fragility**: Sleeping a business process for 30 days requires bespoke database polling workers.
-
----
-
-## 6. Durable Code Execution: Temporal / Cadence Internals
-
-**Temporal** solves this by providing **Durable Execution**: you write ordinary, sequential Java code with standard loops and `Thread.sleep()`, and Temporal guarantees that the code will execute to completion even if workers crash or servers are rebooted.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Code as Workflow Code (Java)
-    participant Temporal as Temporal Cluster (Event History)
-    participant Worker as Activity Worker
-
-    Code->>Temporal: Execute Activity: chargeCustomer()
-    Temporal->>Worker: Dispatch Activity Task
-    Worker-->>Temporal: Task Completed (200 OK)
-    Note over Temporal: Appends ACTIVITY_TASK_COMPLETED to Event History
-    Code->>Temporal: Workflow.sleep(Duration.ofDays(3))
-    Note over Temporal: Appends TIMER_STARTED. Workflow state safely paused!
-    Note over Code,Worker: POD CRASHES OR CLUSTER REBOOTS!
-    Note over Temporal: New pod boots up and starts workflow...
-    Note over Code: Replays Event History: Activity already completed! Skips re-executing chargeCustomer!
-    Note over Temporal: Resumes execution precisely after the 3-day timer!
-```
-
-### Determinism: The Golden Rule of Workflows
-Temporal accomplishes durability through **Event Sourcing Replay**:
-- When a worker pod crashes, a new worker reconstructs the exact workflow state by replaying past events from the history log.
-- **Workflow code must be strictly deterministic**: no random numbers (`Math.random()`), no current wall-clock time (`System.currentTimeMillis()`), and no direct network I/O inside the workflow function! All non-deterministic operations must run inside **Activities**.
-
----
-
-## 7. Production Working Code: Stripe-Grade Webhook Dispatcher
+Below is the production-grade implementation featuring HMAC-SHA256 signing, strict socket timeouts, and constant-time verification:
 
 ```java
-package com.backend.mastery.webhooks;
+package com.backend.webhooks.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -195,33 +276,36 @@ import java.time.Instant;
 import java.util.HexFormat;
 
 @Service
-public class WebhookDispatcherService {
+public class StripeGradeWebhookDispatcher {
 
-    private static final Logger log = LoggerFactory.getLogger(WebhookDispatcherService.class);
-    private static final String HMAC_ALGORITHM = "HmacSHA256";
+    private static final Logger log = LoggerFactory.getLogger(StripeGradeWebhookDispatcher.class);
+    private static final String HMAC_SHA256 = "HmacSHA256";
 
     private final HttpClient httpClient;
 
-    public WebhookDispatcherService() {
+    public StripeGradeWebhookDispatcher() {
+        // Enforce strict 2-second connection timeout at the socket level
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(2))
+                .followRedirects(HttpClient.Redirect.NEVER) // Prevent SSRF redirect attacks
                 .build();
     }
 
     /**
-     * Dispatches signed webhook with strict timeouts.
+     * Dispatches signed webhook payload with hard socket boundaries.
      */
-    public boolean deliverWebhook(String destinationUrl, String rawPayload, String secretKey) {
-        long timestamp = Instant.now().getEpochSecond();
-        String signature = computeSignature(timestamp, rawPayload, secretKey);
-        String headerValue = "t=" + timestamp + ",v1=" + signature;
+    public boolean deliverWebhook(String targetUrl, String jsonPayload, String signingSecret) {
+        long epochTimestamp = Instant.now().getEpochSecond();
+        String signature = calculateHmac(epochTimestamp, jsonPayload, signingSecret);
+        String signatureHeader = "t=" + epochTimestamp + ",v1=" + signature;
 
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(destinationUrl))
-                .timeout(Duration.ofSeconds(5)) // Hard 5-second read timeout
+                .uri(URI.create(targetUrl))
+                .timeout(Duration.ofSeconds(5)) // Hard 5-second socket read timeout
                 .header("Content-Type", "application/json")
-                .header("Stripe-Signature", headerValue)
-                .POST(HttpRequest.BodyPublishers.ofString(rawPayload, StandardCharsets.UTF_8))
+                .header("User-Agent", "Platform-Webhook-Engine/2.0")
+                .header("Stripe-Signature", signatureHeader)
+                .POST(HttpRequest.BodyPublishers.ofString(jsonPayload, StandardCharsets.UTF_8))
                 .build();
 
         try {
@@ -229,14 +313,14 @@ public class WebhookDispatcherService {
             int statusCode = response.statusCode();
 
             if (statusCode >= 200 && statusCode < 300) {
-                log.info("Webhook successfully delivered to {}: HTTP {}", destinationUrl, statusCode);
+                log.info("Webhook successfully delivered to {}: HTTP {}", targetUrl, statusCode);
                 return true;
-            } else {
-                log.warn("Webhook delivery failed to {}: HTTP {}", destinationUrl, statusCode);
-                return false;
             }
+
+            log.warn("Webhook delivery rejected by {}: HTTP {}", targetUrl, statusCode);
+            return false;
         } catch (Exception ex) {
-            log.error("Network exception delivering webhook to {}: {}", destinationUrl, ex.getMessage());
+            log.error("Outbound socket exception calling {}: {}", targetUrl, ex.getMessage());
             return false;
         }
     }
@@ -244,28 +328,43 @@ public class WebhookDispatcherService {
     /**
      * Signs timestamp + "." + payload using HMAC-SHA256.
      */
-    public static String computeSignature(long timestamp, String payload, String secret) {
+    public static String calculateHmac(long timestamp, String rawPayload, String secret) {
         try {
-            String signedContent = timestamp + "." + payload;
-            Mac mac = Mac.getInstance(HMAC_ALGORITHM);
-            SecretKeySpec keySpec = new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), HMAC_ALGORITHM);
-            mac.init(keySpec);
-            byte[] hash = mac.doFinal(signedContent.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(hash);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to compute HMAC-SHA256 signature", e);
+            String signedContent = timestamp + "." + rawPayload;
+            Mac mac = Mac.getInstance(HMAC_SHA256);
+            SecretKeySpec secretKey = new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), HMAC_SHA256);
+            mac.init(secretKey);
+            byte[] rawHmac = mac.doFinal(signedContent.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(rawHmac);
+        } catch (Exception ex) {
+            throw new IllegalStateException("Failed to calculate HMAC-SHA256 signature", ex);
         }
     }
 
     /**
-     * Constant-time signature verification for customer receivers.
+     * Receiver Verification: Enforces replay defense and constant-time comparison.
      */
-    public static boolean verifySignature(long timestamp, String payload, String secret, String expectedSig) {
-        String actualSig = computeSignature(timestamp, payload, secret);
-        // MessageDigest.isEqual executes in constant time to defeat timing attacks
+    public static boolean verifyIncomingWebhook(
+            long timestamp,
+            String rawPayload,
+            String secret,
+            String incomingV1Signature,
+            long toleranceSeconds) {
+
+        long currentTimestamp = Instant.now().getEpochSecond();
+        
+        // 1. Replay Attack Prevention
+        if (Math.abs(currentTimestamp - timestamp) > toleranceSeconds) {
+            return false; // Signature expired or generated in future!
+        }
+
+        // 2. Compute Expected Signature
+        String expectedSignature = calculateHmac(timestamp, rawPayload, secret);
+
+        // 3. Constant-Time Comparison (Neutralizes timing side-channel attacks)
         return MessageDigest.isEqual(
-                actualSig.getBytes(StandardCharsets.UTF_8),
-                expectedSig.getBytes(StandardCharsets.UTF_8)
+                expectedSignature.getBytes(StandardCharsets.UTF_8),
+                incomingV1Signature.getBytes(StandardCharsets.UTF_8)
         );
     }
 }
@@ -273,41 +372,97 @@ public class WebhookDispatcherService {
 
 ---
 
-## 8. Failure Modes & Edge Case Matrix
+### 5. Durable Code Execution: Temporal / Cadence Internals
 
-| Failure Mode | Root Cause | Impact | Production Defense |
-| :--- | :--- | :--- | :--- |
-| **Outbound Socket Starvation** | Slow customer server takes 45s to respond | Worker threads exhaust; all other webhooks queue up | Impose strict 2s connect and 5s read timeouts per outbound call. |
-| **Replay Attack** | Attacker sniffs webhook and re-sends to customer endpoint | Merchant processes payment twice | Embed signed epoch timestamp in header; reject timestamps older than 5m. |
-| **Timing Attack on Signature** | Receiver uses `String.equals()` to verify HMAC | Attacker determines valid signature byte-by-byte | Enforce constant-time comparison via `MessageDigest.isEqual()`. |
-| **Workflow Non-Determinism** | Developer calls `UUID.randomUUID()` inside Temporal workflow | Replay history diverges; workflow execution permanently corrupts | Keep workflows pure; execute all random/time/network logic inside Activities. |
+When a business process takes days or weeks to execute (e.g., User Onboarding: Send Welcome Email $\rightarrow$ Sleep 3 days $\rightarrow$ Check Activity $\rightarrow$ Grant Credit), traditional event-driven Kafka architectures collapse under fragmented state tables.
+
+**Temporal** provides **Durable Execution**: write ordinary, sequential Java code, and Temporal guarantees that execution resumes seamlessly even across server crashes and cluster reboots.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Code as Workflow Code (Deterministic Java)
+    participant Temporal as Temporal Cluster (Append-Only Event History)
+    participant Worker as Activity Worker (Executes Network I/O)
+
+    Code->>Temporal: Execute Activity: chargeCard($100)
+    Temporal->>Worker: Dispatch Activity Task to Worker Queue
+    Worker-->>Temporal: Task Succeeded (200 OK)
+    Note over Temporal: Appends ACTIVITY_TASK_COMPLETED to immutable Event History!
+    
+    Code->>Temporal: Workflow.sleep(Duration.ofDays(3))
+    Note over Temporal: Appends TIMER_STARTED. Workflow state safely suspended!
+    
+    Note over Code,Worker: WORKER POD TERMINATED OR CLUSTER REBOOTS!
+    
+    Note over Temporal: 3 days pass -> Timer fires -> New Worker boots up
+    Note over Code: REPLAY ENGINE: Replays Event History!<br/>Activity already marked completed -> Skips re-charging card!<br/>Wakes up precisely after 3-day sleep!
+    Code->>Temporal: Execute Activity: sendFollowupEmail()
+```
+
+#### Determinism: The Golden Rule of Workflows
+Because Temporal state is reconstructed via **Event Sourcing Replay**:
+- All non-deterministic logic (database queries, network HTTP calls, `UUID.randomUUID()`, `Instant.now()`) **must run inside Activities**.
+- The workflow code itself must remain strictly deterministic.
 
 ---
 
-## 9. Senior Interview Questions & Active Recall
+## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
+
+| Question / Scenario | Junior Developer Answer | Senior / Staff Backend Engineer Answer |
+| :--- | :--- | :--- |
+| **Why is constant-time byte comparison mandatory when verifying webhook signatures?** | "It makes the verification faster and more secure." | "Standard string equality (`String.equals()`) terminates and returns `false` at the very first mismatched byte. An attacker sending thousands of forged signatures across a network can measure sub-microsecond variations in response times (a **Timing Side-Channel Attack**) to deduce the valid signature byte-by-byte. Using `MessageDigest.isEqual()` ensures that the CPU checks **every single byte regardless of mismatch**, guaranteeing constant execution time and neutralizing timing analysis." |
+| **How do you protect a webhook dispatching system from a merchant whose server hangs for 60 seconds?** | "We put the webhook calls in a background `@Async` thread pool." | "Background threads still consume physical OS thread stacks and kernel socket descriptors. If 500 tasks hang for 60 seconds, the thread pool is exhausted, and the task queue overflows. We enforce three strict defenses: (1) **Hard Socket Timeouts**: 2-second connect timeout and 5-second read timeout ($7\text{s}$ ceiling). (2) **Per-Destination Concurrency Limiting**: Limit in-flight requests to a maximum of 5 per merchant URL. (3) **Outbound Circuit Breaking**: If an endpoint fails 10 consecutive calls, open the circuit and pause deliveries to that merchant for 1 hour." |
+| **How does timestamp binding in HMAC-SHA256 prevent replay attacks?** | "It tells the receiver when the message was sent." | "If a signature is computed purely over the payload (`HMAC(secret, payload)`), an attacker who sniffs the packet can replay the exact same HTTP request days later, causing the merchant to duplicate fulfillment. By constructing the signature over `timestamp + "." + payload` and validating that `abs(current_time - t) <= 300` seconds, customer servers **reject any replayed packet older than 5 minutes**, rendering captured packets useless to attackers." |
+| **Why is multi-day exponential backoff with full jitter superior to fixed retry intervals?** | "It gives the customer more time to fix their server." | "A fixed retry schedule (e.g. retry every 5 minutes) burns through a retry limit in 30 minutes, permanently abandoning events when a merchant suffers a weekend outage. Furthermore, when the merchant recovers, synchronized retries trigger a **Reconnection Thundering Herd**. A 72-hour backoff schedule with Full Jitter spreads retry attempts over 3 days while randomizing delivery intervals across workers, smoothing load and maximizing delivery success." |
+| **What makes Temporal's Durable Execution fundamentally different from an event-driven Kafka Saga?** | "Temporal uses a workflow engine instead of message queues." | "In a choreographed Kafka Saga, state is fragmented across multiple service databases and message topics. Adding timers, retry policies, and compensation logic requires bespoke state tables and complex dead-letter routing. Temporal implements **Durable Execution via Event Sourcing Replay**: multi-step processes are written as standard, imperative code with loops and sleeps. State transitions are durably recorded in an append-only event history. If a pod crashes mid-execution, a new pod replays the history to reconstruct state and **resumes execution seamlessly from the exact failed step**." |
+
+---
+
+## Production Debugging Checklist
 
 <AccordionGroup>
-  <Accordion title="Why is constant-time comparison (MessageDigest.isEqual) mandatory when validating webhook signatures?">
-    Standard string equality (`String.equals()`) terminates and returns `false` at the very first byte that differs. An attacker sending thousands of forged signatures can measure tiny variations in network response latency (sub-microsecond CPU timing variations) to determine how many leading bytes were correct. Using `MessageDigest.isEqual()` compares all bytes regardless of mismatches, executing in strictly constant time and defeating timing side-channel attacks.
+  <Accordion title="1. High Outbound Connection Timeouts & Thread Saturation">
+    - [ ] Check active worker thread count and thread dump: `jcmd <PID> Thread.print`. Look for threads in `SocketInputStream.socketRead0()`.
+    - [ ] Verify that the `HttpClient` enforces both `connectTimeout(Duration.ofSeconds(2))` and request `timeout(Duration.ofSeconds(5))`.
+    - [ ] Check per-customer concurrency metrics: Ensure slow merchant endpoints are throttled to a maximum of 5 concurrent in-flight sockets.
   </Accordion>
-  <Accordion title="How do you protect your platform from a customer endpoint that goes down and causes millions of webhook failures?">
-    First, isolate outbound traffic using per-customer concurrency limits so no single merchant can consume more than 5 worker threads. Second, implement an outbound **Circuit Breaker** per destination URL. If an endpoint fails 10 consecutive delivery attempts, open the circuit and pause deliveries to that merchant for 1 hour, immediately logging failures to an administrative dead-letter queue without wasting worker CPU.
+
+  <Accordion title="2. Webhook Signature Verification Failures on Customer Side">
+    - [ ] Verify that the customer is signing the raw, unparsed JSON payload bytes (not pretty-printed or re-serialized JSON).
+    - [ ] Verify that the customer server clock is synchronized via NTP ($| t_{\text{header}} - t_{\text{local}} | \le 300\text{s}$).
+    - [ ] Ensure customer uses constant-time comparison: `MessageDigest.isEqual()`.
   </Accordion>
-  <Accordion title="What makes Temporal's Durable Execution fundamentally different from an event-driven Kafka Saga?">
-    A Kafka Saga scatters transaction state across distributed consumer topics and bespoke state tables, requiring complex compensation event routing. Temporal uses **Event Sourcing Replay**: your entire multi-day, multi-step business process is written as standard imperative code. Temporal automatically records each activity's completion in an append-only event history. If a worker pod crashes mid-execution, a new pod replays the event history to resume precisely where execution halted, without custom polling tables or lost state.
+
+  <Accordion title="3. Temporal NonDeterministicWorkflowException on Pod Restart">
+    - [ ] Inspect workflow code for direct calls to `Instant.now()`, `System.currentTimeMillis()`, or `UUID.randomUUID()`.
+    - [ ] Ensure all non-deterministic functions use `Workflow.currentTimeMillis()` or run inside `@ActivityMethod` stubs.
+    - [ ] Verify that workflow code does not perform direct network I/O or database queries.
   </Accordion>
 </AccordionGroup>
 
 ---
 
-## 10. Done Checklist
+## Done Checklist
 
 <Check>
-- [ ] Understand why external customer webhooks are hostile and require strict timeout boundaries.
-- [ ] Implement the Stripe webhook signature standard: `HMAC-SHA256(secret, timestamp + "." + payload)`.
-- [ ] Prevent replay attacks by validating timestamp drift ($| t - \text{now} | \le 300\text{s}$).
-- [ ] Use constant-time byte comparison (`MessageDigest.isEqual`) to defeat timing attacks.
-- [ ] Design a multi-day exponential backoff retry schedule with full random jitter.
-- [ ] Protect worker thread pools using per-destination concurrency limits and circuit breakers.
-- [ ] Articulate the limitations of event-driven Sagas and contrast with Temporal's deterministic event replay architecture.
+Outbound HTTP webhook calls enforce strict socket boundaries (2s connect timeout, 5s read timeout).
+</Check>
+<Check>
+Webhooks are signed using HMAC-SHA256 bound to a Unix epoch timestamp (`t=<timestamp>,v1=<signature>`).
+</Check>
+<Check>
+Replay attacks are defeated by validating timestamp drift within a 300-second tolerance window.
+</Check>
+<Check>
+Signature verification strictly utilizes constant-time comparison (`MessageDigest.isEqual`) to prevent timing side-channel attacks.
+</Check>
+<Check>
+Outbound traffic enforces per-destination concurrency limits and circuit breakers to protect worker pools.
+</Check>
+<Check>
+Multi-day exponential backoff with full random jitter provides a 72-hour delivery recovery window.
+</Check>
+<Check>
+Long-running workflows use deterministic event sourcing replay (Temporal) to guarantee completion across pod restarts.
 </Check>
