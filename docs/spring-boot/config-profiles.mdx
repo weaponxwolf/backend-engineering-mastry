@@ -375,6 +375,96 @@ During technical interviews, configuration architecture separates candidates who
 
 ---
 
+## Configuration Fundamentals Interview Map
+
+Configuration is production behavior injected at runtime. A bad config can break a correct codebase.
+
+### 1. Why externalize configuration?
+
+The same artifact should run in dev, staging, and production. Only configuration changes.
+
+```mermaid
+flowchart LR
+    Jar["Same app.jar"] --> Dev["dev config"]
+    Jar --> Stage["staging config"]
+    Jar --> Prod["prod config"]
+```
+
+If you rebuild code for every environment, you cannot prove that the tested artifact is the deployed artifact.
+
+### 2. Profiles are grouping, not security
+
+Profiles select sets of beans and properties:
+
+```yaml
+spring:
+  profiles:
+    active: prod
+```
+
+A profile is not a secret boundary. Do not put production passwords in `application-prod.yml`.
+
+### 3. Environment variable binding
+
+Spring relaxed binding maps environment variables to properties:
+
+```console
+PAYMENT_GATEWAY_BASE_URL
+```
+
+can bind to:
+
+```yaml
+payment:
+  gateway:
+    base-url: ...
+```
+
+This matters in Docker and Kubernetes because environment variables are common runtime injection points.
+
+### 4. Why use `@ConfigurationProperties`?
+
+Bad:
+
+```java
+@Value("${payment.timeout-ms}")
+private int timeoutMs;
+```
+
+Better:
+
+```java
+@ConfigurationProperties(prefix = "payment")
+public record PaymentProperties(
+    @NotBlank String baseUrl,
+    @Min(100) int timeoutMs
+) {}
+```
+
+This gives grouped config, type safety, validation, and fail-fast startup.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Create typed properties for database, JWT, and payment settings.
+  </Step>
+  <Step title="Break">
+    Remove a required environment variable and start the app.
+  </Step>
+  <Step title="Observe">
+    Confirm the application fails at startup before opening the HTTP port.
+  </Step>
+  <Step title="Fix">
+    Add validation annotations and safe defaults only for non-sensitive values.
+  </Step>
+  <Step title="Prove">
+    Add a Spring Boot test that fails when required production config is missing.
+  </Step>
+</Steps>
+
+---
+
 ## Active Recall & Interview Mastery
 
 <AccordionGroup>

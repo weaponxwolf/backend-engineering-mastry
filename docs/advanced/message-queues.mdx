@@ -658,6 +658,85 @@ class PaymentEventConsumerIntegrationTest {
 
 ---
 
+## Messaging Fundamentals Interview Map
+
+Queues and logs are not interchangeable. The basic question is: do you need work distribution or replayable event history?
+
+### 1. Queue vs log
+
+| Model | Example | Mental Model |
+| :--- | :--- | :--- |
+| Queue | RabbitMQ | Workers compete; one message is handled by one consumer |
+| Log | Kafka | Events are appended; consumers track offsets and can replay |
+
+```mermaid
+flowchart LR
+    Producer["Producer"] --> Topic["Kafka topic partition<br/>append-only log"]
+    Topic --> C1["Consumer group A<br/>offset 120"]
+    Topic --> C2["Consumer group B<br/>offset 80"]
+```
+
+Kafka keeps events for a retention window. A new consumer group can start from old offsets if retention still contains the data.
+
+### 2. Topic, partition, offset
+
+- A topic is a named stream of records.
+- A partition is an ordered append-only shard of that topic.
+- An offset is the position of a record inside one partition.
+
+Ordering is guaranteed only inside a single partition, not across the whole topic.
+
+### 3. Consumer group scaling
+
+If one topic has 6 partitions and one group has 10 consumers, only 6 consumers can be active.
+
+```mermaid
+flowchart TD
+    P1["Partition 0"] --> C1["Consumer 1"]
+    P2["Partition 1"] --> C2["Consumer 2"]
+    P3["Partition 2"] --> C3["Consumer 3"]
+    P4["Partition 3"] --> C4["Consumer 4"]
+    P5["Partition 4"] --> C5["Consumer 5"]
+    P6["Partition 5"] --> C6["Consumer 6"]
+    C7["Consumer 7 idle"]
+    C8["Consumer 8 idle"]
+```
+
+### 4. At-least-once means duplicates are normal
+
+If a consumer writes to the database and crashes before committing its Kafka offset, Kafka will redeliver the same event.
+
+Therefore every consumer that mutates state needs idempotency:
+
+```sql
+CREATE TABLE processed_events (
+  event_id UUID PRIMARY KEY,
+  processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Consume `OrderPlaced` events and decrement inventory.
+  </Step>
+  <Step title="Break">
+    Process the same event twice by simulating a crash before offset commit.
+  </Step>
+  <Step title="Observe">
+    Without deduplication, inventory is decremented twice.
+  </Step>
+  <Step title="Fix">
+    Insert `event_id` into a deduplication table in the same database transaction as the business update.
+  </Step>
+  <Step title="Prove">
+    Add a Testcontainers Kafka test that redelivers the event and verifies exactly-once business effect.
+  </Step>
+</Steps>
+
+---
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 When senior interviewers grill you on Kafka and event streaming, they are evaluating whether you understand physical storage mechanics, distributed replication, and failure handling, or if you simply view Kafka as a magic black-box queue.

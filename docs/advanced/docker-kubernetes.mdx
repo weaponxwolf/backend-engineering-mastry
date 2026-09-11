@@ -412,6 +412,202 @@ spec:
 
 ---
 
+## Docker & Kubernetes Fundamentals Interview Map
+
+These questions look basic, but they decide whether you can deploy and debug real Spring Boot systems.
+
+### 1. Image vs Container
+
+An image is a read-only filesystem blueprint. A container is a running process started from that image.
+
+```mermaid
+flowchart LR
+    Dockerfile["Dockerfile"] --> Build["docker build"]
+    Build --> Image["Image<br/>read-only layers"]
+    Image --> Run["docker run"]
+    Run --> Container["Container<br/>running Linux process"]
+```
+
+**Senior answer:** "An image packages the application filesystem, runtime, dependencies, metadata, and startup command. A container is the runtime instance: a normal Linux process with namespaces, cgroups, environment variables, mounts, and networking."
+
+### 2. What does each Dockerfile instruction mean?
+
+| Instruction | Meaning |
+| :--- | :--- |
+| `FROM` | Choose the parent filesystem and runtime |
+| `WORKDIR` | Set the default directory for later commands |
+| `COPY` | Copy files into an image layer |
+| `RUN` | Execute a build-time command and save the result as a layer |
+| `USER` | Choose the Linux user used at runtime |
+| `EXPOSE` | Document the port the process listens on |
+| `ENTRYPOINT` | Define the main process |
+| `CMD` | Provide default arguments |
+
+Common mistake:
+
+```dockerfile
+FROM eclipse-temurin:21-jdk
+COPY . .
+RUN mvn package
+ENTRYPOINT ["java", "-jar", "target/app.jar"]
+```
+
+Why it is weak:
+
+- The runtime image contains Maven and build caches.
+- Every source change can invalidate dependency layers.
+- The process may run as root.
+- The image is larger than needed.
+
+Production shape:
+
+```dockerfile
+FROM eclipse-temurin:21-jdk-alpine AS builder
+WORKDIR /workspace
+COPY pom.xml .
+COPY src ./src
+RUN ./mvnw -q -DskipTests package
+
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+RUN addgroup -S spring && adduser -S spring -G spring
+USER spring:spring
+COPY --from=builder /workspace/target/*.jar app.jar
+ENTRYPOINT ["java", "-XX:+UseContainerSupport", "-XX:MaxRAMPercentage=75.0", "-jar", "app.jar"]
+```
+
+### 3. Why does `localhost` fail in Docker and Kubernetes?
+
+Inside a container, `localhost` means the same container.
+
+```mermaid
+flowchart TD
+    AppContainer["notes-api container"] --> Wrong["localhost:5432<br/>looks inside notes-api"]
+    AppContainer --> Right["postgres:5432<br/>service/container DNS"]
+    Right --> PgContainer["PostgreSQL container"]
+```
+
+In Kubernetes, a pod has its own network namespace. Containers in the same pod can use `localhost` to reach each other. Different pods communicate through Services.
+
+**Senior answer:** "Use `localhost` only for processes sharing the same network namespace. For separate containers or pods, use service discovery."
+
+### 4. Pod vs Deployment vs Service
+
+| Kubernetes Object | Job |
+| :--- | :--- |
+| **Pod** | Runs one or more containers together with one IP and lifecycle |
+| **ReplicaSet** | Keeps a target number of pod replicas alive |
+| **Deployment** | Manages ReplicaSets and rolling updates |
+| **Service** | Gives stable networking over changing pod IPs |
+| **Ingress** | Routes external HTTP traffic into Services |
+| **ConfigMap** | Stores non-secret configuration |
+| **Secret** | Stores sensitive configuration, still requiring proper encryption and RBAC |
+
+```mermaid
+flowchart LR
+    Client["Client"] --> Ingress["Ingress"]
+    Ingress --> Service["Service<br/>stable virtual IP/DNS"]
+    Service --> Pod1["Pod A"]
+    Service --> Pod2["Pod B"]
+    Deployment["Deployment<br/>desired replicas and rollout"] --> Pod1
+    Deployment --> Pod2
+```
+
+### 5. Requests vs Limits
+
+Requests affect scheduling. Limits affect runtime enforcement.
+
+```yaml
+resources:
+  requests:
+    cpu: "500m"
+    memory: "512Mi"
+  limits:
+    cpu: "1"
+    memory: "1Gi"
+```
+
+| Field | Meaning | Failure Mode |
+| :--- | :--- | :--- |
+| `requests.cpu` | CPU needed for scheduling | Too low causes node overcommit and noisy-neighbor latency |
+| `limits.cpu` | CPU hard cap | Too low causes throttling and p99 latency spikes |
+| `requests.memory` | Memory reserved for scheduling | Too low increases eviction pressure |
+| `limits.memory` | Hard cgroup memory cap | Exceeding can trigger OOMKill / exit 137 |
+
+**Senior answer:** "CPU limits throttle; memory limits kill. For Java services, memory limits must account for heap, Metaspace, thread stacks, direct buffers, JIT code cache, and native memory."
+
+### 6. ConfigMap vs Secret
+
+A ConfigMap is for non-sensitive configuration:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notes-api-config
+data:
+  SPRING_PROFILES_ACTIVE: prod
+```
+
+A Secret is for sensitive values:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: notes-api-secret
+type: Opaque
+stringData:
+  DB_PASSWORD: replace-at-deploy-time
+```
+
+Secrets are not magic. They can be exposed through logs, environment dumps, RBAC mistakes, mounted files, or unencrypted etcd. Treat them as sensitive all the way through CI/CD and runtime.
+
+### 7. How do you debug a failing pod?
+
+Use the lifecycle path:
+
+```bash
+kubectl get pods
+kubectl describe pod notes-api-abc123
+kubectl logs notes-api-abc123 --previous
+kubectl get events --sort-by=.lastTimestamp
+kubectl top pod notes-api-abc123
+```
+
+Read symptoms precisely:
+
+| Symptom | Likely Meaning |
+| :--- | :--- |
+| `ImagePullBackOff` | Kubernetes cannot pull the image |
+| `CrashLoopBackOff` | Process starts, exits, then restarts repeatedly |
+| `OOMKilled` | Container exceeded memory limit |
+| `Readiness probe failed` | Pod is alive but removed from traffic |
+| `Liveness probe failed` | Kubernetes restarted the container |
+| `CreateContainerConfigError` | Bad Secret, ConfigMap, env var, or volume reference |
+
+### Docker/Kubernetes Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Containerize the Todo or Notes API and deploy 3 replicas with a Service.
+  </Step>
+  <Step title="Break">
+    Point the app to `localhost:5432`, set `-Xmx1024m` with a `1Gi` pod limit, and point liveness at a DB-dependent health check.
+  </Step>
+  <Step title="Observe">
+    Capture `Connection refused`, `OOMKilled`, or cascading restarts during database downtime.
+  </Step>
+  <Step title="Fix">
+    Use service DNS, measured JVM memory sizing, separate readiness/liveness probes, and graceful shutdown.
+  </Step>
+  <Step title="Prove">
+    Run a rolling restart under traffic and verify no failed requests, then temporarily stop PostgreSQL and verify pods leave readiness without restarting.
+  </Step>
+</Steps>
+
+---
+
 ## 9. Done Checklist
 
 <Check>

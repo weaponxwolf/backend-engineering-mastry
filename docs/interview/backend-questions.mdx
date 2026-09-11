@@ -13,6 +13,33 @@ Looking for complete, production-tested answers, memory diagrams, and code for e
 
 ---
 
+## 0. Non-Negotiable Backend Fundamentals
+
+You must be able to answer these before claiming backend mastery. Every advanced question eventually reduces to one of them.
+
+1. What physically is a backend process, and what does it mean to listen on a port?
+2. What happens from DNS lookup to TCP handshake to TLS to reverse proxy to Spring Boot?
+3. What is the difference between `localhost`, `0.0.0.0`, a container DNS name, and a Kubernetes Service name?
+4. What is the difference between a controller, service, repository, filter, interceptor, and background worker?
+5. Why must the backend never trust user ID, role, price, ownership, or state sent by the client?
+6. What is the difference between authentication and authorization?
+7. Why is returning JPA entities from controllers dangerous?
+8. What is the difference between DTO validation and business validation?
+9. Why do status codes matter to clients, gateways, retries, and SLOs?
+10. What is idempotency, and why do mutating APIs need it under retries?
+11. What is a transaction, and what can still go wrong under concurrency?
+12. What are indexes, and why does `SELECT *` or deep `OFFSET` hurt performance?
+13. What is Docker actually isolating, and what is the difference between image and container?
+14. What is a Kubernetes pod, deployment, service, readiness probe, and liveness probe?
+15. What is the difference between logs, metrics, and traces?
+16. What does caching duplicate, and what stale-data risk does it introduce?
+17. What is the difference between a queue and a replayable commit log?
+18. What makes microservices harder than modules?
+19. How do timeouts, retries, circuit breakers, and bulkheads work together?
+20. What test would prove your answer is actually true?
+
+---
+
 ## 1. Networking & Socket Layer Internals
 
 Interviewers ask these questions to test whether you understand how bytes travel over the wire before Spring Boot or HTTP frameworks touch them.

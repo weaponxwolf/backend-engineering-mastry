@@ -16,6 +16,52 @@ Use the **Senior Answer Formula**:
 
 ---
 
+## 0. Non-Negotiable Backend Fundamentals
+
+<AccordionGroup>
+  <Accordion title="1. What physically is a backend?">
+    A backend is a long-running operating system process behind a network boundary. The JVM process starts, Spring Boot creates controllers/services/repositories, embedded Tomcat binds a server socket to a port such as `8080`, and Linux accepts TCP connections for that socket. The framework is helpful, but the physical pieces are process, memory, threads, sockets, HTTP bytes, durable state, and response bytes.
+  </Accordion>
+
+  <Accordion title="2. Why should a controller stay thin?">
+    A controller is an HTTP adapter. It should translate path variables, query parameters, headers, and JSON bodies into a typed use-case call. Business rules belong in services because services can own transaction boundaries, authorization decisions, domain invariants, and orchestration. A controller that directly writes repositories usually spreads business logic across endpoints and makes security harder to prove.
+  </Accordion>
+
+  <Accordion title="3. Why must the backend never trust the client?">
+    The client controls the bytes outside your server. A browser, mobile app, proxy, or script can forge `userId`, `role`, `priceCents`, `discount`, and path IDs. The backend must load authoritative state from the database, derive identity from the authenticated security context, calculate prices server-side, and scope repository queries by ownership.
+  </Accordion>
+
+  <Accordion title="4. Why are DTOs separate from JPA entities?">
+    Request DTOs model client intent. Entities model persisted domain state. Response DTOs model public API contract. Returning or accepting entities directly can cause mass assignment, password/hash leaks, lazy-loading during serialization, infinite recursion, API contract drift when tables change, and accidental persistence of fields the client should never control.
+  </Accordion>
+
+  <Accordion title="5. What is idempotency and why does it matter?">
+    Networks fail after the server commits but before the client receives the response. If the client retries `POST /orders`, the server may create duplicate orders. An idempotency key stores the caller's operation identity, usually enforced with a unique database constraint per user, so repeated attempts return the original result instead of repeating the side effect.
+  </Accordion>
+
+  <Accordion title="6. What is the basic transaction answer that is not shallow?">
+    A transaction is an atomic unit of database work, but the senior answer must include isolation and concurrency. Two transactions can still race, read stale snapshots, lose updates, or create write skew depending on isolation level and query shape. Protect invariants with atomic SQL updates, row locks, optimistic versions, unique constraints, and tests that run concurrent attempts.
+  </Accordion>
+
+  <Accordion title="7. What does Docker actually do?">
+    Docker starts a normal Linux process from an image. The image is a layered read-only filesystem plus metadata. The running container uses Linux namespaces for isolation and cgroups for CPU and memory enforcement. It is not a VM. `localhost` inside the container means the container's own network namespace.
+  </Accordion>
+
+  <Accordion title="8. What does Kubernetes actually do?">
+    Kubernetes is a reconciliation system. You declare desired state, such as 3 replicas of `notes-api`, and controllers continuously work to match reality to that state. Pods run containers, Deployments manage rolling updates, Services provide stable networking over changing pod IPs, readiness removes unsafe pods from traffic, and liveness restarts stuck processes.
+  </Accordion>
+
+  <Accordion title="9. What is the difference between logs, metrics, and traces?">
+    Metrics show system health over time, such as rate, errors, duration, and saturation. Traces show where one request spent time across services. Logs show detailed contextual events and exceptions. Production debugging usually starts from a metric alert, jumps to an exemplar or trace, then opens correlated logs using the same trace ID.
+  </Accordion>
+
+  <Accordion title="10. What does every good backend answer end with?">
+    A proof test. If you claim ownership is enforced, show a test where User A cannot read User B's row. If you claim idempotency works, send the same key twice and prove one row exists. If you claim a cache is safe, test stale refill and tenant isolation. If you claim Kubernetes rollout is safe, run a rollout under traffic.
+  </Accordion>
+</AccordionGroup>
+
+---
+
 ## 1. Networking & Socket Layer Internals
 
 <AccordionGroup>

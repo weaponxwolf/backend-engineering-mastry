@@ -278,6 +278,98 @@ When discussing relational modeling and joins in technical interviews, interview
 
 ---
 
+## Data Modeling Fundamentals Interview Map
+
+Relational modeling is not drawing boxes. It is choosing which facts must be protected by the database.
+
+### 1. Primary Key vs Foreign Key
+
+A primary key identifies one row. A foreign key points to a row in another table.
+
+```mermaid
+erDiagram
+    USERS ||--o{ ORDERS : places
+    USERS {
+        bigint id PK
+        string email
+    }
+    ORDERS {
+        bigint id PK
+        bigint user_id FK
+        bigint total_cents
+    }
+```
+
+The foreign key is a physical constraint. It prevents an order from referencing a user that does not exist.
+
+### 2. One-to-many vs many-to-many
+
+One user can have many orders:
+
+```sql
+orders.user_id REFERENCES users(id)
+```
+
+Many posts can have many tags, so use a join table:
+
+```sql
+CREATE TABLE post_tags (
+  post_id BIGINT NOT NULL REFERENCES posts(id),
+  tag_id BIGINT NOT NULL REFERENCES tags(id),
+  PRIMARY KEY (post_id, tag_id)
+);
+```
+
+Do not store comma-separated IDs in one column. That destroys referential integrity, indexing, joins, and query correctness.
+
+### 3. Normalization vs denormalization
+
+Normalize data when you need one authoritative fact:
+
+```console
+users.email lives in users, not copied into every order
+```
+
+Denormalize when you need historical snapshots or faster read models:
+
+```console
+order_items.product_name_snapshot preserves what the buyer saw at purchase time
+```
+
+**Senior answer:** "Normalization protects write correctness. Denormalization is a deliberate read or history optimization, and it needs an ownership and update strategy."
+
+### 4. Delete behavior is a business decision
+
+| Behavior | Meaning |
+| :--- | :--- |
+| `ON DELETE RESTRICT` | Refuse parent deletion while children exist |
+| `ON DELETE CASCADE` | Delete children automatically |
+| `ON DELETE SET NULL` | Keep child row but remove parent reference |
+
+Never add cascade because it is convenient. Cascading from `users` to `orders` could erase financial history.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Model users, posts, comments, tags, and post_tags with constraints.
+  </Step>
+  <Step title="Break">
+    Store tag IDs as comma-separated text and delete a user with historical orders.
+  </Step>
+  <Step title="Observe">
+    Querying becomes awkward, constraints disappear, or important records vanish.
+  </Step>
+  <Step title="Fix">
+    Use join tables, correct foreign keys, and deliberate delete behavior.
+  </Step>
+  <Step title="Prove">
+    Add tests for impossible references, duplicate join rows, and protected deletes.
+  </Step>
+</Steps>
+
+---
+
 ## Active Recall & Interview Mastery
 
 <AccordionGroup>

@@ -33,6 +33,327 @@ A **business invariant** is a rule that must stay true, such as stock never beco
 **First pass:** understand request → rule → data → response. Complete [Your First Program](/getting-started/first-program), then follow the [roadmap](/getting-started/backend-roadmap). The architectures and code excerpts below are later reference material. Their domain types and infrastructure require a surrounding application.
 </Note>
 
+## The Fundamental Questions You Must Be Able To Answer
+
+If someone asks a backend question in an interview, it usually sounds specific:
+
+- "How does JPA lazy loading work?"
+- "Why do we need Spring Security filters?"
+- "What problem does Docker solve?"
+- "Why does Kubernetes need readiness probes?"
+
+But underneath those questions is one repeating mental model:
+
+```mermaid
+flowchart LR
+    Client["Untrusted Client<br/>browser, mobile app, script"] --> Wire["Network Boundary<br/>DNS, TCP, TLS, HTTP"]
+    Wire --> Runtime["Application Runtime<br/>Linux process, JVM, threads"]
+    Runtime --> Framework["Framework Layer<br/>Spring MVC, Security, JPA"]
+    Framework --> State["State Boundary<br/>PostgreSQL, Redis, Kafka, S3"]
+    Runtime --> Platform["Platform Boundary<br/>Docker image, container, Kubernetes pod"]
+```
+
+Backend mastery means you can explain every arrow in that diagram without hiding behind framework words.
+
+### 1. What physically is a backend?
+
+A backend is a long-running operating system process that listens on a network port.
+
+When you run:
+
+```bash
+java -jar notes-api.jar
+```
+
+Linux starts a process. The JVM loads bytecode. Spring Boot creates objects. Tomcat opens a server socket, usually on port `8080`.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Linux as Linux Kernel
+    participant JVM as JVM Process
+    participant Spring as Spring Boot
+    participant Tomcat as Embedded Tomcat
+
+    Linux->>JVM: Start process: java -jar notes-api.jar
+    JVM->>Spring: Load classes and run main()
+    Spring->>Spring: Create beans: controllers, services, repositories
+    Spring->>Tomcat: Start embedded web server
+    Tomcat->>Linux: bind(0.0.0.0:8080), listen()
+    Linux-->>Tomcat: Incoming TCP connections now accepted
+```
+
+**Junior answer:** "A backend is the server side of an app."
+
+**Senior answer:** "A backend is a process behind a network boundary. It accepts untrusted bytes over sockets, converts them into typed application commands, enforces business and security rules, coordinates durable state, and returns explicit HTTP responses. Frameworks like Spring Boot help with routing, dependency wiring, validation, transactions, and security, but the physical reality is still process, port, threads, memory, network, and storage."
+
+### 2. What happens when a request reaches Spring Boot?
+
+An HTTP request is not magic. It is text and bytes received from a socket:
+
+```http
+POST /api/notes HTTP/1.1
+Host: api.example.com
+Authorization: Bearer eyJhbGciOi...
+Content-Type: application/json
+
+{"title":"JPA notes","content":"Explain persistence context"}
+```
+
+Spring Boot transforms those bytes through a pipeline:
+
+```mermaid
+flowchart TD
+    Socket["TCP Socket Bytes"] --> Tomcat["Tomcat parses HTTP"]
+    Tomcat --> Filters["Servlet Filters<br/>CORS, CSRF, JWT, authorization"]
+    Filters --> Dispatcher["DispatcherServlet"]
+    Dispatcher --> Mapping["HandlerMapping finds controller method"]
+    Mapping --> Converter["Jackson converts JSON to DTO"]
+    Converter --> Validation["Bean Validation checks @Valid"]
+    Validation --> Controller["@RestController method"]
+    Controller --> Service["@Service business rule"]
+    Service --> Repo["Repository / EntityManager"]
+    Repo --> DB["PostgreSQL"]
+```
+
+Every production bug usually comes from misunderstanding one boundary:
+
+| Boundary | Beginner Mistake | Production Failure | Deep Chapter |
+| :--- | :--- | :--- | :--- |
+| HTTP boundary | Trust request body fields | Price fraud, IDOR, broken validation | [HTTP & JSON API](/backend-basics/http-json-api) |
+| Security boundary | Check only "logged in" | User reads another user's row | [Spring Security Deep Dive](/spring-boot/spring-security-deep) |
+| Transaction boundary | Hold DB connection during HTTP call | HikariCP exhaustion | [Transactions](/spring-boot/transactions) |
+| ORM boundary | Treat entities like plain objects | N+1 queries, lazy loading crashes | [JPA & Hibernate](/spring-boot/jpa-hibernate) |
+| Container boundary | Set heap equal to pod memory | Exit Code 137 OOMKill | [Docker & Kubernetes](/advanced/docker-kubernetes) |
+
+### 3. What is a controller really responsible for?
+
+A controller is an adapter at the HTTP boundary. Its job is not to hold business logic. Its job is to translate HTTP into an application command and translate the result back into HTTP.
+
+Bad controller:
+
+```java
+@PostMapping("/orders")
+public Order create(@RequestBody Map<String, Object> body) {
+    Order order = new Order();
+    order.setUserId(Long.valueOf(body.get("userId").toString()));
+    order.setPriceCents(Long.valueOf(body.get("priceCents").toString()));
+    return orderRepository.save(order);
+}
+```
+
+Why this is dangerous:
+
+- The request uses an untyped `Map`, so invalid input fails late.
+- The client supplies `userId`, so one user can impersonate another.
+- The client supplies `priceCents`, so price can be forged.
+- The controller writes directly to the repository, so business rules scatter across endpoints.
+
+Production controller:
+
+```java
+@PostMapping("/orders")
+ResponseEntity<OrderResponse> create(
+        @AuthenticationPrincipal AuthenticatedUser user,
+        @Valid @RequestBody CreateOrderRequest request) {
+    OrderResponse response = orderService.placeOrder(user.id(), request);
+    URI location = URI.create("/api/orders/" + response.id());
+    return ResponseEntity.created(location).body(response);
+}
+```
+
+**Rule:** the controller receives intent. The service loads truth.
+
+The request can say: "I want 2 units of product 42."
+
+The database must say: "Product 42 costs 199900 cents, belongs to this catalog, is active, and has enough stock."
+
+### 4. What is a service really responsible for?
+
+A service owns the application use case. It coordinates repositories, transactions, external clients, and domain rules.
+
+```mermaid
+flowchart TD
+    Controller["Controller<br/>HTTP adapter"] --> Service["OrderService<br/>use case boundary"]
+    Service --> ProductRepo["ProductRepository<br/>load authoritative price"]
+    Service --> InventoryRepo["InventoryRepository<br/>atomic stock update"]
+    Service --> OrderRepo["OrderRepository<br/>persist order"]
+    Service --> OutboxRepo["OutboxRepository<br/>record event in same transaction"]
+```
+
+The service answers:
+
+- What must happen in one transaction?
+- What must happen after commit?
+- Which user is allowed to do this?
+- Which state transition is legal?
+- Which failure should return `400`, `401`, `403`, `404`, `409`, or `500`?
+
+This is why backend fundamentals cannot stop at CRUD. CRUD says "create row." Production says "create the row only if the authenticated user is allowed, the input is valid, the invariant holds under concurrency, and the response does not leak internals."
+
+### 5. What is JPA really doing?
+
+JPA is not "database magic." JPA is a contract for mapping Java objects to relational rows. Hibernate is the implementation most Spring Boot apps use.
+
+When code says:
+
+```java
+Note note = noteRepository.findById(id).orElseThrow();
+note.rename("New title");
+```
+
+Hibernate may later emit:
+
+```sql
+UPDATE notes
+SET title = ?
+WHERE id = ?;
+```
+
+The important question is: why did SQL happen even though no `save()` was called?
+
+Because inside a transaction, Hibernate keeps a **persistence context**:
+
+```mermaid
+flowchart LR
+    Entity["Managed Note object<br/>live Java reference"] --> Snapshot["Loaded snapshot<br/>old column values"]
+    Entity --> DirtyCheck["Flush compares object vs snapshot"]
+    Snapshot --> DirtyCheck
+    DirtyCheck --> SQL["Generate UPDATE only if changed"]
+```
+
+Must-answer JPA fundamentals:
+
+| Question | Deep Answer Shape |
+| :--- | :--- |
+| Why does `LazyInitializationException` happen? | You accessed a lazy proxy after the `EntityManager` closed, so Hibernate no longer has a database session to load the missing row. |
+| Why does N+1 happen? | One query loads parent rows, then each lazy child access triggers another query over the network. |
+| Why avoid entities in API responses? | JSON serialization can trigger lazy loads, infinite recursion, data leaks, and unstable contracts. |
+| Why no public setters everywhere? | Entities should protect invariants; setters allow invalid state transitions from any caller. |
+| Why use DTO projections for reads? | They fetch only required columns, skip entity tracking, reduce heap use, and avoid accidental updates. |
+
+Study the full internals in [JPA & Hibernate](/spring-boot/jpa-hibernate), then prove it by writing one test that counts SQL queries before and after fixing N+1.
+
+### 6. What is Spring Security really doing?
+
+Spring Security is not just annotations. It is a filter pipeline that runs before your controller.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as Client
+    participant Filter as SecurityFilterChain
+    participant Context as SecurityContext
+    participant Controller as Controller
+    participant Service as Service Method
+
+    Client->>Filter: HTTP request with Authorization header
+    Filter->>Filter: Validate token signature, expiry, issuer, audience
+    Filter->>Context: Store Authentication for this request
+    Filter->>Controller: Continue only if route rules pass
+    Controller->>Service: Call use case
+    Service->>Service: @PreAuthorize checks ownership/role
+```
+
+Authentication answers: **Who are you?**
+
+Authorization answers: **Are you allowed to do this exact action on this exact resource?**
+
+The second question is where many real breaches happen:
+
+```http
+GET /api/notes/9001
+Authorization: Bearer token-for-user-7
+```
+
+`hasRole("USER")` is not enough. User 7 may be logged in, but note `9001` may belong to User 8. The repository query must scope by both resource ID and owner:
+
+```java
+Optional<Note> findByIdAndOwnerSubject(Long id, String ownerSubject);
+```
+
+**Senior phrasing:** "I do coarse authorization in the filter chain and fine-grained resource authorization at the use-case or repository boundary. Login proves identity; it does not prove ownership of every path ID the client sends."
+
+### 7. What is Docker really doing?
+
+Docker does not turn your app into a tiny VM. It packages a filesystem and starts a Linux process with isolation.
+
+```mermaid
+flowchart TD
+    Image["Docker Image<br/>read-only filesystem layers"] --> Container["Container<br/>running process"]
+    Container --> Namespaces["Namespaces<br/>what process can see"]
+    Container --> Cgroups["Cgroups<br/>what process can use"]
+    Container --> App["java -jar app.jar"]
+```
+
+Must-answer Docker fundamentals:
+
+| Question | Deep Answer Shape |
+| :--- | :--- |
+| Why use images? | They freeze app files, runtime, and startup command into a reproducible artifact. |
+| Why multi-stage builds? | Build tools stay in the builder layer; runtime image contains only what production needs. |
+| Why avoid root? | If the process is exploited, root inside the container increases the damage path. |
+| Why does `localhost` break between containers? | `localhost` means "this same network namespace"; another container is reached by service name/network DNS. |
+| Why can Java be killed with 137? | The process exceeded cgroup memory, so Linux sent `SIGKILL`; the JVM may not get a Java `OutOfMemoryError`. |
+
+The full container mechanics are in [Docker & Kubernetes](/advanced/docker-kubernetes).
+
+### 8. What is Kubernetes really doing?
+
+Kubernetes is a control system. It continuously compares desired state to actual state.
+
+You declare:
+
+```yaml
+replicas: 3
+image: notes-api:1.0.0
+```
+
+Kubernetes keeps trying to make reality match that declaration:
+
+```mermaid
+flowchart LR
+    Desired["Desired state<br/>Deployment says 3 pods"] --> Controller["Kubernetes controller loop"]
+    Controller --> Actual["Actual cluster state<br/>2 pods running, 1 missing"]
+    Controller --> Action["Create replacement pod"]
+```
+
+A pod is not the application. A pod is the scheduling unit that wraps one or more containers, network identity, volumes, and lifecycle rules.
+
+Must-answer Kubernetes fundamentals:
+
+| Question | Deep Answer Shape |
+| :--- | :--- |
+| Why do we need readiness probes? | To remove a pod from traffic when it cannot serve safely, without killing it. |
+| Why do we need liveness probes? | To restart a process that is stuck and cannot recover itself. |
+| Why is checking the database in liveness dangerous? | A database outage can cause every app pod to restart, making the outage worse. |
+| What does a Service do? | It gives stable virtual networking over changing pod IPs. |
+| What does rolling update mean? | Kubernetes gradually creates new pods and removes old pods while respecting availability settings. |
+
+**Senior phrasing:** "Kubernetes does not make bad applications reliable. It automates process scheduling, replacement, rollout, service discovery, and resource enforcement. The app still needs correct health endpoints, graceful shutdown, memory sizing, externalized state, and observability."
+
+### 9. The Build-Break-Fix Loop For Every Fundamental Topic
+
+Do not learn backend topics as definitions. Use this loop:
+
+<Steps>
+  <Step title="Build the smallest working path">
+    Example: one endpoint saves one note for one authenticated user.
+  </Step>
+  <Step title="Break the boundary deliberately">
+    Example: send another user's `noteId`, remove `@Transactional`, return an entity directly, or kill the database during a request.
+  </Step>
+  <Step title="Observe the exact failure">
+    Look for `LazyInitializationException`, `AccessDeniedException`, HikariCP timeout, `Exit Code 137`, failed readiness, or duplicated rows.
+  </Step>
+  <Step title="Fix with the right mechanism">
+    Use DTOs, ownership-scoped queries, transaction boundaries, pagination, idempotency keys, container memory limits, or readiness probes.
+  </Step>
+  <Step title="Write the proof test">
+    A topic is not mastered until a test proves the failure cannot silently return.
+  </Step>
+</Steps>
+
 ## The 4 Pillars of Backend Engineering
 
 Every backend system, from a single-node Spring Boot application to a globally distributed multi-region cluster, is composed of four foundational architectural pillars:

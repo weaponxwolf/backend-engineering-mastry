@@ -482,6 +482,139 @@ sequenceDiagram
 
 ---
 
+## Basic Networking Questions, Answered Deeply
+
+These are "basic" questions only on the surface. In interviews, they reveal whether you understand real backend traffic or only framework annotations.
+
+### 1. What is `localhost`?
+
+`localhost` means "this same network namespace."
+
+On your laptop, `http://localhost:8080` points back to your laptop. Inside a Docker container, `localhost` points back to that container, not your host machine and not another container.
+
+```mermaid
+flowchart LR
+    Host["Host machine"] --> HostLocal["localhost:8080<br/>host process"]
+    ContainerA["Container A"] --> ALocal["localhost:8080<br/>inside Container A only"]
+    ContainerA --> ServiceDns["postgres:5432<br/>Docker/Kubernetes DNS"]
+    ServiceDns --> ContainerB["Container B<br/>PostgreSQL"]
+```
+
+**Common crash:** the app container uses `jdbc:postgresql://localhost:5432/app`, but PostgreSQL runs in a different container. The app tries to connect to itself and fails with `Connection refused`.
+
+**Senior answer:** "`localhost` is scoped to the current network namespace. In containers and pods, it does not mean the developer laptop or another service. Cross-container communication should use service DNS names, such as `postgres:5432` in Docker Compose or `postgres.default.svc.cluster.local` in Kubernetes."
+
+### 2. What is a port?
+
+An IP address gets packets to a machine. A port gets packets to a process on that machine.
+
+```mermaid
+flowchart TD
+    Packet["Packet to 203.0.113.10:443"] --> Kernel["Linux kernel network stack"]
+    Kernel --> SocketTable["Socket table lookup"]
+    SocketTable --> Nginx["nginx process bound to port 443"]
+    Nginx --> App["Spring Boot upstream on 8080"]
+```
+
+If two processes try to bind the same IP and port, the second process fails:
+
+```console
+java.net.BindException: Address already in use
+```
+
+In backend work, you must distinguish:
+
+| Address | Meaning |
+| :--- | :--- |
+| `127.0.0.1:8080` | Same machine or same container namespace only |
+| `0.0.0.0:8080` | Listen on all network interfaces available to this process |
+| `api.example.com:443` | DNS name plus HTTPS port at the public edge |
+| `notes-api:8080` | Service discovery name inside a private network |
+
+### 3. What is DNS really doing?
+
+DNS converts a human name into an IP address. It is not the request itself. It happens before the TCP connection.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Browser
+    participant Resolver as DNS Resolver
+    participant Edge as CDN / Ingress IP
+    participant API as Spring Boot API
+
+    Browser->>Resolver: What IP is api.example.com?
+    Resolver-->>Browser: 203.0.113.10
+    Browser->>Edge: TCP SYN to 203.0.113.10:443
+    Edge->>API: Proxy request to notes-api:8080
+```
+
+**Failure modes:**
+
+- DNS record points to old load balancer.
+- DNS TTL is too long, so clients keep stale IPs.
+- Internal service DNS fails, so pods cannot find each other.
+- Split-horizon DNS returns different answers inside and outside the cluster.
+
+### 4. Why do backends need connection pools?
+
+Creating a new TCP connection for every database or HTTP call is expensive:
+
+1. Allocate a socket.
+2. Complete TCP handshake.
+3. Complete TLS handshake if encrypted.
+4. Authenticate.
+5. Send request.
+6. Close connection and leave kernel state behind.
+
+A connection pool reuses already-open connections.
+
+```mermaid
+flowchart LR
+    Threads["200 request threads"] --> Pool["HTTP/DB connection pool<br/>20 reusable sockets"]
+    Pool --> Remote["Remote server"]
+```
+
+**Naive failure:** every request creates a new outbound HTTP client or JDBC connection. Under load, the OS runs out of ephemeral ports, the database runs out of backends, and latency explodes.
+
+**Senior answer:** "Connection pools amortize handshake cost and cap concurrency at the downstream boundary. They improve latency only when sized to the downstream's capacity. A pool that is too large can make failure worse by allowing the app to overload the database."
+
+### 5. What should every outbound network call define?
+
+Every outbound call must define these limits:
+
+| Limit | Protects Against |
+| :--- | :--- |
+| Connection timeout | Dead host, bad route, dropped SYN packet |
+| Read timeout | Server accepted connection but stopped responding |
+| Total deadline | Request keeps retrying until user-facing latency is destroyed |
+| Retry budget | Retry storm under partial outage |
+| Circuit breaker | Repeated calls to a known-bad dependency |
+
+No timeout means a remote service can hold your thread, memory, and database transaction hostage.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Create a Spring Boot endpoint that calls a fake payment service using a pooled `RestClient`.
+  </Step>
+  <Step title="Break">
+    Make the fake payment service accept the TCP connection but sleep for 30 seconds before responding.
+  </Step>
+  <Step title="Observe">
+    Watch request threads pile up. Confirm whether the error is connection timeout, read timeout, or total execution timeout.
+  </Step>
+  <Step title="Fix">
+    Add connection timeout, read timeout, total deadline, and a small retry budget with jitter.
+  </Step>
+  <Step title="Prove">
+    Write a test with WireMock that fails fast and returns a controlled `503` instead of hanging.
+  </Step>
+</Steps>
+
+---
+
 ## Active Recall & Interview Mastery
 
 <AccordionGroup>

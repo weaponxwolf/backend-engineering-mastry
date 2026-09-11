@@ -626,6 +626,229 @@ LIMIT 20;
 
 ---
 
+## JPA Fundamentals Interview Map
+
+These questions are called "basic JPA" in interviews, but they require real mechanics.
+
+### 1. What is the difference between JPA, Hibernate, and Spring Data JPA?
+
+| Name | What It Is | What It Does |
+| :--- | :--- | :--- |
+| **JPA** | Java specification | Defines annotations and contracts such as `@Entity`, `EntityManager`, `persist`, `merge`, and JPQL |
+| **Hibernate** | Implementation | Actually tracks entities, generates SQL, manages dirty checking, proxies, flushing, and caches |
+| **Spring Data JPA** | Repository abstraction | Generates repository implementations and query methods on top of JPA/Hibernate |
+
+```mermaid
+flowchart TD
+    App["Your Service Code"] --> Repo["Spring Data Repository"]
+    Repo --> Jpa["JPA EntityManager API"]
+    Jpa --> Hibernate["Hibernate SessionImpl"]
+    Hibernate --> JDBC["JDBC Driver"]
+    JDBC --> PG["PostgreSQL"]
+```
+
+**Senior answer:** "JPA is the contract, Hibernate is the engine, and Spring Data JPA is a convenience layer. When debugging performance, I think in Hibernate sessions, flushes, SQL generation, JDBC round trips, database plans, and transaction boundaries."
+
+### 2. What exactly happens when `repository.save(entity)` runs?
+
+`save()` does different things depending on whether the entity is new.
+
+```mermaid
+flowchart TD
+    Save["repository.save(entity)"] --> IsNew{"Is entity new?"}
+    IsNew -->|id null / Persistable says new| Persist["EntityManager.persist()<br/>entity becomes managed"]
+    IsNew -->|existing detached entity| Merge["EntityManager.merge()<br/>copy state into managed instance"]
+    Persist --> Flush["SQL usually emitted at flush/commit"]
+    Merge --> Flush
+```
+
+Important details:
+
+- `persist()` attaches the same object instance to the persistence context.
+- `merge()` returns a managed copy. The original detached object remains detached.
+- SQL may not run immediately. Hibernate often waits until flush or transaction commit.
+- `GenerationType.IDENTITY` usually forces an early insert because Hibernate needs the database-generated ID.
+
+Common bug:
+
+```java
+Note detached = request.toEntity();
+noteRepository.save(detached);
+detached.rename("new title after save"); // This object may still be detached after merge.
+```
+
+Safer pattern:
+
+```java
+Note managed = noteRepository.findById(id).orElseThrow();
+managed.rename(request.title());
+// no save needed; dirty checking flushes at commit
+```
+
+### 3. What is flush?
+
+Flush synchronizes the persistence context with the database. It does not necessarily commit.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Service
+    participant PC as Persistence Context
+    participant DB as PostgreSQL
+
+    Service->>PC: Load managed Order 42
+    Service->>PC: Change status to PAID
+    Service->>PC: Execute query before commit
+    PC->>DB: FLUSH pending UPDATE first
+    DB-->>PC: UPDATE ok, transaction still open
+    Service->>DB: Query sees consistent pending writes
+    Service->>DB: COMMIT later
+```
+
+Flush can happen:
+
+- Before transaction commit.
+- Before a JPQL query, so the query sees pending changes.
+- When you call `entityManager.flush()`.
+
+**Senior answer:** "Flush is SQL synchronization; commit is transaction durability. A flushed update can still roll back."
+
+### 4. Why does lazy loading require an open transaction/session?
+
+A lazy association starts as a proxy, not the real object.
+
+```java
+Post post = postRepository.findById(42L).orElseThrow();
+Author author = post.getAuthor(); // proxy object
+```
+
+When code later calls:
+
+```java
+author.getName();
+```
+
+Hibernate must run SQL:
+
+```sql
+SELECT id, name
+FROM authors
+WHERE id = ?;
+```
+
+If the `EntityManager` is already closed, Hibernate has no active session to use. That is why this fails:
+
+```console
+org.hibernate.LazyInitializationException: could not initialize proxy - no Session
+```
+
+Correct fixes:
+
+- Fetch the association deliberately with `JOIN FETCH` or `@EntityGraph`.
+- Use DTO projections for read endpoints.
+- Keep business work inside a transaction.
+
+Bad fix:
+
+```yaml
+spring:
+  jpa:
+    open-in-view: true
+```
+
+Open Session in View hides the problem by keeping the session open during JSON serialization. It can move SQL execution into the web rendering phase, surprise you with N+1 queries, and hold database resources longer.
+
+### 5. What is the owning side of a relationship?
+
+In a relational database, the row with the foreign key owns the relationship.
+
+```sql
+CREATE TABLE comments (
+  id BIGSERIAL PRIMARY KEY,
+  post_id BIGINT NOT NULL REFERENCES posts(id)
+);
+```
+
+In JPA:
+
+```java
+@ManyToOne(fetch = FetchType.LAZY)
+@JoinColumn(name = "post_id")
+private Post post;
+```
+
+The `Comment` owns the relationship because `comments.post_id` is the physical column Hibernate updates.
+
+For bidirectional relationships:
+
+```java
+@OneToMany(mappedBy = "post")
+private List<Comment> comments = new ArrayList<>();
+```
+
+`mappedBy = "post"` means: "The other side owns the foreign key. This collection is the inverse mirror."
+
+**Common bug:** adding a comment only to `post.getComments()` but never setting `comment.setPost(post)`. The in-memory list changes, but the owning foreign key may not.
+
+Use helper methods:
+
+```java
+public void addComment(Comment comment) {
+    comments.add(comment);
+    comment.attachToPost(this);
+}
+```
+
+### 6. Why is pagination not optional?
+
+This looks innocent:
+
+```java
+List<Order> orders = orderRepository.findAll();
+```
+
+In production, it can load millions of rows, allocate entity objects, create dirty-checking snapshots, trigger lazy loads, and crash the container.
+
+Use bounded reads:
+
+```java
+PageRequest page = PageRequest.of(0, 50, Sort.by("createdAt").descending());
+Slice<OrderSummary> orders = orderRepository.findByUserId(userId, page);
+```
+
+For very deep scrolling, prefer keyset pagination:
+
+```sql
+SELECT id, created_at, total_cents
+FROM orders
+WHERE user_id = ?
+  AND (created_at, id) < (?, ?)
+ORDER BY created_at DESC, id DESC
+LIMIT 50;
+```
+
+### JPA Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Create `Post`, `Author`, and `Comment` entities with lazy relationships.
+  </Step>
+  <Step title="Break">
+    Return `Post` entities directly from a controller and access `post.getAuthor().getName()` outside a transaction.
+  </Step>
+  <Step title="Observe">
+    Capture `LazyInitializationException`, N+1 SQL logs, or recursive JSON serialization.
+  </Step>
+  <Step title="Fix">
+    Replace entity responses with DTO projections and use `@EntityGraph` for required associations.
+  </Step>
+  <Step title="Prove">
+    Add integration tests that assert the response shape and count the SQL statements for the list endpoint.
+  </Step>
+</Steps>
+
+---
+
 ## Failure Modes & Edge Case Matrix
 
 | Failure Mode | Root Cause | Impact | Production Defense |

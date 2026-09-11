@@ -352,6 +352,84 @@ Order order = OrderTestDataBuilder.anOrder().withTotal(4999L).build();
 
 ---
 
+## Testing Fundamentals Interview Map
+
+Testing questions are really about confidence boundaries. Each test type should answer a different risk.
+
+### 1. Unit vs Slice vs Integration
+
+| Test Type | Starts Spring? | Uses Real DB? | Best For |
+| :--- | :--- | :--- | :--- |
+| Unit test | No | No | Pure domain rules, value objects, calculations |
+| `@WebMvcTest` | Partial | No | Routing, JSON, validation, security behavior |
+| `@DataJpaTest` | Partial | Usually Testcontainers or embedded DB | Repositories, mappings, constraints, query behavior |
+| `@SpringBootTest` | Yes | Yes in serious tests | Full request to database workflow |
+
+**Senior answer:** "I choose the smallest test that can fail for the risk I care about. Unit tests prove pure rules. Slice tests prove framework boundaries. Integration tests prove wiring, SQL, transactions, and external boundaries."
+
+### 2. What should never be mocked?
+
+Do not mock the thing you are trying to verify.
+
+Bad:
+
+```java
+when(orderRepository.save(any())).thenReturn(order);
+```
+
+This does not prove your JPA mapping, constraint, transaction, or SQL query works.
+
+Mock external services in controller/service tests. Use Testcontainers for database behavior that must match PostgreSQL.
+
+### 3. What makes a test flaky?
+
+Flaky tests usually depend on time, order, shared state, real network services, or uncontrolled concurrency.
+
+Common causes:
+
+- `Thread.sleep()` instead of Awaitility or latches.
+- Tests share rows without cleanup.
+- Tests depend on execution order.
+- Tests call real third-party APIs.
+- Async work is not awaited.
+- Random ports or clocks are not controlled.
+
+### 4. What should every backend feature prove?
+
+For a serious endpoint, write tests for:
+
+- Happy path.
+- Validation error.
+- Missing resource.
+- Unauthorized request.
+- Forbidden or wrong-owner request.
+- Database constraint conflict.
+- Transaction rollback.
+- Pagination boundary.
+- Idempotent retry if the operation mutates state.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Add a note creation endpoint with validation, ownership, JPA persistence, and `201 Created`.
+  </Step>
+  <Step title="Break">
+    Remove `@Valid`, remove owner scoping, and throw an exception after saving.
+  </Step>
+  <Step title="Observe">
+    Watch invalid data pass, cross-user access succeed, or committed rows survive failed use cases.
+  </Step>
+  <Step title="Fix">
+    Restore validation, ownership-scoped repository queries, and transaction rollback behavior.
+  </Step>
+  <Step title="Prove">
+    Add `@WebMvcTest`, `@DataJpaTest`, and `@SpringBootTest` cases for the same feature boundary.
+  </Step>
+</Steps>
+
+---
+
 ## 7. Failure Modes & Edge Case Matrix
 
 | Failure Mode | Root Cause | Impact | Production Defense |

@@ -409,6 +409,136 @@ graph TD
 
 ---
 
+## SQL Fundamentals Interview Map
+
+SQL questions look easy until the interviewer asks what the database actually executes.
+
+### 1. `WHERE` vs `HAVING`
+
+`WHERE` filters rows before grouping. `HAVING` filters groups after aggregation.
+
+```sql
+SELECT user_id, COUNT(*) AS order_count
+FROM orders
+WHERE status = 'PAID'
+GROUP BY user_id
+HAVING COUNT(*) >= 3;
+```
+
+Execution idea:
+
+```mermaid
+flowchart LR
+    Rows["All orders"] --> Where["WHERE status = PAID"]
+    Where --> Group["GROUP BY user_id"]
+    Group --> Having["HAVING count >= 3"]
+    Having --> Select["Return result"]
+```
+
+### 2. `NULL` Is Unknown, Not Empty
+
+`NULL` means missing or unknown. It does not equal anything, even another `NULL`.
+
+```sql
+SELECT *
+FROM users
+WHERE deleted_at = NULL; -- wrong
+```
+
+Correct:
+
+```sql
+SELECT *
+FROM users
+WHERE deleted_at IS NULL;
+```
+
+Production trap:
+
+```sql
+SELECT *
+FROM users
+WHERE id NOT IN (SELECT user_id FROM bans);
+```
+
+If the subquery contains `NULL`, `NOT IN` can return no rows. Prefer `NOT EXISTS`.
+
+### 3. Inner Join vs Left Join
+
+`INNER JOIN` returns only matching rows. `LEFT JOIN` keeps every row from the left table and fills missing right-side values with `NULL`.
+
+```sql
+SELECT p.id, p.title, c.id AS comment_id
+FROM posts p
+LEFT JOIN comments c ON c.post_id = p.id;
+```
+
+Use `LEFT JOIN` when the parent should appear even if no child exists.
+
+### 4. Why `SELECT *` Hurts Production
+
+`SELECT *` reads columns you do not need.
+
+Costs:
+
+- More disk and buffer-pool reads.
+- More network bytes.
+- More JVM object allocation.
+- More risk of pulling large TOAST values.
+- Fragile API behavior when columns are added.
+
+Use explicit projection:
+
+```sql
+SELECT id, title, created_at
+FROM notes
+WHERE user_id = ?
+ORDER BY created_at DESC
+LIMIT 50;
+```
+
+### 5. Transactions Are Not Just `BEGIN` and `COMMIT`
+
+A transaction groups reads and writes into one atomic unit. But isolation controls what concurrent transactions can observe.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant T1 as Transaction 1
+    participant T2 as Transaction 2
+    participant DB as Database
+
+    T1->>DB: Read stock = 1
+    T2->>DB: Read stock = 1
+    T1->>DB: Write stock = 0
+    T2->>DB: Write stock = 0
+    Note over DB: Without protection, two purchases can succeed
+```
+
+Do not answer transaction questions only with ACID definitions. Be ready to explain lost updates, locks, MVCC snapshots, and atomic SQL updates.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Create `users`, `orders`, and `payments` tables with realistic constraints.
+  </Step>
+  <Step title="Break">
+    Write queries using `SELECT *`, `NOT IN` with nullable subqueries, and unbounded result sets.
+  </Step>
+  <Step title="Observe">
+    Compare result correctness and `EXPLAIN (ANALYZE, BUFFERS)` output.
+  </Step>
+  <Step title="Fix">
+    Use explicit columns, `NOT EXISTS`, indexes that match filters, and bounded pagination.
+  </Step>
+  <Step title="Prove">
+    Add SQL tests or integration tests for each query's expected rows.
+  </Step>
+</Steps>
+
+---
+
 ## Active Recall & Interview Mastery
 
 <AccordionGroup>

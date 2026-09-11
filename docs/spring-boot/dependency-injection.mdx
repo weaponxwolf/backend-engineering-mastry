@@ -394,6 +394,140 @@ Senior interviewers ask about dependency injection to test if you understand thr
 
 ---
 
+## Spring Core Fundamentals Interview Map
+
+Spring basics are really about object creation, ownership, lifecycle, and thread safety.
+
+### 1. What problem does Dependency Injection solve?
+
+Without DI, a class creates its own dependencies:
+
+```java
+class OrderService {
+    private final PaymentClient paymentClient = new StripePaymentClient();
+}
+```
+
+This hard-codes infrastructure into business code. Tests cannot replace the payment client without changing the class.
+
+With DI:
+
+```java
+class OrderService {
+    private final PaymentClient paymentClient;
+
+    OrderService(PaymentClient paymentClient) {
+        this.paymentClient = paymentClient;
+    }
+}
+```
+
+Now Spring wires production dependencies, while tests can pass fakes.
+
+### 2. What is a bean?
+
+A bean is an object whose lifecycle is owned by the Spring container.
+
+```mermaid
+flowchart LR
+    Class["Java class"] --> Definition["BeanDefinition metadata"]
+    Definition --> Container["ApplicationContext"]
+    Container --> Instance["Bean instance"]
+    Instance --> Injected["Injected into other beans"]
+```
+
+Spring knows how to create it, configure it, inject it, wrap it with proxies, and destroy it.
+
+### 3. Why must singleton beans be stateless?
+
+Spring singleton means one object instance per application context, not one per request.
+
+Bad:
+
+```java
+@Service
+class CurrentUserService {
+    private Long currentUserId;
+
+    void setCurrentUserId(Long currentUserId) {
+        this.currentUserId = currentUserId;
+    }
+}
+```
+
+Two request threads can overwrite each other's user state.
+
+Correct:
+
+```java
+@Service
+class NoteService {
+    NoteResponse findNote(Long noteId, Long currentUserId) {
+        return repository.findByIdAndOwnerId(noteId, currentUserId)
+                .map(NoteResponse::from)
+                .orElseThrow(NotFoundException::new);
+    }
+}
+```
+
+Pass request-specific data through method arguments or request-scoped mechanisms, not mutable singleton fields.
+
+### 4. What is a proxy?
+
+A proxy is an object Spring places in front of your bean to intercept method calls.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Caller
+    participant Proxy as Spring Proxy
+    participant Tx as TransactionInterceptor
+    participant Bean as Real Service Bean
+
+    Caller->>Proxy: placeOrder()
+    Proxy->>Tx: begin transaction
+    Tx->>Bean: invoke real method
+    Bean-->>Tx: result
+    Tx->>Tx: commit or rollback
+    Tx-->>Proxy: result
+    Proxy-->>Caller: result
+```
+
+This is why self-invocation breaks `@Transactional`: `this.someMethod()` calls the real object directly, bypassing the proxy.
+
+### 5. How do you choose between `@Component`, `@Service`, `@Repository`, and `@Configuration`?
+
+| Annotation | Meaning |
+| :--- | :--- |
+| `@Component` | Generic Spring-managed object |
+| `@Service` | Application use case or business operation |
+| `@Repository` | Persistence adapter, translated data-access exceptions |
+| `@Configuration` | Factory for beans and configuration wiring |
+
+Use the annotation that communicates role. Spring can detect all of them, but humans need architecture clarity.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Create an `OrderService` with constructor-injected `PaymentClient` and `OrderRepository`.
+  </Step>
+  <Step title="Break">
+    Store current user data in a singleton field and call a `@Transactional` method through `this`.
+  </Step>
+  <Step title="Observe">
+    Reproduce cross-request data leakage and missing transaction behavior.
+  </Step>
+  <Step title="Fix">
+    Pass request data as parameters and move transactional methods behind a Spring proxy boundary.
+  </Step>
+  <Step title="Prove">
+    Add unit tests for plain constructor injection and integration tests for transaction rollback.
+  </Step>
+</Steps>
+
+---
+
 ## Failure Modes & Edge Case Matrix
 
 | Failure Mode | Root Cause | Impact | Production Defense |

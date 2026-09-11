@@ -76,6 +76,13 @@ npx vercel --prod
 
 All phases of the comprehensive documentation overhaul and book-replacement depth expansion have been successfully executed and validated:
 
+**September 11, 2026 Update — Fundamentals Depth Standard**
+- The foundational backend pages must not be treated as shallow orientation material. They must support interview-grade explanations for basic questions by connecting every topic to physical runtime boundaries: process, port, socket, JVM, thread, HTTP parser, Spring filter, controller, service, transaction, ORM, database, container, and Kubernetes pod.
+- `docs/backend-basics/what-is-backend.mdx` now includes a dedicated fundamentals question bridge covering backend process anatomy, request flow, controller/service responsibility, JPA, Spring Security, Docker, Kubernetes, and the build-break-fix learning loop.
+- Future expansions to beginner-facing chapters should preserve this rule: simple English first, but full depth underneath. A learner should be able to answer "basic" questions with senior-level mechanical clarity.
+- Follow-up expansion added fundamentals interview maps to `docs/backend-basics/client-server.mdx`, `docs/backend-basics/http-json-api.mdx`, `docs/spring-boot/jpa-hibernate.mdx`, `docs/spring-boot/spring-security-deep.mdx`, and `docs/advanced/docker-kubernetes.mdx`. These sections convert common basic questions into build-break-fix learning paths with diagrams, failure modes, senior phrasing, and proof-test prompts.
+- Second follow-up expansion added the same fundamentals layer across Java core, SQL basics, Spring Core dependency injection, Spring MVC REST APIs, validation/errors, testing, caching, configuration/profiles, relational modeling, Kafka/message queues, microservices, resilience, observability, and the backend/Spring interview question banks. Future content audits should check for this "basic question -> physical mechanism -> production failure -> fix -> proof test" pattern across all major chapters.
+
 1. **Complete Cross-Linking Web**:
    - `docs/index.mdx`: Interactive `<CardGroup>` learning path with verified routes.
    - `docs/getting-started/backend-roadmap.mdx`, `mastery-plan.mdx`, `how-to-use.mdx`, `curriculum-audit.mdx`: Direct markdown links across all milestones and capstones.

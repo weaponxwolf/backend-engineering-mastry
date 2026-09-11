@@ -323,6 +323,114 @@ When interviewers test your Java core knowledge, they want to hear about hardwar
 
 ---
 
+## Java Fundamentals Interview Map
+
+Java basics become backend production issues when memory, concurrency, serialization, and persistence enter the picture.
+
+### 1. Primitive vs Reference
+
+A primitive variable stores the value directly. A reference variable stores a pointer-like value to an object on the heap.
+
+```mermaid
+flowchart LR
+    Stack["Thread stack frame"] --> I["int count = 42<br/>value stored here"]
+    Stack --> Ref["User user<br/>reference value"]
+    Ref --> Heap["Heap object<br/>User{name='Asha'}"]
+```
+
+**Must-answer:** Java is always pass-by-value. For objects, the copied value is the reference value, not the object itself.
+
+```java
+void rename(User user) {
+    user = new User("Bob"); // only reassigns local copied reference
+}
+```
+
+### 2. `==` vs `.equals()`
+
+`==` compares primitive values or reference identity. `.equals()` compares logical equality if the class implemented it correctly.
+
+```java
+String a = new String("paid");
+String b = new String("paid");
+
+System.out.println(a == b);      // false: different objects
+System.out.println(a.equals(b)); // true: same characters
+```
+
+Backend failure:
+
+- Comparing request strings with `==` breaks status checks.
+- Bad `equals()` and `hashCode()` breaks `HashSet`, `HashMap`, JPA collections, and deduplication.
+
+### 3. Checked vs Unchecked Exceptions
+
+Checked exceptions extend `Exception` but not `RuntimeException`. Java forces callers to handle or declare them.
+
+Unchecked exceptions extend `RuntimeException`. They usually represent programming errors or business failures that can flow to a global handler.
+
+Spring transaction trap:
+
+```java
+@Transactional
+public void register() throws IOException {
+    userRepository.save(user);
+    throw new IOException("email failed");
+}
+```
+
+By default, Spring rolls back on unchecked exceptions, not checked exceptions. This can commit the user unexpectedly unless configured.
+
+### 4. Records Are DTO Tools, Not Entity Replacements
+
+Records are excellent for request and response DTOs:
+
+```java
+public record NoteResponse(Long id, String title, String content) {}
+```
+
+They are usually wrong for JPA entities because JPA needs a protected no-arg constructor, mutable persistence state, proxying rules, and lifecycle tracking.
+
+### 5. `Optional` Is a Return Signal, Not a Field Type
+
+Good:
+
+```java
+Optional<User> findByEmail(String email);
+```
+
+Bad:
+
+```java
+class User {
+    private Optional<String> middleName;
+}
+```
+
+`Optional` fields complicate serialization, JPA mapping, and domain modeling. Use it at method boundaries to force callers to handle absence.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Create a small `Money` value object and an `OrderStatus` enum.
+  </Step>
+  <Step title="Break">
+    Compare statuses using strings and `==`, then create two logically equal values with broken `equals()`.
+  </Step>
+  <Step title="Observe">
+    Watch conditionals fail and `HashSet` store duplicate logical values.
+  </Step>
+  <Step title="Fix">
+    Use enums for fixed states and implement value-object equality correctly.
+  </Step>
+  <Step title="Prove">
+    Write unit tests for equality, invalid construction, and exception behavior.
+  </Step>
+</Steps>
+
+---
+
 ## Active Recall & Mastery Verification
 
 <AccordionGroup>

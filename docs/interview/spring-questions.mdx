@@ -13,6 +13,31 @@ Looking for complete, production-tested answers, architectural sequence diagrams
 
 ---
 
+## 0. Non-Negotiable Spring Fundamentals
+
+1. What problem does Dependency Injection solve, and why is constructor injection preferred?
+2. What is a Spring bean, and what does the `ApplicationContext` own?
+3. Why must singleton services be stateless in a multi-threaded web server?
+4. What is a Spring proxy, and why do `@Transactional`, `@Async`, `@Cacheable`, and `@Observed` depend on proxies?
+5. Why does self-invocation bypass proxy behavior?
+6. What is the difference between `@Component`, `@Service`, `@Repository`, and `@Configuration`?
+7. What happens before a request reaches a Spring MVC controller?
+8. What does `@RequestBody` physically do with HTTP bytes and Jackson?
+9. What does `@Valid` trigger, and which exception represents validation failure?
+10. What is the difference between JPA, Hibernate, and Spring Data JPA?
+11. What are transient, managed, detached, and removed entity states?
+12. Why can a managed entity update without calling `save()`?
+13. What is flush, and how is it different from commit?
+14. Why does lazy loading fail outside an open session?
+15. Why is N+1 dangerous and how do you prove it in a test?
+16. What is the difference between authentication and authorization in Spring Security?
+17. What does `SecurityContextHolder` store, and why can ThreadLocal cleanup matter?
+18. What should validate a JWT besides the signature?
+19. When is CSRF required and when is it safe to disable?
+20. Why is CORS not API security?
+
+---
+
 ## 1. Spring IoC Container, Bean Lifecycle & Dynamic Proxies
 
 1. **`BeanFactory` vs `ApplicationContext`**:

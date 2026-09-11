@@ -504,6 +504,170 @@ When interviewers grill you on Spring Security, they want to see if you understa
 
 ---
 
+## Spring Security Fundamentals Interview Map
+
+Security fundamentals must be precise. A vague security answer usually hides a real vulnerability.
+
+### 1. Authentication vs Authorization
+
+Authentication answers: **Who is calling?**
+
+Authorization answers: **Is this caller allowed to perform this action on this resource?**
+
+```mermaid
+flowchart LR
+    Request["GET /api/notes/42<br/>Bearer token"] --> Authn["Authentication<br/>validate token and identify subject"]
+    Authn --> Authz["Authorization<br/>can this subject read note 42?"]
+    Authz --> Handler["Controller / Service"]
+```
+
+Bad implementation:
+
+```java
+@GetMapping("/notes/{id}")
+@PreAuthorize("hasRole('USER')")
+public NoteResponse get(@PathVariable Long id) {
+    return noteService.getById(id);
+}
+```
+
+This proves the caller is a user. It does not prove the caller owns note `id`.
+
+Correct implementation:
+
+```java
+@Transactional(readOnly = true)
+public NoteResponse getOwnedNote(Long id, String subject) {
+    Note note = noteRepository.findByIdAndOwnerSubject(id, subject)
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+    return NoteResponse.from(note);
+}
+```
+
+**Senior answer:** "Authentication creates a trusted principal from cryptographic or credential evidence. Authorization must then bind that principal to the exact resource and action, usually with ownership-scoped queries or method security."
+
+### 2. What is in an `Authentication` object?
+
+After authentication succeeds, Spring stores an `Authentication` inside `SecurityContext`.
+
+```mermaid
+flowchart TD
+    SecurityContext["SecurityContext"] --> Authentication["Authentication"]
+    Authentication --> Principal["principal<br/>who"]
+    Authentication --> Credentials["credentials<br/>usually erased"]
+    Authentication --> Authorities["authorities<br/>roles/scopes"]
+    Authentication --> Details["details<br/>request metadata"]
+```
+
+Examples:
+
+- Form login commonly uses `UsernamePasswordAuthenticationToken`.
+- OAuth2 resource server commonly uses `JwtAuthenticationToken`.
+- Anonymous requests may use `AnonymousAuthenticationToken`.
+
+Do not assume `authentication.getPrincipal()` is always your custom user class. In JWT resource-server mode, it may be a `Jwt`.
+
+### 3. What does the filter chain do before the controller?
+
+The controller should not parse raw credentials. The filter chain does it first.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client
+    participant Cors as CorsFilter
+    participant Csrf as CsrfFilter
+    participant Bearer as BearerTokenAuthenticationFilter
+    participant Ex as ExceptionTranslationFilter
+    participant Authz as AuthorizationFilter
+    participant MVC as DispatcherServlet
+
+    Client->>Cors: OPTIONS or real request
+    Cors->>Csrf: CORS accepted
+    Csrf->>Bearer: CSRF checked when needed
+    Bearer->>Bearer: Extract and validate Bearer token
+    Bearer->>Ex: Continue with SecurityContext
+    Ex->>Authz: Catch auth exceptions below
+    Authz->>MVC: Route allowed
+```
+
+If authentication fails, the request never reaches `@RestControllerAdvice`. That is why `AuthenticationEntryPoint` and `AccessDeniedHandler` must write security error responses.
+
+### 4. How should JWT validation be explained?
+
+A JWT is not trusted because it has three base64 sections. It is trusted only after validation.
+
+```mermaid
+flowchart TD
+    Token["Authorization: Bearer header"] --> Parse["Parse JOSE header and claims"]
+    Parse --> Alg["Allow expected algorithm only"]
+    Alg --> Key["Resolve verification key<br/>secret or JWKS public key"]
+    Key --> Signature["Verify signature"]
+    Signature --> Claims["Validate exp, nbf, iss, aud"]
+    Claims --> Authorities["Map scopes/roles to authorities"]
+```
+
+Validation checklist:
+
+- Reject `alg: none`.
+- Enforce the expected algorithm.
+- Validate signature with the configured key.
+- Validate issuer (`iss`).
+- Validate audience (`aud`).
+- Validate expiration (`exp`) and not-before (`nbf`).
+- Map roles/scopes from trusted claims only.
+
+**Senior answer:** "JWT validation is cryptographic verification plus claim validation. Signature alone only proves the token was signed by a key; it does not prove the token was intended for this API, issued by the expected issuer, or still valid."
+
+### 5. When is CSRF required?
+
+CSRF matters when the browser automatically attaches credentials.
+
+| Credential Storage | Browser Sends Automatically? | CSRF Risk |
+| :--- | :--- | :--- |
+| Session cookie | Yes | Yes |
+| `HttpOnly` refresh/access cookie | Yes | Yes |
+| HTTP Basic cached by browser | Yes | Yes |
+| `Authorization` header set by JavaScript | No | Usually no CSRF |
+
+If your access token is in a bearer header and no cookies/session/basic auth are accepted on API routes, CSRF protection can be disabled for those routes.
+
+If cookies authenticate the request, keep CSRF protection and configure `SameSite`, `Secure`, and token handling deliberately.
+
+### 6. Why does CORS not secure your API?
+
+CORS is a browser rule. It prevents browser JavaScript from reading blocked cross-origin responses. It does not stop curl, Postman, backend scripts, mobile apps, or direct attackers from sending requests.
+
+```mermaid
+flowchart LR
+    Browser["Browser JS"] -->|CORS enforced| API["API"]
+    Curl["curl / script"] -->|No browser CORS enforcement| API
+```
+
+**Senior answer:** "CORS is not authorization. It is a browser-enforced read protection mechanism. The API must still authenticate and authorize every request."
+
+### Security Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Implement `GET /api/notes/{id}` using JWT authentication and a normal `ROLE_USER`.
+  </Step>
+  <Step title="Break">
+    Create two users. Use User A's token to request User B's note ID.
+  </Step>
+  <Step title="Observe">
+    If the endpoint checks only `hasRole('USER')`, the request leaks User B's data.
+  </Step>
+  <Step title="Fix">
+    Scope the repository query by both note ID and authenticated subject.
+  </Step>
+  <Step title="Prove">
+    Write MockMvc tests for missing token `401`, wrong owner `404` or `403`, correct owner `200`, and admin override if supported.
+  </Step>
+</Steps>
+
+---
+
 ## 8. Senior Interview Questions & Active Recall
 
 <AccordionGroup>

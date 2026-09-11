@@ -440,6 +440,165 @@ is a critical vulnerability. Query parameters are logged in plaintext across bro
 
 ---
 
+## Basic API Questions, Answered Deeply
+
+An API is not just "a URL that returns JSON." It is a contract across a hostile network boundary.
+
+### 1. What is a resource?
+
+A resource is a thing your system can name consistently: a user, note, order, invoice, upload, payment, or shipment.
+
+Good resource URLs use nouns:
+
+```http
+GET /api/notes/42
+POST /api/orders
+DELETE /api/orders/9001
+```
+
+Bad URLs smuggle actions into names:
+
+```http
+POST /api/createOrder
+GET /api/deleteNote?id=42
+```
+
+**Senior answer:** "A resource URI should identify domain state. The HTTP method communicates the operation. This keeps routing, caching, authorization, metrics, and client behavior predictable."
+
+### 2. Why does `POST` create but `PUT` replaces?
+
+`POST` sends a command to a collection. The server decides the new resource identity.
+
+```http
+POST /api/notes
+Content-Type: application/json
+
+{"title":"Transactions","content":"Atomic boundaries"}
+```
+
+`PUT` replaces a known resource at a known URI. If the client omits a field, the server must define whether that means "clear it" or "reject incomplete representation."
+
+```http
+PUT /api/notes/42
+Content-Type: application/json
+
+{"title":"Transactions","content":"Updated full content"}
+```
+
+`PATCH` modifies only supplied fields.
+
+```http
+PATCH /api/notes/42
+Content-Type: application/json
+
+{"title":"New title only"}
+```
+
+**Common failure:** using `PATCH` semantics in a `PUT` endpoint. Mobile clients then accidentally erase fields during version mismatch.
+
+### 3. Why must request DTOs be separate from entities?
+
+Entities model database-persisted domain state. Request DTOs model client intent.
+
+```mermaid
+flowchart LR
+    Json["Untrusted JSON"] --> RequestDto["CreateOrderRequest<br/>client intent"]
+    RequestDto --> Service["OrderService<br/>loads trusted state"]
+    Service --> Entity["Order Entity<br/>domain invariant"]
+    Entity --> ResponseDto["OrderResponse<br/>public contract"]
+```
+
+Do not expose entities directly because:
+
+- A request entity can allow mass assignment, such as setting `role = ADMIN`.
+- A response entity can leak internal fields, such as `passwordHash`.
+- Jackson can trigger lazy JPA loading during serialization.
+- Bidirectional relationships can recurse until `StackOverflowError`.
+- API contracts become tied to database table shape.
+
+Production rule:
+
+```java
+public record CreateUserRequest(
+    @Email String email,
+    @Size(min = 12, max = 72) String password
+) {}
+
+public record UserResponse(
+    Long id,
+    String email
+) {}
+```
+
+The request never includes `id`, `role`, `passwordHash`, `createdAt`, or `updatedAt` unless the use case truly allows the client to control them.
+
+### 4. How do you choose HTTP status codes?
+
+Use status codes to tell infrastructure and clients what happened without parsing custom strings.
+
+| Situation | Status | Why |
+| :--- | :--- | :--- |
+| Resource created | `201 Created` | Include `Location` header |
+| Valid deletion with no body | `204 No Content` | Nothing else to render |
+| Invalid JSON or field validation | `400 Bad Request` | Client sent malformed input |
+| Missing/invalid login token | `401 Unauthorized` | Caller has not authenticated |
+| Authenticated but not allowed | `403 Forbidden` | Identity is known but forbidden |
+| Missing resource or hidden foreign resource | `404 Not Found` | Avoid leaking existence |
+| Duplicate idempotency key conflict | `409 Conflict` | Current state conflicts with request |
+| Rate limit exceeded | `429 Too Many Requests` | Client should slow down |
+| Downstream dependency unavailable | `503 Service Unavailable` | Retry later may work |
+
+**Senior answer:** "Status codes are part of the distributed contract. Gateways, retries, circuit breakers, SLOs, logs, and clients all depend on them. Returning `200` for errors destroys observability and pushes protocol logic into every caller."
+
+### 5. What is idempotency in APIs?
+
+An operation is idempotent when repeating it produces the same final server state.
+
+`GET /notes/42` is naturally idempotent. `DELETE /notes/42` is idempotent because after one or ten deletes, the final state is "deleted."
+
+`POST /orders` is not naturally idempotent. If the mobile client times out and retries, the server may create two orders.
+
+Use an idempotency key:
+
+```http
+POST /api/orders
+Idempotency-Key: 8d2fd4a8-f9c7-48b6-97f1-c5d2e2f1a111
+Content-Type: application/json
+
+{"productId":42,"quantity":1}
+```
+
+Database proof:
+
+```sql
+CREATE UNIQUE INDEX uq_orders_user_idempotency_key
+ON orders(user_id, idempotency_key);
+```
+
+**Senior answer:** "Retries are guaranteed in real networks. Idempotency turns ambiguous client retries into deterministic server behavior by storing request identity and replaying the original result instead of repeating the side effect."
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Add `POST /api/orders` with `201 Created`, a `Location` header, request DTO validation, and an `OrderResponse`.
+  </Step>
+  <Step title="Break">
+    Simulate a client timeout after the server commits the order, then retry the same request.
+  </Step>
+  <Step title="Observe">
+    Without an idempotency key, two orders exist for one user intent.
+  </Step>
+  <Step title="Fix">
+    Add `Idempotency-Key`, a unique database constraint, and a stored response lookup.
+  </Step>
+  <Step title="Prove">
+    Write a test that sends the same key twice and verifies only one order row exists.
+  </Step>
+</Steps>
+
+---
+
 ## Active Recall & Interview Mastery
 
 <AccordionGroup>

@@ -16,6 +16,44 @@ Use the **Senior Answer Formula**:
 
 ---
 
+## 0. Non-Negotiable Spring Fundamentals
+
+<AccordionGroup>
+  <Accordion title="1. What problem does Dependency Injection solve?">
+    Dependency Injection separates object use from object construction. `OrderService` depends on a `PaymentClient` interface instead of constructing `new StripePaymentClient()` internally. Spring wires the production implementation, while tests pass a fake. Constructor injection is preferred because dependencies can be `final`, missing dependencies fail at construction, and the class remains testable without starting Spring.
+  </Accordion>
+
+  <Accordion title="2. Why must singleton Spring services be stateless?">
+    A Spring singleton is one object shared by all request threads in the application context. If it stores request-specific fields like `currentUserId`, two users can overwrite each other's state. Keep singleton services stateless: dependencies are fields, request/user data are method arguments, and persistent state lives in databases or explicit scoped components.
+  </Accordion>
+
+  <Accordion title="3. What is the proxy idea behind many Spring features?">
+    Spring often wraps your bean in a proxy. The caller invokes the proxy, the proxy applies cross-cutting behavior such as transactions, caching, async execution, security, or observation, then delegates to the real bean. Internal `this.method()` calls do not go through the proxy, which is why self-invocation bypasses `@Transactional` and similar annotations.
+  </Accordion>
+
+  <Accordion title="4. What happens to `@RequestBody` and `@Valid`?">
+    Spring MVC reads bytes from the servlet request body and selects an `HttpMessageConverter`, usually Jackson, to deserialize JSON into a DTO or record. If the parameter is annotated with `@Valid`, Bean Validation checks its constraints before the controller method proceeds. Malformed JSON and failed validation are different failures and should map to deliberate `400` responses.
+  </Accordion>
+
+  <Accordion title="5. What is the difference between JPA, Hibernate, and Spring Data JPA?">
+    JPA is the specification, Hibernate is the implementation that tracks entities and emits SQL, and Spring Data JPA is the repository abstraction on top. Debugging requires dropping through the layers: repository method, EntityManager, Hibernate session, JDBC, generated SQL, and database execution plan.
+  </Accordion>
+
+  <Accordion title="6. Why does a managed entity update without `save()`?">
+    Inside a transaction, Hibernate stores managed entities in the persistence context and keeps a loaded-state snapshot. At flush time, it compares the live object to the snapshot. If fields changed, Hibernate generates `UPDATE` SQL. Calling `save()` on an already-managed entity is usually redundant.
+  </Accordion>
+
+  <Accordion title="7. What does Spring Security do before MVC?">
+    The servlet filter chain validates credentials and authorization rules before `DispatcherServlet` calls a controller. `DelegatingFilterProxy` bridges Tomcat to Spring's `FilterChainProxy`. Successful authentication stores an `Authentication` in `SecurityContext`. Security exceptions need `AuthenticationEntryPoint` and `AccessDeniedHandler` because they occur before normal controller advice.
+  </Accordion>
+
+  <Accordion title="8. What is the correct JWT answer?">
+    A JWT must be parsed, checked for allowed algorithm, verified cryptographically, then validated for `iss`, `aud`, `exp`, `nbf`, and trusted authority claims. Signature verification alone is not enough; a token signed for another audience or issuer should still be rejected.
+  </Accordion>
+</AccordionGroup>
+
+---
+
 ## 1. Spring IoC Container, Bean Lifecycle & Dynamic Proxies
 
 <AccordionGroup>

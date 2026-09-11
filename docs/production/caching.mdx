@@ -356,6 +356,97 @@ A useful failure test pauses a reader after its database read, commits a writer 
 
 ---
 
+## Caching Fundamentals Interview Map
+
+Caching is not "make it faster." Caching is controlled duplication of data, with explicit staleness risk.
+
+### 1. What should you cache?
+
+Good cache candidates:
+
+- Expensive reads.
+- Frequently repeated data.
+- Data that can tolerate short staleness.
+- Derived read models.
+- Public catalog/detail pages.
+
+Bad cache candidates:
+
+- Authorization decisions without strict invalidation.
+- Account balances that require exact freshness.
+- Inventory reservation decisions.
+- One-off low-frequency rows.
+- Data with unclear ownership or tenant scope.
+
+### 2. Cache hit, miss, and hit ratio
+
+```mermaid
+flowchart LR
+    Request["Request"] --> Cache{"Cache key exists?"}
+    Cache -->|hit| Fast["Return cached value"]
+    Cache -->|miss| DB["Read database"]
+    DB --> Fill["Store value with TTL"]
+    Fill --> Response["Return response"]
+```
+
+Hit ratio:
+
+$$\text{Hit Ratio} = \frac{\text{Cache Hits}}{\text{Cache Hits} + \text{Cache Misses}}$$
+
+A high hit ratio is not automatically good. A cache can serve stale or unauthorized data very quickly.
+
+### 3. Key design matters
+
+Bad:
+
+```console
+product:42
+```
+
+Better:
+
+```console
+tenant:acme:product:v3:42:currency:USD
+```
+
+Include all dimensions that change the response: tenant, locale, role if relevant, version, feature flags, currency, and query parameters.
+
+### 4. TTL is a correctness decision
+
+TTL is not only a memory setting. It defines how long the system may serve an old value if invalidation fails.
+
+Short TTL:
+
+- More database load.
+- Lower staleness window.
+
+Long TTL:
+
+- Better hit ratio.
+- Higher stale-data risk.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Cache product detail responses with tenant-aware keys and TTL jitter.
+  </Step>
+  <Step title="Break">
+    Omit tenant from the key and update the product while one reader is delayed.
+  </Step>
+  <Step title="Observe">
+    Watch cross-tenant data leakage or stale refill after invalidation.
+  </Step>
+  <Step title="Fix">
+    Include all response dimensions in the key, delete after commit, and add version or short TTL protection.
+  </Step>
+  <Step title="Prove">
+    Write tests for cache hit, miss, stale refill, tenant isolation, and Redis outage fallback.
+  </Step>
+</Steps>
+
+---
+
 ## 7. Active Recall Interview Mastery
 
 <AccordionGroup>

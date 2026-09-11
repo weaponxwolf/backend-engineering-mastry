@@ -594,6 +594,111 @@ public class RestClientConfig {
 
 ---
 
+## Spring MVC Fundamentals Interview Map
+
+Spring MVC questions test whether you understand the request pipeline, not just `@GetMapping`.
+
+### 1. Controller vs Filter vs Interceptor
+
+| Component | Runs When | Best For |
+| :--- | :--- | :--- |
+| Servlet Filter | Before Spring MVC routing | Security, CORS, request wrapping, low-level cross-cutting work |
+| HandlerInterceptor | After handler is chosen, before controller | Correlation IDs, audit metadata, coarse rate checks |
+| Controller | Endpoint adapter | Convert HTTP request into use-case call |
+| Service | Business use case | Transactions, rules, orchestration |
+
+```mermaid
+flowchart LR
+    Request["HTTP request"] --> Filter["Filter"]
+    Filter --> Dispatcher["DispatcherServlet"]
+    Dispatcher --> Interceptor["HandlerInterceptor"]
+    Interceptor --> Controller["Controller"]
+    Controller --> Service["Service"]
+```
+
+**Senior answer:** "Filters are servlet-level and can stop a request before Spring MVC knows the handler. Interceptors are MVC-level and run after handler mapping. Controllers should stay thin and delegate use cases to services."
+
+### 2. What does `@RequestBody` do?
+
+`@RequestBody` tells Spring to read bytes from the HTTP request body and use an `HttpMessageConverter`, usually Jackson, to build a Java object.
+
+```mermaid
+flowchart LR
+    Bytes["ServletInputStream bytes"] --> Jackson["Jackson JSON parser"]
+    Jackson --> Dto["CreateOrderRequest record"]
+    Dto --> Validation["@Valid constraints"]
+    Validation --> Controller["Controller method argument"]
+```
+
+Common failures:
+
+- Missing no-arg constructor or incompatible record shape.
+- Invalid JSON creates `HttpMessageNotReadableException`.
+- Type mismatch creates a `400`, not a business exception.
+- Missing `@Valid` means annotations are not enforced.
+
+### 3. Path Variable vs Request Param vs Request Body
+
+| Source | Example | Use For |
+| :--- | :--- | :--- |
+| Path variable | `/orders/{id}` | Resource identity |
+| Request param | `/orders?status=PAID&page=0` | Filtering, sorting, pagination |
+| Request body | JSON payload | Complex command data |
+| Header | `Idempotency-Key` | Protocol metadata |
+
+Bad:
+
+```http
+POST /api/orders?productId=42&quantity=2&shippingAddress=...
+```
+
+Good:
+
+```http
+POST /api/orders
+Idempotency-Key: 8d2fd4a8-f9c7-48b6-97f1-c5d2e2f1a111
+Content-Type: application/json
+
+{"productId":42,"quantity":2,"shippingAddressId":9}
+```
+
+### 4. Why should controllers return `ResponseEntity` sometimes?
+
+Use `ResponseEntity` when the response needs status, headers, or cache controls.
+
+```java
+@PostMapping
+ResponseEntity<NoteResponse> create(@Valid @RequestBody CreateNoteRequest request) {
+    NoteResponse response = service.create(request);
+    URI location = URI.create("/api/notes/" + response.id());
+    return ResponseEntity.created(location).body(response);
+}
+```
+
+If every endpoint just returns objects, you will forget important HTTP semantics like `201 Created`, `204 No Content`, `Location`, `ETag`, and `Cache-Control`.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Implement create, get, list, patch, and delete endpoints for notes using DTOs.
+  </Step>
+  <Step title="Break">
+    Return JPA entities directly, omit `@Valid`, and return `200 OK` for every outcome.
+  </Step>
+  <Step title="Observe">
+    Watch validation not run, lazy fields serialize unexpectedly, and clients lose error semantics.
+  </Step>
+  <Step title="Fix">
+    Use DTOs, `ResponseEntity`, correct status codes, pagination, and `ProblemDetail`.
+  </Step>
+  <Step title="Prove">
+    Write MockMvc tests for status, headers, body shape, validation errors, and missing resources.
+  </Step>
+</Steps>
+
+---
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 When senior interviewers ask about Spring MVC and REST API design, they are testing whether you understand operating system sockets, thread lifecycles, and memory pressure, or if you merely memorize annotations.

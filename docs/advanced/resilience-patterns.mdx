@@ -684,6 +684,87 @@ curl -X POST http://localhost:8080/actuator/circuitbreakers/paymentClient/transi
 
 ---
 
+## Resilience Fundamentals Interview Map
+
+Resilience means limiting blast radius when something is slow, broken, overloaded, or lying.
+
+### 1. Timeout vs retry vs circuit breaker vs bulkhead
+
+| Pattern | Protects Against | Failure If Missing |
+| :--- | :--- | :--- |
+| Timeout | Infinite waits | Threads hang forever |
+| Retry | Short transient failures | One packet loss becomes user-visible failure |
+| Circuit breaker | Repeated known failures | App keeps hammering a dead dependency |
+| Bulkhead | Shared resource exhaustion | One dependency consumes all threads/connections |
+| Rate limiter | Too much incoming traffic | Server overload |
+
+### 2. Retries can make outages worse
+
+If 1,000 requests fail and each retries 3 times instantly, the downstream receives 4,000 attempts during the same failure window.
+
+```mermaid
+flowchart LR
+    Clients["1,000 original calls"] --> Retry["3 instant retries each"]
+    Retry --> Downstream["4,000 calls hit degraded dependency"]
+```
+
+Always define:
+
+- Which exceptions are retryable.
+- Maximum attempts.
+- Backoff.
+- Jitter.
+- Overall deadline.
+
+### 3. Bulkheads protect critical flows
+
+Do not let analytics, search, or recommendation calls consume the same concurrency budget as checkout.
+
+```mermaid
+flowchart TD
+    Threads["Application"] --> Checkout["Checkout bulkhead<br/>critical"]
+    Threads --> Search["Search bulkhead<br/>degradable"]
+    Threads --> Analytics["Analytics bulkhead<br/>optional"]
+```
+
+### 4. Fallbacks must not fake successful writes
+
+Safe fallback:
+
+```java
+return ProductCatalog.cachedFallback();
+```
+
+Unsafe fallback:
+
+```java
+return new PaymentResult("SUCCESS"); // card was not charged
+```
+
+Fallbacks may serve stale reads, queue work, or return explicit degraded states. They must not invent completed mutations.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Call a payment service from checkout with timeout, retry, circuit breaker, and bulkhead.
+  </Step>
+  <Step title="Break">
+    Make the payment service hang, then return intermittent `500` responses.
+  </Step>
+  <Step title="Observe">
+    Watch thread usage, retry amplification, circuit state, and user-facing status.
+  </Step>
+  <Step title="Fix">
+    Add bounded retries with full jitter, ignore client errors, and use a safe fallback state.
+  </Step>
+  <Step title="Prove">
+    Add WireMock/Toxiproxy tests for timeout, retry count, circuit open, half-open recovery, and fallback correctness.
+  </Step>
+</Steps>
+
+---
+
 ## Active Recall & System Design Interview Questions
 
 <AccordionGroup>

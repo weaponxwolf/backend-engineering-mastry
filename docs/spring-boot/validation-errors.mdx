@@ -376,6 +376,100 @@ Add validation and clean errors for Todo API:
 
 Write API tests for each case.
 
+## Validation Fundamentals Interview Map
+
+Validation has three layers. Do not mix them.
+
+| Layer | Example | Failure Status |
+| :--- | :--- | :--- |
+| Syntax parsing | malformed JSON | `400 Bad Request` |
+| DTO validation | blank title, invalid email | `400 Bad Request` |
+| Business validation | duplicate title for same user | `409 Conflict` or domain-specific `400` |
+| Authorization | user edits another user's note | `403 Forbidden` or hidden `404 Not Found` |
+
+### 1. DTO Validation vs Business Validation
+
+DTO validation checks the shape of the request:
+
+```java
+public record CreateNoteRequest(
+    @NotBlank @Size(max = 200) String title,
+    @Size(max = 10_000) String content
+) {}
+```
+
+Business validation checks current system state:
+
+```java
+if (noteRepository.existsByOwnerIdAndTitle(userId, request.title())) {
+    throw new DuplicateNoteTitleException(request.title());
+}
+```
+
+The first does not need the database. The second usually does.
+
+### 2. Why validation belongs at the boundary
+
+Invalid input should fail before it reaches domain logic:
+
+```mermaid
+flowchart LR
+    Json["JSON"] --> Dto["DTO"]
+    Dto --> BeanValidation["Bean Validation"]
+    BeanValidation --> Service["Service receives trusted shape"]
+    Service --> BusinessRule["Business rule checks state"]
+```
+
+Boundary validation reduces null checks, protects domain code, and produces consistent client errors.
+
+### 3. Common exception mapping
+
+| Exception | Meaning | Response |
+| :--- | :--- | :--- |
+| `HttpMessageNotReadableException` | JSON cannot be parsed | `400` |
+| `MethodArgumentNotValidException` | `@Valid @RequestBody` failed | `400` |
+| `ConstraintViolationException` | method/path/query constraint failed | `400` |
+| `ResponseStatusException` | explicit web error | configured status |
+| custom duplicate exception | state conflict | `409` |
+
+### 4. Field error response contract
+
+A frontend needs stable field names:
+
+```json
+{
+  "type": "https://api.example.com/errors/validation",
+  "title": "Validation failed",
+  "status": 400,
+  "errors": {
+    "title": "must not be blank",
+    "email": "must be a well-formed email address"
+  }
+}
+```
+
+Never return raw Java exception names as the user-facing contract.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Add DTO validation and a global handler returning one error shape.
+  </Step>
+  <Step title="Break">
+    Send malformed JSON, missing fields, invalid types, and duplicate business values.
+  </Step>
+  <Step title="Observe">
+    Confirm which errors are parser errors, DTO errors, business errors, and security errors.
+  </Step>
+  <Step title="Fix">
+    Map each exception type to a deliberate status code and response schema.
+  </Step>
+  <Step title="Prove">
+    Add MockMvc tests for every error class and assert no stack trace is exposed.
+  </Step>
+</Steps>
+
 ## Done Checklist
 
 - Request DTOs have validation annotations

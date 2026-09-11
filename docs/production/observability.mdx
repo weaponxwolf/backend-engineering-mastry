@@ -429,6 +429,89 @@ groups:
 
 ---
 
+## Observability Fundamentals Interview Map
+
+Observability is how you debug production without a debugger.
+
+### 1. Logs vs metrics vs traces
+
+| Signal | Answers | Example |
+| :--- | :--- | :--- |
+| Logs | What happened in this code path? | exception, order ID, reason |
+| Metrics | Is the system healthy over time? | error rate, p99 latency, saturation |
+| Traces | Where did one request spend time? | gateway to order to payment to database |
+
+```mermaid
+flowchart LR
+    Metric["p99 latency spike"] --> Trace["Find slow trace"]
+    Trace --> Log["Open logs with same traceId"]
+    Log --> Cause["Payment timeout or DB lock"]
+```
+
+### 2. RED and USE
+
+For request-driven services, track RED:
+
+- Rate: requests per second.
+- Errors: failed requests.
+- Duration: latency distribution.
+
+For resources, track USE:
+
+- Utilization: how busy.
+- Saturation: queued work.
+- Errors: failed operations.
+
+### 3. Why averages lie
+
+If 95 requests take `20ms` and 5 requests take `10s`, the average may look tolerable while real users suffer.
+
+Use percentiles:
+
+- p50: typical user.
+- p95: slow tail.
+- p99: worst regular pain.
+
+### 4. Cardinality can kill metrics
+
+Bad metric tag:
+
+```java
+registry.counter("checkout", "userId", userId).increment();
+```
+
+Every unique user creates a new time series. Prometheus memory can explode.
+
+Good metric tags:
+
+```java
+registry.counter("checkout", "status", "success", "region", "us-east").increment();
+```
+
+Put high-cardinality values like user ID and order ID into traces or logs, not metric labels.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Add metrics, logs, and traces to checkout and payment calls.
+  </Step>
+  <Step title="Break">
+    Add `userId` as a metric tag and remove trace propagation on an async task.
+  </Step>
+  <Step title="Observe">
+    Watch time-series cardinality grow and logs lose correlation.
+  </Step>
+  <Step title="Fix">
+    Move user IDs to trace/log context and propagate MDC or tracing context across async boundaries.
+  </Step>
+  <Step title="Prove">
+    Write an integration test that scrapes `/actuator/prometheus` and asserts expected low-cardinality labels.
+  </Step>
+</Steps>
+
+---
+
 ## Production Antipatterns Checklist
 
 <AccordionGroup>

@@ -696,6 +696,84 @@ class IdempotentConsumerTest {
 
 ---
 
+## Microservices Fundamentals Interview Map
+
+Microservices are not a default architecture. They are a trade: team and scaling independence in exchange for distributed systems complexity.
+
+### 1. Service vs module
+
+A module is a code boundary inside one deployable process. A service is a separately deployed process behind a network boundary.
+
+```mermaid
+flowchart LR
+    Mod["Module call<br/>same JVM memory"] --> Fast["nanoseconds, same transaction possible"]
+    Svc["Service call<br/>network socket"] --> Slow["milliseconds, partial failure possible"]
+```
+
+If two components need the same database transaction and always deploy together, they probably are not separate services yet.
+
+### 2. When should you split?
+
+Good reasons:
+
+- Different scaling profile.
+- Different team ownership.
+- Different release cadence.
+- Clear bounded context.
+- Different reliability or security boundary.
+
+Bad reasons:
+
+- "Microservices are modern."
+- "The codebase feels big."
+- "We want to use a different framework."
+- "We think it will automatically scale."
+
+### 3. What is a distributed monolith?
+
+A distributed monolith has the pain of microservices without the independence.
+
+Symptoms:
+
+- Every request chains through many synchronous services.
+- Services share database tables.
+- Deployments must happen in a fixed order.
+- One service outage breaks most user flows.
+- Teams cannot change schemas independently.
+
+### 4. What replaces cross-service joins?
+
+Do not query another service's database directly.
+
+Options:
+
+- API composition for small low-traffic views.
+- CQRS read projections for high-traffic views.
+- Events and materialized views for asynchronous state.
+- Search index for query-heavy discovery.
+
+### Build-Break-Fix Lab
+
+<Steps>
+  <Step title="Build">
+    Keep order, inventory, and payment as modules in one modular monolith.
+  </Step>
+  <Step title="Break">
+    Split them into services but keep synchronous chains and shared tables.
+  </Step>
+  <Step title="Observe">
+    Calculate availability multiplication and reproduce partial failure behavior.
+  </Step>
+  <Step title="Fix">
+    Add service-owned data, outbox events, idempotent consumers, and a read projection.
+  </Step>
+  <Step title="Prove">
+    Kill one downstream service and verify the system degrades without corrupting state.
+  </Step>
+</Steps>
+
+---
+
 ## Phase 4: Senior Interview Ace (Junior vs Staff Phrasing)
 
 When interviewing for Senior and Staff roles, interviewers want to see if you appreciate the real-world operational complexities of distributed systems—network partitions, partial failures, eventual consistency—or if you simply repeat trendy buzzwords.
