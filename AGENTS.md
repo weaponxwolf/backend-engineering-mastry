@@ -900,13 +900,42 @@ All phases of the comprehensive documentation overhaul and book-replacement dept
       - Added Project Proof Drill sections to Todo API, Notes API, E-commerce, Blog API, URL Shortener, Rate Limiter, Notification Worker, Deployment Lab, and Incident Debugging Lab pages.
       - Each proof drill defines the architecture diagram, correctness evidence, failure drill, and acceptance criteria that prove the learner can build and debug the project rather than merely copy code.
 
+17. **New Missing-Depth Chapter Expansion (September 2026)**:
+    - **Purpose**: Added six new book-replacement chapters for high-frequency backend fundamentals that were previously underrepresented as standalone topics.
+    - **New Spring Boot Chapter**:
+      - `docs/spring-boot/aop-events-async.mdx`: Spring proxy-based AOP, JDK dynamic proxies vs CGLIB, self-invocation failures, transaction-bound domain events, `@Async` executor design, MDC propagation, and cluster-safe scheduling.
+    - **New Database Chapter**:
+      - `docs/database/postgres-wal-replication-pgbouncer.mdx`: PostgreSQL WAL commit flow, checkpoints, crash recovery, streaming replication, replication slots, replica lag, read routing, HikariCP vs PgBouncer, and PgBouncer session/transaction/statement pool modes.
+    - **New Production Security Chapter**:
+      - `docs/production/authorization-models.mdx`: Authentication vs authorization, IDOR/BOLA prevention, owner-scoped repository queries, RBAC, ABAC, ReBAC, ACL tables, method security, and 403 vs 404 decisions.
+    - **New API Contract Chapter**:
+      - `docs/production/api-versioning-openapi-contracts.mdx`: OpenAPI contracts, backward compatibility rules, versioning strategies, breaking-change diff gates, provider contract tests, and consumer-driven contract thinking.
+    - **New Advanced Communication Chapter**:
+      - `docs/advanced/api-gateway-grpc-protobuf.mdx`: API Gateway vs BFF vs domain service boundaries, gRPC service definitions, Protobuf compatibility rules, HTTP/2 service calls, deadlines, retries, tracing, and auth context propagation.
+    - **New System Design Chapter**:
+      - `docs/system-design/blob-storage-file-upload.mdx`: Object/blob storage system design, direct uploads through presigned URLs, metadata tables, multipart uploads, checksums, malware scanning, CDN delivery, privacy, and lifecycle policy.
+    - **Navigation Update**:
+      - Added all six new pages to `docs/docs.json`, increasing the validated documentation set from 87 to 93 pages with no orphan routes and no broken links.
+
+18. **Interview Question Bank, Debugging Cookbook & Kubernetes Operations Expansion (September 2026)**:
+    - **Purpose**: Added another depth layer aimed at answering broad backend interview questions and debugging real production failures under pressure.
+    - **Master Interview Question Bank**:
+      - `docs/interview/master-question-bank.mdx`: Added a cross-domain backend question bank covering backend fundamentals, Java/JVM, OOP/collections/generics/streams, concurrency, Spring Core/MVC/AOP/async, JPA/Hibernate/transactions, SQL/PostgreSQL, security/authorization, Docker/Kubernetes, Kafka/Redis/distributed systems, system design, and production SRE.
+      - Standard answer pattern: definition -> mechanism -> failure mode -> production fix/proof.
+    - **Production Debugging Cookbook**:
+      - `docs/production/production-debugging-cookbook.mdx`: Added incident runbooks for API latency spikes, HikariCP pool exhaustion, PostgreSQL CPU saturation, lock queues/deadlocks, JVM memory leaks, OOMKilled pods, Kubernetes 503s, CrashLoopBackOff, JWT/login failures, CORS failures, Kafka lag, Redis/cache incidents, WAL/disk pressure, webhook retry storms, file upload failures, and Docker/Kubernetes startup mismatches.
+    - **Kubernetes Operations Deep Dive**:
+      - `docs/advanced/kubernetes-operations-deep-dive.mdx`: Added operational coverage for Kubernetes reconciliation, Pods, Deployments, Services, EndpointSlices, Ingress, startup/readiness/liveness probes, requests/limits, JVM memory in cgroups, HPA, ConfigMaps, Secrets, volumes, NetworkPolicy, rollout debugging, and rollback.
+    - **Navigation Update**:
+      - Added all three new pages to `docs/docs.json`, increasing the validated documentation set from 93 to 96 pages.
+
 ---
 
 ## Latest Verification Summary
 - `npm run check` (`npm run test:audit` + `npm run audit` + `npm run validate` + `npm run links`):
   - **Audit Tests**: 4/4 passing (nested navigation, duplicate route detection, metadata validation, code fence labeling).
-  - **Content Inventory**: 87 pages, 42,705 lines, 1,315 code blocks, **0 structure errors**.
-  - **Editorial Observations**: 5 generic text fences remain report-only observations from the audit script, not build blockers.
+  - **Content Inventory**: 96 pages, 46,112 lines, 1,447 code blocks, **0 structure errors**.
+  - **Editorial Observations**: 0 generic text fences remain.
   - **Mintlify Validate**: Build validation passed cleanly (`navigation.tabs` with 9 major topics).
   - **Mintlify Broken Links**: `success no broken links found` (100% link and anchor integrity across all 87 MDX documents).
 - `npm run build` (`node scripts/build-vercel.mjs`) should still be run before deployment packaging when a new static bundle is required.

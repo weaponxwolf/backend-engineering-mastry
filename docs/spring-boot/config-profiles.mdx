@@ -258,7 +258,7 @@ Spring Boot automatically parses human-readable duration strings directly into `
 #### Fail-Fast Bootstrap Guarantee
 If the application is deployed with a negative `maxRetries` or a missing `jwtSecret`, Spring throws a `ConfigurationPropertiesBindException` and **aborts the bootstrap before opening the server socket**:
 
-```text
+```log
 ***************************
 APPLICATION FAILED TO START
 ***************************

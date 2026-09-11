@@ -193,7 +193,7 @@ FROM orders
 WHERE user_id = 42 AND status = 'PAID';
 ```
 
-```text
+```postgresql
                                                         QUERY PLAN
 --------------------------------------------------------------------------------------------------------------------------
  Index Only Scan using idx_orders_user_status_covering on orders  (cost=0.43..12.85 rows=5 width=24) (actual time=0.021..0.028 rows=4 loops=1)

@@ -106,6 +106,7 @@
             "icon": "gauge-high",
             "pages": [
               "database/database-performance-mastery",
+              "database/postgres-wal-replication-pgbouncer",
               "database/schema-change-mastery"
             ]
           },
@@ -129,6 +130,7 @@
             "pages": [
               "spring-boot/project-structure",
               "spring-boot/dependency-injection",
+              "spring-boot/aop-events-async",
               "spring-boot/config-profiles"
             ]
           },
@@ -167,6 +169,7 @@
             "icon": "key",
             "pages": [
               "production/security-jwt",
+              "production/authorization-models",
               "production/oauth2-zerotrust-mesh"
             ]
           },
@@ -175,6 +178,7 @@
             "icon": "vial",
             "pages": [
               "production/testing",
+              "production/api-versioning-openapi-contracts",
               "production/testcontainers"
             ]
           },
@@ -192,6 +196,7 @@
             "pages": [
               "production/caching",
               "production/deployment-ci-cd",
+              "production/production-debugging-cookbook",
               "production/incident-response"
             ]
           }
@@ -213,6 +218,7 @@
             "icon": "sitemap",
             "pages": [
               "advanced/microservices",
+              "advanced/api-gateway-grpc-protobuf",
               "advanced/microservices-from-monolith"
             ]
           },
@@ -221,7 +227,8 @@
             "icon": "shield-heart",
             "pages": [
               "advanced/resilience-patterns",
-              "advanced/docker-kubernetes"
+              "advanced/docker-kubernetes",
+              "advanced/kubernetes-operations-deep-dive"
             ]
           },
           {
@@ -272,7 +279,8 @@
             "pages": [
               "system-design/multi-region-disaster-recovery",
               "system-design/webhook-engine-workflows",
-              "system-design/search-autocomplete"
+              "system-design/search-autocomplete",
+              "system-design/blob-storage-file-upload"
             ]
           }
         ]
@@ -321,6 +329,7 @@
             "group": "Technical Questions",
             "icon": "circle-question",
             "pages": [
+              "interview/master-question-bank",
               "interview/backend-questions",
               "interview/spring-questions",
               "interview/system-design-questions"

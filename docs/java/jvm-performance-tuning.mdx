@@ -260,7 +260,7 @@ When the page is accessible, this `test` instruction executes in a single CPU cy
 #### How to Read an Interactive Flame Graph
 A Flame Graph is a visualization of sampled call stacks:
 
-```text
+```ascii
 +-------------------------------------------------------------------------+
 |                    String.toLowerCase() [35% width]                     | <- Flat top: CPU Hog!
 +-------------------------------------------------------------------------+
@@ -314,7 +314,7 @@ Generational ZGC separates young and old generations while performing all object
 ##### Colored Pointers:
 On a 64-bit architecture, a memory pointer only needs 42 to 44 bits to address 4TB to 16TB of RAM. ZGC steals the unused upper bits:
 
-```text
+```ascii
 +-------------------+-------------+-------------+-------------+------------------------+
 | 16 Unused Bits    | 1 Finalized | 1 Remapped  | 1 Marked0   | 1 Marked1  | 44 Address|
 +-------------------+-------------+-------------+-------------+------------------------+
