@@ -50,6 +50,18 @@ npm run links:external
 
 Legacy generic text fences are reported for review. External-link checks need network access and can report temporary failures.
 
+## Deploying to Vercel
+
+The documentation is configured for hosting on [Vercel](https://vercel.com).
+- **Build command**: `node scripts/build-vercel.mjs` (or `npm run build`)
+- **Output directory**: `out`
+- **Routing**: Clean URLs enabled, root domain hosting without subpath issues.
+
+To deploy:
+1. Import `weaponxwolf/backend-engineering-mastry` in [Vercel](https://vercel.com/new).
+2. Vercel automatically detects `vercel.json` and builds via `npm run build`.
+3. Or deploy via CLI: `npx vercel login` followed by `npx vercel --prod`.
+
 ## Verification and maintenance
 
 Read [Versions and Verification](docs/getting-started/versions-and-evidence.mdx) before mixing examples. Older full-build chapters remain walkthroughs with missing integration work; a documentation build does not compile their Java snippets.

@@ -1,9 +1,7 @@
 name: Deploy Documentation to GitHub Pages
 
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+  workflow_dispatch: # Primary hosting is now Vercel. Keep GitHub Pages as optional manual backup.
 
 permissions:
   contents: read

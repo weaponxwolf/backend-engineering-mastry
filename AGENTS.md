@@ -26,7 +26,32 @@ npm run links
 
 # Full check (validate + links)
 npm run check
+
+# Build static documentation bundle for Vercel
+npm run build
+
+# Deploy via Vercel CLI (terminal)
+npx vercel --prod
 ```
+
+---
+
+## Hosting & Deployment Architecture (Vercel)
+- **Primary Hosting Platform**: Vercel (root domain routing `https://<project-name>.vercel.app`).
+- **Why Vercel over GitHub Pages**:
+  - Mintlify v4 compiles Next.js static bundles targeting root (`/`). Subpath repository hosting on GitHub Pages broke asset chunk loading, client-side hydration, search, and dynamic routing.
+  - Vercel serves the application directly from the root domain, eliminating path rewrites and preserving pristine, unmutated production bundles.
+- **Build Pipeline (`scripts/build-vercel.mjs`)**:
+  - Runs `mintlify export` inside `docs/` to render all 88 static pages.
+  - Extracts `docs/export.zip` cleanly into `./out`.
+  - Automatically purges the redundant nested `export.zip` in `./out` (reducing upload payload by ~36MB).
+  - Generates `out/404.html` fallback from `out/index.html` for resilient SPA client-side routing on hard refreshes.
+- **Vercel Configuration (`vercel.json`)**:
+  - `buildCommand`: `node scripts/build-vercel.mjs`
+  - `outputDirectory`: `out`
+  - `cleanUrls`: `true` (resolves `/getting-started/how-to-use` to `how-to-use/index.html` seamlessly)
+  - `trailingSlash`: `false`
+  - `headers`: 1-year immutable caching for `/_next/static/*` and revalidation for static media.
 
 ---
 
