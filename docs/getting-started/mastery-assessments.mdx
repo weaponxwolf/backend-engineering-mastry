@@ -1,0 +1,98 @@
+---
+title: "Mastery Assessments"
+description: "Seven practical gates that test independent implementation, diagnosis, recovery, and design."
+---
+
+# Mastery Assessments
+
+Use these gates with the [roadmap](/getting-started/backend-roadmap). Reference documentation is allowed. Close the walkthrough and attempt a changed requirement yourself. If you need the solution, record guided practice and try a different variation later.
+
+For every attempt, save source, exact commands, expected results, actual results, and one explanation. A passing command without an assertion about behavior is weak evidence. No numeric score here certifies a job level.
+
+## Assessment 0: change a Java business rule
+
+**Starting point:** [Your First Program](/getting-started/first-program) and `examples/java-foundations`.
+
+**Task:** limit quantity to 100 units per line. Accept 100 and reject 101. Preserve the price and overflow rules.
+
+**Pass:** add tests for both boundaries; demonstrate a failing test before your fix and a passing run afterward. Explain the difference between a compiler error and a runtime exception. Calculate a two-line cart on paper and compare it with the program.
+
+**If stuck:** change one input in `HelloBackend` first. Trace each condition and return value. Revisit methods and loops before adding a framework.
+
+<Accordion title="Review after attempting">
+The comparison should reject values greater than 100, not greater than or equal to 100. A check only in `main` does not protect callers that construct a line item elsewhere. Put the rule where the value is created and keep the existing invalid-input tests.
+</Accordion>
+
+## Assessment 1: explain a request and find a failure
+
+**Starting point:** a plain Java map of task IDs to task objects, plus [HTTP](/backend-basics/http-json-api).
+
+**Task:** implement create, lookup, and update in Java. Write an HTTP request and response for creating a task and reading an absent task. Explain what changes when the program restarts.
+
+**Pass:** a duplicate ID cannot silently overwrite a task; an absent ID has an explicit outcome; invalid updates preserve old data. Identify the method, path, headers, body, and status in your proposed HTTP exchange. Explain why a local method call alone is not an HTTP server.
+
+**If stuck:** practice a map lookup and a missing value in [Collections](/java/collections-exceptions). Draw client → server → storage → response before reading socket internals.
+
+## Assessment 2: build and test a Todo API
+
+**Starting point:** run `mvn -f examples/todo-api/pom.xml verify`, then `mvn -f examples/todo-api/pom.xml spring-boot:run` from the repository root. Follow the lab README for curl requests.
+
+**Task:** add a priority field with values 1 through 3 and a default of 2. Decide how an omitted value behaves on create and update. Add a new migration and update the request, entity, and response.
+
+**Pass:** valid requests persist priority; values 0 and 4 return 400 without changing rows; reading a created task returns the stored value; deleting it returns 204 and a later read returns 404. Re-run the existing lifecycle tests. Explain controller → service → repository and where the transaction ends.
+
+**If stuck:** trace the existing title field through those files. Read [Validation](/spring-boot/validation-errors) and [Transactions](/spring-boot/transactions). Do not add authentication until the CRUD behavior works.
+
+<Note>
+The checked-in starter uses H2 in memory. Its passing tests do not prove PostgreSQL behavior, persistence across restarts, or authorization. Those are the next gate.
+</Note>
+
+## Assessment 3: protect data and ownership
+
+**Starting point:** move the API to PostgreSQL, apply migrations, and use the [security guide](/spring-boot/spring-security-production). Start with a configured identity provider or a separately tested authentication implementation.
+
+**Task:** create Alice and Bob. Alice creates a private note. Try to read, change, and delete it as Bob, including a request that supplies Bob's own ID beside Alice's note ID.
+
+**Pass:** unauthorized operations leave Alice's data unchanged. Missing authentication returns 401. The chosen ownership policy consistently returns 403 or 404. Restart the app and show that the row remains. A failed multi-statement transaction leaves no partial data. Run these tests against PostgreSQL, not an H2 compatibility mode.
+
+**If stuck:** scope the database query to the authenticated owner. Review [locking and isolation](/database/locking-isolation) and [Testcontainers](/production/testcontainers). A mock authenticated user tests authorization rules; it does not validate JWT signatures.
+
+## Assessment 4: operate and recover a service
+
+**Starting point:** [Deployment Lab](/projects/deployment-lab), [Observability](/production/observability), and an isolated local database containing disposable test data.
+
+**Task:** create a backup, add a new record, and restore the backup into a separate database. Then simulate a stopped dependency and diagnose one failing request.
+
+**Pass:** verify row counts and selected records in the restored database. Explain why the record created after the backup is absent. Record recovery time and the data-loss window. Identify the failing dependency from logs/metrics, recover service, and prove recovery with a request. Keep credentials out of logs and evidence.
+
+**If stuck:** separate connection failure, authentication failure, and query failure. Follow [Incident Response](/production/incident-response). A successful backup command alone is not evidence that restoration works.
+
+## Assessment 5: handle concurrency and repeated delivery
+
+**Starting point:** [Transactions](/spring-boot/transactions), [Message Queues](/advanced/message-queues), and a PostgreSQL integration test.
+
+**Task:** run ten buyers against two units of stock. Deliver one business event twice. Force a failure after the database commit but before acknowledgment and retry delivery.
+
+**Pass:** exactly two reservations succeed and stock never becomes negative. All worker failures reach the test thread; waits have timeouts. Repeated delivery causes one committed business effect. Explain which operations are protected by the same database transaction and which external effects need provider idempotency or reconciliation.
+
+**If stuck:** test one atomic SQL update first, then concurrency. Test a deduplication constraint before adding Kafka. Do not assert HTTP status from a test that calls only a Java service method.
+
+<Accordion title="Review after attempting">
+Use independent transactions for concurrent callers. A test-wide transaction can hide seed data from worker connections. Observe every Future result. Acknowledging before commit can lose work; committing before acknowledgment permits redelivery, which the consumer must tolerate. A database marker alone cannot make an email or remote payment atomic.
+</Accordion>
+
+## Assessment 6: defend a system design
+
+**Starting point:** [System Design Fundamentals](/system-design/fundamentals) and [Capacity Estimation](/system-design/capacity-estimation).
+
+**Task:** design a URL shortener for a specified request rate, retention period, and availability target. Compare a single PostgreSQL service with a cached version. Prototype the assumption most likely to fail.
+
+**Pass:** show request/response contracts, schema/indexes, average and peak traffic with units, storage assumptions, failure behavior, and a rollback plan. Save measurements with dataset size, hardware, concurrency, and test duration. Then adapt the design to a cache outage and a tenfold traffic increase.
+
+**If stuck:** reduce the system to one request and one database query. A diagram containing many tools is not a capacity argument. Explain what your benchmark does not establish.
+
+## Keep the result honest
+
+Mark each gate as **not attempted**, **guided**, **independent**, or **reproduced later**. Link the evidence instead of checking a box based on reading. Ask another person to run your project using only its README; missing setup instructions are part of the result.
+
+Use the [Mastery Plan](/getting-started/mastery-plan) to choose the next exercise from the criterion you could not yet demonstrate.

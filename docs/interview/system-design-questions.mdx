@@ -1,181 +1,113 @@
 ---
-title: "System Design Questions"
-description: "Practice system design interview questions."
+title: "System Design Interview Questions"
+description: "The definitive technical question bank: deep system design questions asked by senior and staff interviewers on capacity estimation, distributed caching, event fan-out, and high-concurrency invariants."
 ---
 
-# System Design Questions
+# System Design Interview Questions
 
-System design interviews test structured thinking.
-
-Do not start by naming tools.
+Senior (L5) and Staff (L6) system design interviews do not evaluate whether you can draw arbitrary boxes and buzzword lines on a whiteboard. They evaluate your ability to **drive ambiguity to precision, size capacity constraints using physical hardware math, protect data invariants under concurrent write contention, anticipate distributed failure modes, and articulate nuanced architectural trade-offs**.
 
 <Tip>
-Looking for the step-by-step answering framework, back-of-the-envelope estimation formulas, and trade-off matrices? Review [System Design Answer Style](/interview/system-design-answers).
+Looking for complete, staff-level architectures, Mermaid sequence diagrams, concrete capacity estimation math, Redis Lua scripts, and database models for every question below? Review [System Design Interview Answers](/interview/system-design-answers).
 </Tip>
 
-Start by understanding the problem.
+---
 
-## Answer Format
+## 1. System Design Foundations & Capacity Estimation
 
-```text
-1. Clarify requirements
-2. Estimate scale
-3. Define APIs
-4. Design data model
-5. Draw high level architecture
-6. Explain read and write flows
-7. Find bottlenecks
-8. Add scaling ideas
-9. Discuss failures
-10. Explain tradeoffs
-```
+Interviewers ask foundational questions to ensure your high-level designs are grounded in physical hardware realities rather than wishful thinking.
 
-## Requirement Questions
+1. **The 45-Minute Interview Pacing Strategy**:
+   - Walk through the strict 5-phase pacing blueprint for a 45-minute technical system design interview:
+     - Phase 1: Clarification & Functional/Non-Functional Scoping (0–5m).
+     - Phase 2: Capacity Estimation & Scale Constraints (5–10m).
+     - Phase 3: High-Level Architecture & API Design (10–20m).
+     - Phase 4: Deep-Dive Component Bottlenecks & Mechanics (20–35m).
+     - Phase 5: Distributed Failures, Resiliency & Trade-Offs (35–45m).
+   - What critical mistake causes candidates to fail in Phase 1?
+2. **Back-of-the-Envelope Capacity Sizing**:
+   - Sizing an e-commerce platform with 20 million Daily Active Users (DAU) who generate an average of 5 views and 0.1 orders per day:
+     - What is the average read and write Queries Per Second (QPS)?
+     - If peak traffic is $5\times$ average, what is the peak QPS your edge gateways and databases must absorb?
+     - If each order record requires 2 KB of storage, what is the 5-year disk storage footprint factoring in a $3\times$ replication factor and $2\times$ index overhead?
+     - Using the 80/20 Pareto principle, how much RAM is required to cache the active daily working set?
+     - Using Little's Law ($L = \lambda \times W$), calculate the concurrent in-flight requests if average latency is 50ms at peak load.
+3. **The CAP vs PACELC Theorems**:
+   - Why is the popular phrase *"pick 2 out of 3 in CAP"* a fundamental architectural misunderstanding in modern cloud engineering?
+   - Explain the **PACELC** theorem: When there is a **Partition (P)**, how does your system trade **Availability (A)** vs **Consistency (C)**? **Else (E)** under normal operation, how does your system trade **Latency (L)** vs **Consistency (C)**?
 
-Ask:
+---
 
-- who uses this?
-- how many users?
-- read-heavy or write-heavy?
-- does data need to be strongly consistent?
-- what latency is acceptable?
-- do we need analytics?
-- what happens when dependencies fail?
-- what is out of scope?
+## 2. High-Throughput Edge & Routing Architecture
 
-## Beginner Designs
+1. **Design a Distributed Rate Limiter**:
+   - Compare the four core rate-limiting algorithms: **Token Bucket**, **Leaky Bucket**, **Fixed Window Counter**, and **Sliding Window Counter**.
+   - Why does a naive `GET`-then-`SET` in Redis suffer from critical race conditions under multi-threaded concurrency?
+   - How do you implement a distributed sliding window rate limiter using an **atomic Redis Lua script**?
+   - In a multi-region deployment, how do you handle Redis outages: when should an API **fail-open** vs **fail-closed**?
+2. **Design a Global URL Shortener (TinyURL)**:
+   - System scale: 100M new URLs created per month, 100:1 read-to-write ratio, 5-year retention.
+   - What length must the short hash code be when using **Base62 encoding** (`[a-zA-Z0-9]`), and how many unique URLs does a 7-character code support ($62^7 \approx 3.5 \times 10^{12}$)?
+   - How do you generate unique short codes without collision hazards:
+     - MD5/SHA-256 hash truncation with collision probing vs
+     - Dedicated Distributed Range Token Servers (ZooKeeper/etcd) vs
+     - Centralized 64-bit auto-incrementing Snowflake ID generators?
+   - What is the architectural difference between returning **HTTP 301 Moved Permanently** vs **HTTP 302 Found**, and which one preserves click analytics?
 
-Design these first:
+---
 
-- Todo API
-- Notes API
-- Blog API
-- File upload service
-- URL shortener
-- Rate limiter
+## 3. Asynchronous Streaming & Event-Driven Systems
 
-For each one, include:
+1. **Design a Real-Time Multi-Channel Notification Platform**:
+   - The platform must ingest 50,000 events/second and dispatch via Email (SendGrid), SMS (Twilio), and Mobile Push (APNs/FCM).
+   - How do you design an asynchronous decoupled pipeline using Apache Kafka to isolate third-party vendor latency stalls from the caller?
+   - How do you guarantee **strict per-user notification ordering** while scaling consumer instances horizontally?
+   - How do you prevent duplicate notification delivery when network timeouts cause upstream retries (idempotent consumers with deduplication tables)?
+   - How do you design multi-tier non-blocking retry topics (`topic.retry-1m`, `topic.retry-10m`, `topic.DLT`) to prevent head-of-line partition blocking?
+2. **Design an Idempotent Webhook Delivery Engine**:
+   - Your SaaS platform must dispatch transactional webhooks to thousands of customer endpoints with at-least-once delivery guarantees.
+   - How do you sign webhook payloads using constant-time `HMAC-SHA256` signatures (`MessageDigest.isEqual`) to prevent timing attacks?
+   - How do you protect worker thread pools from slow or malicious customer servers taking 30 seconds to acknowledge webhooks (bulkheads, short connection/read timeouts)?
+   - What exponential backoff with full jitter retry schedule should be applied before routing failed payloads to an inspection dead-letter queue?
 
-- APIs
-- tables
-- validation rules
-- error responses
-- pagination
-- basic deployment
+---
 
-## Intermediate Designs
+## 4. Distributed Storage, Partitioning & Consensus
 
-- Notification system
-- Chat backend
-- Food delivery backend
-- E-commerce checkout
-- Payment callback system
-- Search API
-- Audit log system
+1. **Design a Distributed 64-Bit Unique ID Generator (Snowflake)**:
+   - Why do UUIDv4 identifiers cause severe B+Tree index fragmentation, page splits, and cache bloat in high-throughput PostgreSQL tables?
+   - Deconstruct the 64-bit layout of a Twitter Snowflake ID:
+     - 1 sign bit (0)
+     - 41 bits timestamp (69 years epoch)
+     - 10 bits machine/datacenter ID ($1,024$ nodes)
+     - 12 bits sequence number ($4,096$ IDs/millisecond/node).
+   - What happens when a server's physical clock experiences **backward clock drift** due to Network Time Protocol (NTP) synchronization, and how do you protect against duplicate ID generation?
+2. **Design a Distributed Key-Value Store (Dynamo / Cassandra style)**:
+   - How does **Consistent Hashing with Virtual Nodes (Vnodes)** solve the hot-shard / uneven data distribution problem when nodes join or leave?
+   - What is the mathematical relationship for **Tunable Quorums** ($W + R > N$), and why does configuring $W = \text{Quorum}$ and $R = \text{Quorum}$ guarantee strong read-your-writes consistency?
+   - How do **Sloppy Quorums with Hinted Handoff** maintain write availability during temporary network partitions?
+   - How do **Merkle Trees** enable anti-entropy background synchronization with $O(\log N)$ network bandwidth?
+3. **Design a Search Autocomplete Service**:
+   - System scale: 50M DAU, 2.5B searches/day, sub-30ms p99 response time.
+   - Why is querying PostgreSQL `LIKE 'prefix%'` an anti-pattern at this scale?
+   - How do you design an in-memory **Trie** structure that stores top-$K$ cached search terms at each prefix node?
+   - How do you build an offline data pipeline (Spark / Kafka) to update term frequencies without stalling real-time search queries?
 
-For each one, include:
+---
 
-- queue or no queue decision
-- consistency model
-- retry behavior
-- idempotency
-- observability
-- failure handling
+## 5. High-Concurrency Transactional State & Invariants
 
-## Advanced Designs
-
-- Video streaming backend
-- High scale logging system
-- Distributed rate limiter
-- Multi-region URL shortener
-- Payment system
-- Feature flag system
-- Metrics collection system
-
-For each one, include:
-
-- capacity estimates
-- partitioning or sharding
-- cache strategy
-- data retention
-- disaster recovery
-- operational risks
-
-## Example: URL Shortener Checklist
-
-Your answer should include:
-
-- create short URL API
-- redirect API
-- short code generation
-- collision handling
-- database schema
-- cache for redirects
-- async click analytics
-- abuse protection
-- Redis failure behavior
-
-Weak answer:
-
-```text
-Use database and Redis.
-```
-
-Strong answer:
-
-```text
-Redirect path is read-heavy, so I cache shortCode to longUrl in Redis.
-If Redis misses, I read database and refill cache.
-Click analytics goes to queue so redirect stays fast.
-Short code has unique constraint to handle collisions safely.
-```
-
-## Example: Notification System Checklist
-
-Your answer should include:
-
-- event shape
-- queue
-- worker
-- templates
-- preferences
-- provider integration
-- retry with backoff
-- dead letter queue
-- delivery status
-- duplicate prevention
-
-## Example: E-commerce Checkout Checklist
-
-Your answer should include:
-
-- cart validation
-- inventory safety
-- order transaction
-- payment pending state
-- payment callback
-- idempotency key
-- order status transitions
-- notification event
-- observability
-- rollback thinking
-
-## Practice Routine
-
-For every design:
-
-```text
-10 minutes requirements
-10 minutes API and data model
-10 minutes high level design
-10 minutes bottlenecks and failures
-10 minutes explain tradeoffs
-```
-
-Record yourself answering.
-
-If the answer has no numbers, add estimates.
-
-If the answer has no failures, add failure handling.
-
-If the answer has only tools, explain why each tool is needed.
+1. **Design an E-Commerce Flash Sale Inventory Reservation Service**:
+   - Contention: 1,000 units of a flagship smartphone are released to 100,000 concurrent buyers at 12:00:00.
+   - What catastrophic failure occurs if the backend executes:
+     `SELECT stock FROM products WHERE id = 1` followed by `if (stock > 0) UPDATE products SET stock = stock - 1`?
+   - Compare the three concurrency isolation strategies:
+     1. Optimistic Locking (`@Version`): why does it suffer a 99% rollback abort rate during flash sales?
+     2. Pessimistic Row Locking (`SELECT ... FOR UPDATE`): why does it cause thread pool exhaustion and connection timeouts?
+     3. Atomic In-Place SQL Updates (`UPDATE products SET stock = stock - 1 WHERE id = 1 AND stock >= 1`): why does it maximize throughput while preventing negative inventory?
+   - How do you decouple inventory reservation from database writes using an in-memory Redis cluster with atomic Lua scripts?
+2. **Design an Immutable Financial Double-Entry Ledger**:
+   - Core invariant: Money can neither be created nor destroyed; the sum of debits must strictly equal the sum of credits for every transaction.
+   - Why must financial balances never be stored as an editable `balance` column on an `accounts` table?
+   - Design an append-only schema using `ledger_entries` with immutable `DEBIT` and `CREDIT` legs.
+   - How do you use distributed locking with **Martin Kleppmann's Fencing Tokens** to ensure that long JVM GC pauses cannot cause split-brain double-spending?

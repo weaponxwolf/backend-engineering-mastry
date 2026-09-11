@@ -60,12 +60,9 @@ public interface NoteRepository extends JpaRepository<Note, Long> {
 }
 ```
 
-This means:
-
-```text
-Repository manages Note entities.
-Note primary key is Long.
-```
+This declaration specifies:
+- The repository manages `Note` domain entities.
+- The `Note` entity primary key ID type is `Long`.
 
 ## Streams
 
@@ -213,11 +210,9 @@ Keep request data in method parameters and local variables.
 
 Important areas:
 
-```text
-Heap    objects
-Stack   method calls and local variables
-Metaspace class metadata
-```
+- **Heap**: Dynamic object instances and array allocations.
+- **Stack**: Method call frames, primitive parameters, and local object references.
+- **Metaspace**: Native memory holding class metadata, bytecode, and method tables.
 
 Garbage collector removes unused objects.
 
@@ -227,12 +222,10 @@ Memory leaks happen when objects stay referenced forever.
 
 Common backend leak:
 
-```text
-static map keeps growing
-cache without max size
-listener not removed
-large file loaded fully into memory
-```
+- Unbounded static collection (`static Map<K, V>`) continually accumulating objects without eviction.
+- In-memory cache without TTL or maximum entry capacity limits.
+- Unregistered event listeners or thread-local variables in pooled worker threads.
+- Loading an entire multi-gigabyte file into memory instead of streaming chunks.
 
 ## Date And Time
 

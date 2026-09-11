@@ -148,37 +148,35 @@ Senior interviewers will intentionally throw sudden constraints to test your men
 
 ## 4. Top 10 Red Flags That Fail Senior Candidates
 
-```text
-1. The Premature Technology Jumper:
+1. **The Premature Technology Jumper**:
    Suggests Kafka, Cassandra, or Redis before understanding the data access pattern or QPS volume.
 
-2. The Distributed Monolith Builder:
+2. **The Distributed Monolith Builder**:
    Creates 15 microservices for a system with 50 QPS, introducing distributed transactions and network latency with zero justification.
 
-3. The Hand-Waver:
+3. **The Hand-Waver**:
    Uses buzzwords ("eventual consistency", "sharding", "machine learning") without knowing how they are implemented under the hood.
 
-4. The Silent Thinker:
+4. **The Silent Thinker**:
    Stares at the whiteboard for 4 minutes in silence without sharing their mental model or assumptions with the interviewer.
 
-5. The Over-Engineer:
+5. **The Over-Engineer**:
    Architects a globally distributed, multi-region active-active cluster for an internal company employee directory.
 
-6. The Happy-Path Architect:
+6. **The Happy-Path Architect**:
    Designs a system assuming the network never drops packets, third-party APIs never fail, and disks never fill up.
 
-7. The Single Point of Failure (SPOF) Ignorer:
+7. **The Single Point of Failure (SPOF) Ignorer**:
    Leaves single primary databases or single master orchestrators without failover automation or replication.
 
-8. The Floating-Point Offender:
+8. **The Floating-Point Offender**:
    Uses `float` or `double` when designing financial payment or wallet balances.
 
-9. The Clock Synchronizer:
+9. **The Clock Synchronizer**:
    Relies on system clocks (`System.currentTimeMillis()`) across distributed nodes to determine exact event ordering.
 
-10. The Defensive Debater:
-   Refuses to accept interviewer hints or becomes defensive when an interviewer points out an architectural flaw.
-```
+10. **The Defensive Debater**:
+    Refuses to accept interviewer hints or becomes defensive when an interviewer points out an architectural flaw.
 
 ---
 

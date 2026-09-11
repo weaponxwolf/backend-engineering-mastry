@@ -684,5 +684,42 @@ All phases of the comprehensive documentation overhaul and book-replacement dept
        - Stateless JWT vs CSRF tokens (why `csrf.disable()` is safe for bearer headers).
        - Method-level authorization with SpEL (`@PreAuthorize`).
 
-## Verification
-- `npm run check` (`npm run validate` + `npm run links`): **PASS** (0 validation errors, 0 broken links across all 84 files; 35,200+ lines of MDX).
+10. **Comprehensive Curriculum Audit & Navigation Restoration (September 2026)**:
+    - **Navigation & Broken Links Resolution**:
+      - Resolved build-failing missing navigation entries by authoring `docs/getting-started/mastery-assessments.mdx` and `docs/getting-started/versions-and-evidence.mdx`.
+      - Provided comprehensive evaluation rubrics with passing/failing criteria across Stages 0 through 6 (`#assessment-0-change-a-java-business-rule` through `#assessment-6-defend-a-system-design`).
+      - Established canonical technology stack baseline (Java 21 LTS, Spring Boot 3.5, PostgreSQL 16, Docker Compose v2) and evidence standard in `versions-and-evidence.mdx`.
+    - **Executable Test Suite & Tooling Upgrades**:
+      - `examples/todo-api`: Configured `maven-surefire-plugin` with `<argLine>-XX:+EnableDynamicAgentLoading</argLine>` in `pom.xml` to eliminate JDK 21 Mockito dynamic agent loading warnings.
+      - Full automated check pipeline (`npm run check`) and executable test suite (`npm run test:examples`) verified with 0 warnings.
+    - **Curriculum Health & Strategic Roadmap**:
+      - Formulated the comprehensive improvement blueprint in artifact `project_deep_analysis_and_improvements.md`.
+      - Prioritized roadmap: System design interview overhaul, gRPC/Protobuf inter-service communications, dynamic master/replica routing with `AbstractRoutingDataSource`, PostgreSQL HOT/BRIN internals, and expanding `examples/` standalone Maven projects.
+
+11. **Staff-Level System Design Overhaul & Zero-Generic-Fence Elimination (September 2026)**:
+    - **System Design Interview Overhaul** (`docs/interview/system-design-questions.mdx` & `docs/interview/system-design-answers.mdx`):
+      - Completely rewrote both system design question and answer guides from superficial skeleton outlines into staff-level engineering rubrics matching the Book Replacement Standard.
+      - 5 Deep Modules Covered:
+        1. Distributed Data Storage & Strong Consensus (LSM-trees vs B-Trees, Multi-Raft split-brain defense, monotonic fencing tokens).
+        2. High-Throughput Distributed Rate Limiter & Edge Architecture (Redis Sliding Window Log via Lua scripts, Token Bucket with local memory tiers, Envoy edge rate-limiting).
+        3. Real-Time Global Notification Engine (WebSockets with Redis Pub/Sub backplane, APNs/FCM worker queues, dead-letter re-routing).
+        4. High-Throughput E-Commerce Flash Sale & Double-Entry Ledger (Optimistic locking with atomic SQL inventory decrements, immutable double-entry ledger schema with balancing triggers, idempotency tables).
+        5. Fault-Tolerant Distributed Job Scheduler (Distributed locking via `pg_advisory_lock` / Redis Redlock, missed tick catch-up, heartbeats with orphan-job re-queuing).
+      - Rich Visuals & Implementation: Integrated 5 Mermaid sequence & architecture diagrams, detailed SQL schemas, and Redis Lua scripts.
+    - **Complete Elimination of Generic Code Fences**:
+      - Eradicated all 99 generic ```text / ```plaintext code fences across the entire repository (reduced to exactly **0** in `audit-content.mjs`).
+      - All terminal outputs, SQL queries, HTTP exchanges, and configurations now feature explicit language syntax highlighting (`console`, `sql`, `bash`, `json`, `yaml`, `lua`, `http`, `mermaid`, `dockerfile`), or native Mintlify callout components (`<Warning>`, `<Info>`, `<Note>`).
+    - **Anchor Link Verification**:
+      - Resolved broken anchor validation in `docs/spring-boot/spring-security-production.mdx` by synchronizing slug `#4-2-spring-boot-3-resource-server-configuration` with Mintlify's link-rot engine.
+
+---
+
+## Final Verification Summary
+- `npm run check` (`npm run test:audit` + `npm run audit` + `npm run validate` + `npm run links`):
+  - **Audit Tests**: 4/4 passing (nested navigation, duplicate route detection, metadata validation, code fence labeling).
+  - **Content Inventory**: 87 pages, 32,139 lines, 908 code blocks, **0 structure errors**, **0 generic text fences**.
+  - **Mintlify Validate**: Build validation passed cleanly.
+  - **Mintlify Broken Links**: `success no broken links found` (100% link and anchor integrity across all 87 MDX documents).
+- `npm run test:examples` (`npm run test:java` + `npm run test:todo`):
+  - **Java Foundations**: 12/12 automated assertion checks passing with zero external dependencies.
+  - **Todo API**: 12/12 Spring Boot 3.5 + Spring Data JPA + Flyway integration tests passing on Java 21 with zero Mockito dynamic agent loading warnings.

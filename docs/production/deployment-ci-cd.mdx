@@ -291,7 +291,7 @@ flowchart LR
   <Accordion title="2. Why should database migrations run in a pre-deployment Kubernetes Job instead of Spring Boot startup?">
     Running migrations inside Spring Boot startup means every starting pod attempts to execute migrations simultaneously. In a cluster of 10 or 20 pods, this creates intense lock contention on the `flyway_schema_history` table and risks table deadlocks. 
     
-    Furthermore, if a migration fails, the pod crashes after holding startup resources. Running Flyway as an isolated pre-deployment Kubernetes Job guarantees that migrations execute exactly once, sequentially, before any new application pods boot. If the migration fails, the pipeline aborts before the application deployment begins.
+    Furthermore, if a migration fails, the pod crashes after holding startup resources. A dedicated migration Job separates schema changes from application startup, but a Kubernetes Job may start the same program more than once. Retain Flyway locking and schema history, keep migrations restart-safe, and make the pipeline wait for successful Job completion before deploying application pods. Abort the rollout on failure. See [Kubernetes Job execution semantics](https://kubernetes.io/docs/concepts/workloads/controllers/job/).
   </Accordion>
 
   <Accordion title="3. What are DORA metrics, and why are they important?">
@@ -313,7 +313,7 @@ flowchart LR
   <Accordion title="5. Why should container images be tagged with Git commit SHAs rather than :latest?">
     The `:latest` tag is mutable and non-deterministic. If three pods restart at different times, they may pull different underlying image layers depending on what was pushed to the registry, causing a single deployment to run conflicting code versions simultaneously. 
     
-    Tagging with immutable Git commit SHAs (e.g. `ghcr.io/org/app:a7f3b8c`) guarantees 100% reproducibility: you know the exact source code commit running in every pod, enabling straightforward auditing and deterministic rollbacks.
+    A Git SHA tag helps trace an image to source, but tags can still be overwritten unless the registry enforces immutability. Deploy by image digest to identify the exact artifact. Reproducible builds also require controlled dependencies, base images, and build inputs. See [Kubernetes image tags and digests](https://kubernetes.io/docs/concepts/containers/images/).
   </Accordion>
 </AccordionGroup>
 

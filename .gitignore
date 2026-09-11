@@ -8,3 +8,7 @@ out/
 dist/
 build/
 .DS_Store
+
+# Compiled Java lab artifacts
+**/target/
+*.class

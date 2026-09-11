@@ -273,12 +273,11 @@ sequenceDiagram
 ### The Doctor On-Call Dilemma
 Write Skew occurs when two concurrent transactions read overlapping data, verify a global business rule, make separate updates to **different rows**, and both commit, destroying system integrity.
 
-```text
-Business Invariant: At least 1 doctor must be on-call at all times.
-Initial State:
-Doctor Alice: On-Call = TRUE
-Doctor Bob:   On-Call = TRUE
-```
+> [!IMPORTANT]
+> **Business Invariant**: At least 1 doctor must be on-call at all times.
+> - **Initial State**:
+>   - Dr. Alice: `on_call = TRUE`
+>   - Dr. Bob: `on_call = TRUE`
 
 ```mermaid
 sequenceDiagram

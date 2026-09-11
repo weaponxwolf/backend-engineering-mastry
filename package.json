@@ -4,11 +4,17 @@
   "private": true,
   "description": "Beginner to advanced backend engineering docs for Java, Spring Boot, databases, microservices, and system design.",
   "scripts": {
-    "dev": "cd docs && npx mintlify dev",
-    "validate": "cd docs && npx mintlify validate",
-    "links": "cd docs && npx mintlify broken-links",
-    "check": "npm run validate && npm run links",
-    "export": "cd docs && npx mintlify export"
+    "dev": "cd docs && mintlify dev",
+    "validate": "cd docs && mintlify validate",
+    "links": "cd docs && mintlify broken-links --check-anchors --check-redirects",
+    "audit": "node scripts/audit-content.mjs",
+    "test:audit": "node --test scripts/audit-content.test.mjs",
+    "test:java": "bash examples/java-foundations/run.sh",
+    "test:todo": "mvn -B -ntp -f examples/todo-api/pom.xml verify",
+    "test:examples": "npm run test:java && npm run test:todo",
+    "check": "npm run test:audit && npm run audit && npm run validate && npm run links",
+    "export": "cd docs && mintlify export",
+    "links:external": "cd docs && mintlify broken-links --check-external"
   },
   "keywords": [
     "spring-boot",
@@ -18,5 +24,8 @@
     "docs",
     "mintlify"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "mintlify": "4.2.885"
+  }
 }

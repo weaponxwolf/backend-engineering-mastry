@@ -1,273 +1,389 @@
 ---
-title: "System Design Answer Style"
-description: "Answer system design interviews with structure and tradeoffs."
+title: "System Design Interview Answers"
+description: "Comprehensive, production-tested answers for staff-level system design interview questions covering capacity estimation, distributed rate limiting, URL shortening, notifications, and flash-sale inventory."
 ---
 
-# System Design Answer Style
-
-System design interviews test thinking.
-
-They are not only about drawing boxes.
-
-Your answer should show structure, numbers, tradeoffs, and failure handling.
-
-## Golden Format
-
-```text
-1. Clarify requirements
-2. Define functional requirements
-3. Define non-functional requirements
-4. Estimate scale
-5. Design APIs
-6. Design data model
-7. Explain high-level architecture
-8. Walk through read/write flows
-9. Identify bottlenecks
-10. Add scaling and reliability
-11. Discuss failures
-12. Explain tradeoffs
-```
-
-## Requirement Questions
-
-Ask before designing:
-
-```text
-How many users?
-Read-heavy or write-heavy?
-What latency is acceptable?
-Does data need strong consistency?
-Do we need analytics?
-Do we need authentication?
-What is out of scope?
-What happens when a dependency fails?
-```
-
-## How To Use Numbers
-
-Say rough estimates out loud.
-
-Example:
-
-```text
-If we have 100 million redirects per day, average RPS is 100 million divided by 86,400, about 1,160 RPS. Peak may be 10x, around 11,600 RPS.
-```
-
-Then use the number:
-
-```text
-Because redirect is read-heavy, I will cache popular short codes in Redis.
-```
-
-Numbers should affect design.
-
-## URL Shortener Model Answer
-
-Requirements:
-
-```text
-Create short URL, redirect, custom alias, click analytics, low latency redirect.
-```
-
-APIs:
-
-```text
-POST /api/urls
-GET /{shortCode}
-```
-
-Data:
-
-```text
-short_urls(id, short_code, long_url, user_id, expires_at, created_at)
-click_events(id, short_code, clicked_at, ip, user_agent)
-```
-
-Design:
-
-```text
-Create API writes to database with unique short_code.
-Redirect API checks Redis first, database on miss, then returns 302.
-Analytics event goes to queue so redirect stays fast.
-```
-
-Failure:
-
-```text
-If Redis is down, fallback to database.
-If analytics queue is down, redirect still works but log and alert.
-```
-
-Tradeoff:
-
-```text
-Cache improves latency but needs expiry and invalidation for disabled links.
-```
-
-## Rate Limiter Model Answer
-
-Requirements:
-
-```text
-Limit by user or IP. Return 429. Work across multiple servers.
-```
-
-Design:
-
-```text
-Use Redis because all API servers can share counters.
-Use atomic Lua script to increment and check count.
-Key includes route, identity, and time window.
-```
-
-Response:
-
-```http
-HTTP/1.1 429 Too Many Requests
-Retry-After: 30
-X-RateLimit-Limit: 100
-X-RateLimit-Remaining: 0
-```
-
-Failure:
-
-```text
-For normal read APIs, fail open if Redis is down.
-For login, fail closed or use stricter fallback because abuse risk is high.
-```
-
-Tradeoff:
-
-```text
-Fixed window is simple but allows boundary bursts. Sliding window is more accurate but costs more memory and work.
-```
-
-## Notification System Model Answer
-
-Requirements:
-
-```text
-Send email, SMS, push. Use templates. Respect preferences. Retry failures. Store delivery status.
-```
-
-Design:
-
-```text
-Main API publishes event to queue.
-Worker consumes event, checks idempotency, loads preferences, renders template, calls provider, stores status.
-```
-
-Failure:
-
-```text
-Temporary provider failure retries with backoff.
-Permanent failure goes to DLQ.
-Duplicate event is ignored using event_id unique constraint.
-```
-
-Tradeoff:
-
-```text
-Queue adds delay but improves reliability and keeps main API fast.
-```
-
-## E-commerce Checkout Model Answer
-
-Requirements:
-
-```text
-User can place order from cart. Inventory cannot go below zero. Payment callback can repeat. Order history must be secure.
-```
-
-Design:
-
-```text
-Checkout validates cart, creates order, creates order items, reserves inventory, and creates pending payment in a transaction.
-Payment callback verifies provider signature and updates payment/order idempotently.
-```
-
-Data:
-
-```text
-orders
-order_items
-inventory
-payments
-cart_items
-```
-
-Failure:
-
-```text
-If payment fails, order moves to PAYMENT_FAILED and inventory may be released.
-If notification fails, order still remains paid and notification retries async.
-```
-
-Tradeoff:
-
-```text
-Keeping it as modular monolith first simplifies transactions. Microservices can come later when team and scale justify the complexity.
-```
-
-## Strong Tradeoff Language
-
-Use sentences like:
-
-```text
-I would start simple with PostgreSQL because current write scale is low.
-```
-
-```text
-I would add Redis only for the read-heavy redirect path.
-```
-
-```text
-I would make analytics asynchronous because it should not slow user-facing redirect.
-```
-
-```text
-I would avoid microservices at first because distributed transactions and observability add complexity.
-```
-
-## Common Mistakes
-
-- Starting with tools before requirements
-- No numbers
-- No data model
-- No API design
-- No failure handling
-- No tradeoffs
-- Saying "use cache" without invalidation plan
-- Saying "use queue" without idempotency
-- Saying "use microservices" without data ownership
-
-## Practice
-
-For every system design answer, write:
-
-- one scale estimate
-- two APIs
-- three tables
-- one cache decision
-- one queue decision
-- two failure cases
-- two tradeoffs
-
-If your answer cannot do this, it is not ready.
-
-## Explore System Design Case Studies
-
-<CardGroup cols={2}>
-  <Card title="URL Shortener" icon="link" href="/system-design/url-shortener">
-    Deep dive into Base62 encoding, Redis caching, and low-latency redirect flows.
-  </Card>
-  <Card title="Rate Limiter" icon="shield-halved" href="/system-design/rate-limiter">
-    Token Bucket, Sliding Window Log, and distributed Redis Lua scripts.
-  </Card>
-  <Card title="Notification System" icon="bell" href="/system-design/notification-system">
-    Idempotent async message queues, worker groups, and retry DLQ pipelines.
-  </Card>
-  <Card title="System Design Questions" icon="messages-square" href="/interview/system-design-questions">
-    Practice answering structured system design questions.
-  </Card>
-</CardGroup>
+# System Design Interview Answers
+
+In Senior (L5) and Staff (L6) system design interviews, hand-waving abstractions will get you rejected. Interviewers look for **structural clarity, capacity calculations grounded in hardware physics, distributed failure awareness, and nuanced articulation of engineering trade-offs**.
+
+<Tip>
+Use the **Senior Design Formula**:
+1. **Scope & Capacity Math**: Numbers with explicit units and working set estimates.
+2. **High-Level Topology**: Clean separation of stateless compute and partitioned state.
+3. **Deep-Dive Mechanics**: Exact Redis Lua scripts, database schemas, and protocols.
+4. **Failure Modes & Edge Cases**: Clock drift, split-brain, network timeouts, and thundering herds.
+5. **Trade-Offs**: Latency vs Consistency, Cost vs Complexity.
+</Tip>
+
+---
+
+## 1. System Design Foundations & Capacity Estimation
+
+<AccordionGroup>
+  <Accordion title="1. Walk through the 45-minute interview pacing strategy and the fatal Phase 1 trap">
+    - **The 5-Phase 45-Minute Blueprint**:
+      1. **Phase 1: Scope & Clarification (0–5m)**:
+         - Define functional requirements (2–3 core features max; e.g., "shorten URL" and "redirect").
+         - Clarify non-functional SLAs: latency (p99 < 50ms), availability (99.99%), consistency (read-your-writes vs eventual).
+         - Identify what is explicitly out of scope (e.g., custom domain routing or enterprise analytics).
+      2. **Phase 2: Capacity Estimation & Scale Constraints (5–10m)**:
+         - Estimate read/write QPS, peak multipliers, bandwidth, and 5-year storage footprint.
+         - Calculate RAM needed to cache the active daily working set (80/20 rule).
+      3. **Phase 3: High-Level Architecture & API Contracts (10–20m)**:
+         - Define core REST/gRPC contracts with status codes and DTO shapes.
+         - Draft high-level data models and draw the end-to-end request topology (CDN $\rightarrow$ Gateway $\rightarrow$ Service $\rightarrow$ Cache $\rightarrow$ DB).
+      4. **Phase 4: Deep-Dive Component Mechanics (20–35m)**:
+         - The interviewer selects 1–2 bottlenecks: partitioning keys, index selection, cache invalidation, or atomic race conditions.
+      5. **Phase 5: Failure Modes, Resiliency & Trade-Offs (35–45m)**:
+         - Proactively address: database failover, split-brain, network partitions, circuit breakers, and rate limiting.
+    - **The Fatal Phase 1 Trap**:
+      - Jumping directly to drawing microservices boxes and database schemas before clarifying requirements. A candidate who designs an elaborate multi-region sharded database for a system with only 50 QPS demonstrates poor engineering judgment and wastes interview time.
+  </Accordion>
+
+  <Accordion title="2. Step-by-step capacity estimation for an e-commerce platform with 20M DAU">
+    - **Input Parameters**:
+      - 20 Million Daily Active Users (DAU).
+      - Average user actions/day: 5 page views (reads), 0.1 orders placed (writes).
+      - Peak traffic multiplier: $5\times$ average.
+      - Order record size: 2 KB.
+    - **Step 1: Throughput (QPS)**:
+      - **Reads**:
+        $$\text{Daily Reads} = 20\text{M} \times 5 = 100\text{M requests/day}$$
+        $$\text{Average Read QPS} = \frac{100{,}000{,}000}{86{,}400\text{ s}} \approx 1{,}160\text{ QPS}$$
+        $$\text{Peak Read QPS} = 1{,}160 \times 5 \approx 5{,}800\text{ QPS}$$
+      - **Writes (Orders)**:
+        $$\text{Daily Writes} = 20\text{M} \times 0.1 = 2\text{M orders/day}$$
+        $$\text{Average Write QPS} = \frac{2{,}000{,}000}{86{,}400\text{ s}} \approx 23\text{ QPS}$$
+        $$\text{Peak Write QPS} = 23 \times 5 \approx 115\text{ QPS}$$
+    - **Step 2: 5-Year Storage Footprint**:
+      - Daily Raw Storage: $2\text{M orders} \times 2\text{ KB} = 4\text{ GB/day}$.
+      - Annual Raw Storage: $4\text{ GB} \times 365 \approx 1.46\text{ TB/year}$.
+      - 5-Year Raw Storage: $1.46\text{ TB} \times 5 = 7.3\text{ TB}$.
+      - Factoring Replication ($3\times$) and Index Overhead ($2\times$):
+        $$\text{Total 5-Year Storage} = 7.3\text{ TB} \times 3 \times 2 \approx 43.8\text{ TB}$$
+    - **Step 3: RAM Working Set (80/20 Rule)**:
+      - 20% of the daily traffic generates 80% of read volume.
+      - Daily Read Volume: $100\text{M reads} \times 2\text{ KB} = 200\text{ GB}$.
+      - Cache Size: $200\text{ GB} \times 0.20 = 40\text{ GB of RAM}$. A single Redis master-replica pair with 64 GB RAM easily accommodates this working set.
+    - **Step 4: Concurrency via Little's Law ($L = \lambda \times W$)**:
+      - Peak Inbound Arrival Rate ($\lambda$): $5{,}800\text{ req/sec}$.
+      - Target Average Latency ($W$): $50\text{ ms} = 0.05\text{ s}$.
+      - Concurrent In-Flight Connections: $L = 5{,}800 \times 0.05 = 290\text{ connections}$.
+      - **Conclusion**: Across 4 application instances, each Tomcat container handles $\approx 73$ active threads, easily supported within standard thread pool sizing ($200$ threads).
+  </Accordion>
+
+  <Accordion title="3. Deconstruct CAP vs PACELC theorems in modern cloud architectures">
+    - **Why 'Pick 2 out of 3' in CAP is a Myth**:
+      - In distributed physical networks, network partitions (**P**) are an unavoidable physical reality (fiber cuts, hardware switches crashing, AWS AZ packet loss). You cannot "choose" CA and opt out of partitions.
+      - When a partition occurs, a distributed system has exactly two options:
+        1. **CP (Consistency / Partition Tolerance)**: Reject writes or block callers to prevent stale/split-brain data (e.g., ZooKeeper, etcd, PostgreSQL primary-replica with synchronous replication).
+        2. **AP (Availability / Partition Tolerance)**: Accept writes on both sides of the partition, allowing inconsistent or stale reads that must be reconciled later (e.g., Amazon Dynamo, Apache Cassandra, DNS).
+    - **The PACELC Theorem (Daniel Abadi)**:
+      - CAP only describes behavior during rare network partitions. PACELC explains the trade-off that governs systems 99.9% of the time under **normal operations**:
+      - If **P** (Partition) $\rightarrow$ trade **A** (Availability) vs **C** (Consistency).
+      - **E**lse (Normal Operation) $\rightarrow$ trade **L** (Latency) vs **C** (Consistency).
+      - **Classification Examples**:
+        - **PC/EC** (e.g., Google Spanner, CockroachDB): Always linearizable consistency; incurs cross-datacenter round-trip latency under normal operation.
+        - **PA/EL** (e.g., Cassandra, DynamoDB with eventual consistency): Highly available during partitions; ultra-low latency reads/writes under normal operation because replication is asynchronous.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## 2. High-Throughput Edge & Routing Architecture
+
+<AccordionGroup>
+  <Accordion title="1. Design a Distributed Rate Limiter with Atomic Redis Lua Scripts">
+    - **Algorithm Trade-off Matrix**:
+      - **Token Bucket**: Refills tokens at constant rate; allows configurable bursts; ideal for user-facing REST APIs.
+      - **Leaky Bucket**: Processes requests at a fixed FIFO rate; smooths out bursts into constant egress; ideal for rate-limiting calls to third-party APIs (e.g., Stripe, Twilio).
+      - **Fixed Window Counter**: Divides time into fixed windows (e.g., 1 minute); vulnerable to $2\times$ burst traffic at window boundaries.
+      - **Sliding Window Counter**: Hybrid combining current window and previous window weighted counts; accurate within 99.9% with low memory ($O(1)$).
+    - **The Multi-Threaded Race Condition**:
+      - Executing `GET counter` followed by `if (counter < limit) SET counter (counter + 1)` in application code creates a critical race condition. 100 concurrent requests reading counter value `99` will all pass, exceeding the limit of `100`.
+    - **Atomic Redis Sliding Window Lua Script**:
+      ```lua
+      -- KEYS[1]: rate limit key (e.g., ratelimit:user:1042:orders)
+      -- ARGV[1]: window size in seconds (e.g., 60)
+      -- ARGV[2]: max allowed requests (e.g., 100)
+      -- ARGV[3]: current timestamp in milliseconds
+
+      local key = KEYS[1]
+      local window = tonumber(ARGV[1])
+      local limit = tonumber(ARGV[2])
+      local now = tonumber(ARGV[3])
+      local clearBefore = now - (window * 1000)
+
+      -- 1. Remove timestamps outside the sliding window
+      redis.call('ZREMRANGEBYSCORE', key, 0, clearBefore)
+
+      -- 2. Count requests in current sliding window
+      local currentCount = redis.call('ZCARD', key)
+
+      if currentCount < limit then
+          -- 3. Add current request timestamp to sorted set
+          redis.call('ZADD', key, now, now)
+          redis.call('EXPIRE', key, window)
+          return 1 -- ALLOWED
+      else
+          return 0 -- REJECTED (HTTP 429)
+      end
+      ```
+    - **Fail-Open vs Fail-Closed Policy**:
+      - **Fail-Open**: If the Redis rate limiter cluster crashes or experiences a network partition, user-facing read queries (`GET /v1/products`) bypass the limiter. Availability is preserved at the cost of downstream database load.
+      - **Fail-Closed**: Critical financial endpoints (`POST /v1/checkout`) and authentication routes (`POST /v1/login`) fail closed or fall back to local in-memory Guava rate limiters to prevent brute-force attacks and double-spending.
+  </Accordion>
+
+  <Accordion title="2. Design a Global URL Shortener (TinyURL)">
+    - **Core Math & Base62 Encoding**:
+      - Using characters `[0-9, a-z, A-Z]` ($10 + 26 + 26 = 62$ characters).
+      - A 7-character string supports $62^7 \approx 3.52 \text{ Trillion}$ unique URLs.
+      - At 100 Million new URLs created per month, $3.52\text{ Trillion}$ provides over **2,900 years** of capacity without recycling.
+    - **Short Code Generation Strategies**:
+      - **Option A: MD5 / Murmur3 Hash Truncation**: Hash the long URL and take the first 7 characters.
+        - *Problem*: High probability of hash collisions ($O(\sqrt{N})$ birthday paradox). Requires database lookups to check collisions, causing latency spikes.
+      - **Option B: Distributed Range Token Servers (ZooKeeper/etcd)**:
+        - A central coordinator hands out non-overlapping integer ranges (e.g., Node 1 gets 1–1,000,000, Node 2 gets 1,000,001–2,000,000).
+        - Worker nodes increment locally in memory and convert the 64-bit integer to Base62:
+          $$125 \rightarrow 62 \times 2 + 1 \rightarrow \text{'21'}$$
+        - *Result*: Zero collisions, zero database coordination per write, guaranteed $O(1)$ generation.
+    - **HTTP 301 vs HTTP 302 Redirection**:
+      - **HTTP 301 (Moved Permanently)**: Browsers cache the redirect locally. Subsequent clicks bypass the URL shortener entirely.
+        - *Trade-off*: Reduces shortener server load, but **breaks click analytics and geolocation tracking**.
+      - **HTTP 302 (Found / Temporary Redirect)**: Browsers send every click to the URL shortener first.
+        - *Trade-off*: Slightly higher server traffic, but allows accurate real-time analytics and link disabling.
+    - **Architecture Topology**:
+      ```mermaid
+      flowchart TD
+          Client -->|GET /xyz789| CDN["Cloudflare Edge CDN"]
+          CDN -->|Cache Miss| LB["Load Balancer"]
+          LB --> App["URL Service"]
+          App -->|1. Fast Lookup| Redis[("Redis Cache Cluster\n(LRU Eviction)")]
+          Redis -->|Hit| App
+          Redis -->|Miss: 2. Query DB| DB[("PostgreSQL\nshort_code UNIQUE INDEX")]
+          App -->|3. Async Click Event| Kafka["Kafka: click-events"]
+          Kafka --> Worker["Analytics Worker"]
+          Worker --> ClickHouse[(ClickHouse Analytics DB)]
+          App -->|HTTP 302 Location: target| Client
+      ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## 3. Asynchronous Streaming & Event-Driven Systems
+
+<AccordionGroup>
+  <Accordion title="1. Design a Real-Time Multi-Channel Notification Platform">
+    - **Architecture & Decoupling**:
+      ```mermaid
+      flowchart TD
+          Service["Upstream Service\n(Order / Auth)"] -->|Publish Event| Gateway["Notification Ingestion API"]
+          Gateway -->|Produce Message| Kafka["Kafka: notification-requests\nPartition Key = user_id"]
+          
+          subgraph Workers["Consumer Worker Pools"]
+              Kafka --> W1["Email Worker Pool\n(SendGrid API)"]
+              Kafka --> W2["SMS Worker Pool\n(Twilio API)"]
+              Kafka --> W3["Push Worker Pool\n(APNs / FCM)"]
+          end
+          
+          W1 --> Dedup[("PostgreSQL\nprocessed_notifications\nUNIQUE(idempotency_key)")]
+          W1 --> DLQ["Kafka: notification-dlq"]
+      ```
+    - **Strict Per-User Ordering**:
+      - Partition Kafka topics using the `user_id` as the message **Partition Key**.
+      - Kafka hashes keys using `murmur2(key) % num_partitions`. All notifications for a specific user land in the exact same partition.
+      - Because each partition is consumed by exactly one worker thread per consumer group, user notifications are processed in strict FIFO chronological order.
+    - **Deduplication & Idempotency Table**:
+      - When third-party providers experience timeouts, the consumer retries.
+      - The worker inserts into a deduplication table within a local database transaction:
+        ```sql
+        CREATE TABLE notification_dedup (
+            idempotency_key VARCHAR(128) PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            channel VARCHAR(32) NOT NULL,
+            status VARCHAR(32) NOT NULL,
+            sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        ```
+      - The worker executes:
+        ```sql
+        INSERT INTO notification_dedup (idempotency_key, user_id, channel, status)
+        VALUES ('ORD-9821-DELIVERED', 42, 'EMAIL', 'SENT')
+        ON CONFLICT (idempotency_key) DO NOTHING;
+        ```
+      - If the row already exists, the worker acknowledges the Kafka offset immediately without sending a duplicate email.
+    - **Non-Blocking Multi-Tier Retry Topics**:
+      - Naive consumers sleeping on failed messages block the entire Kafka partition (Head-of-Line blocking).
+      - Use Spring Kafka `DeadLetterPublishingRecoverer` with dedicated retry topics:
+        - `notifications` $\rightarrow$ fails $\rightarrow$ publish to `notifications.retry-1m`.
+        - `notifications.retry-1m` $\rightarrow$ fails $\rightarrow$ publish to `notifications.retry-10m`.
+        - `notifications.retry-10m` $\rightarrow$ fails $\rightarrow$ publish to `notifications.DLT` (Dead Letter Topic for human inspection).
+  </Accordion>
+
+  <Accordion title="2. Design an Idempotent Webhook Delivery Engine">
+    - **Cryptographic Security (HMAC-SHA256)**:
+      - The SaaS platform generates an asymmetric or shared secret per customer webhook subscription.
+      - Sign the payload using constant-time verification:
+        ```java
+        Mac hmac = Mac.getInstance("HmacSHA256");
+        hmac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+        byte[] signatureBytes = hmac.doFinal(payloadJson.getBytes(StandardCharsets.UTF_8));
+        String signature = HexFormat.of().formatHex(signatureBytes);
+        ```
+      - Receivers verify using constant-time comparison `MessageDigest.isEqual(sigA, sigB)` to eliminate side-channel timing attacks.
+    - **Worker Bulkheads & Timeout Isolation**:
+      - Slow or hanging customer endpoints must not exhaust backend dispatcher thread pools.
+      - Configure explicit timeouts on the pooled HTTP client:
+        - Connection Timeout: 1,500ms.
+        - Socket/Read Timeout: 3,000ms.
+      - Assign separate semaphore bulkheads per customer tenant (e.g., maximum 10 concurrent requests to `api.customer-a.com`), ensuring one slow customer cannot starve other customers' webhooks.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## 4. Distributed Storage, Partitioning & Consensus
+
+<AccordionGroup>
+  <Accordion title="1. Design a 64-Bit Distributed Unique ID Generator (Twitter Snowflake)">
+    - **Why UUIDv4 Destroys B+Tree Performance**:
+      - UUIDv4 values are completely random (e.g., `8f14e45f-...).
+      - In a PostgreSQL B+Tree primary key index, random insertions land across arbitrary 8 KB leaf pages throughout the multi-gigabyte tree.
+      - This forces constant **page splits**, dirty heap page writes, and cache thrashing.
+      - Snowflake IDs are **k-ordered (time-sortable)**: new IDs always append to the rightmost edge of the B+Tree leaf page, keeping the working set cached in RAM.
+    - **64-Bit Snowflake Bitwise Anatomy**:
+      ```binary
+      0 | 00000000000000000000000000000000000000000 | 00000 | 00000 | 000000000000
+      ^ |                    ^                        |   ^   |   ^   |      ^
+      Sign (1b)     Timestamp Delta (41b)            DC(5b) Node(5b)  Sequence(12b)
+      ```
+      - **Bit 0 (1 bit)**: Reserved sign bit (always `0` for positive long integers).
+      - **Bits 1–41 (41 bits)**: Epoch millisecond timestamp delta ($2^{41} \text{ ms} \approx 69 \text{ years}$).
+      - **Bits 42–46 (5 bits)**: Datacenter ID ($2^5 = 32$ datacenters).
+      - **Bits 47–51 (5 bits)**: Machine/Worker ID ($2^5 = 32$ workers per datacenter $\rightarrow 1,024$ nodes total).
+      - **Bits 52–63 (12 bits)**: Sequence counter ($2^{12} = 4,096$ IDs/millisecond/node $\rightarrow 4.096\text{M IDs/sec/node}$).
+    - **NTP Clock Backwards Drift Mitigation**:
+      - If Network Time Protocol (NTP) synchronizes the physical clock backwards, generating an ID with the new clock risks duplicate IDs.
+      - **Defense**:
+        ```java
+        if (currentTimestamp < lastTimestamp) {
+            long offset = lastTimestamp - currentTimestamp;
+            if (offset <= 5) {
+                // Short drift: sleep until clock catches up
+                Thread.sleep(offset);
+                currentTimestamp = System.currentTimeMillis();
+            } else {
+                // Severe drift: fail fast and sound alerts
+                throw new ClockDriftException("Clock moved backwards by " + offset + "ms");
+            }
+        }
+        ```
+  </Accordion>
+
+  <Accordion title="2. Design a Distributed Key-Value Store (Dynamo Style)">
+    - **Consistent Hashing with Virtual Nodes (Vnodes)**:
+      - Standard hashing `hash(key) % N` invalidates almost all keys when $N$ changes.
+      - Consistent hashing places nodes and keys on a circular $2^{32}-1$ integer ring. A key is assigned to the first node encountered clockwise.
+      - **Virtual Nodes**: Each physical machine hosts 256 virtual tokens distributed across the ring. This balances data uniformly and ensures that when a node fails, its load distributes evenly across all remaining peers rather than overloading one neighbor.
+    - **Tunable Quorums ($N, W, R$)**:
+      - $N$: Replication factor (typically 3 replicas).
+      - $W$: Write quorum (number of replicas that must acknowledge a write before returning success).
+      - $R$: Read quorum (number of replicas that must respond to a read).
+      - **Pigeonhole Principle**: If $W + R > N$, the read and write sets must overlap on at least one replica, guaranteeing strong **Linearizable / Read-Your-Writes Consistency**.
+      - **Sloppy Quorums & Hinted Handoff**: If primary replicas are unreachable due to a network partition, healthy nodes temporarily accept the write and store a "hint". Once the primary recovers, the hint is forwarded, maintaining write availability.
+    - **Anti-Entropy with Merkle Trees**:
+      - A Merkle Tree is a binary tree where parent nodes store cryptographic hashes of their child nodes.
+      - Replicas compare root hashes in $O(1)$ time. If root hashes match, data is synchronized. If they differ, nodes traverse down tree branches in $O(\log N)$ network calls to locate and repair only the divergent keys.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## 5. High-Concurrency Transactional State & Invariants
+
+<AccordionGroup>
+  <Accordion title="1. Design an E-Commerce Flash Sale Inventory Reservation Service">
+    - **The Fatal Check-Then-Act Concurrency Trap**:
+      ```java
+      // CATASTROPHIC ANTI-PATTERN: DO NOT USE IN PRODUCTION
+      Product product = productRepository.findById(1L);
+      if (product.getStock() > 0) {
+          product.setStock(product.getStock() - 1);
+          productRepository.save(product);
+      }
+      ```
+      - Under 50,000 concurrent requests, hundreds of threads read `stock = 1` simultaneously before any write commits. All 100 threads write `stock = 0`, selling 100 items when only 1 unit was in stock (massive overselling disaster).
+    - **Comparison of Concurrency Strategies**:
+      1. **Optimistic Locking (`@Version`)**:
+         - Uses a version column: `UPDATE products SET stock = ?, version = 2 WHERE id = 1 AND version = 1`.
+         - *Flash Sale Flaw*: Out of 10,000 concurrent requests attempting to update the same row, exactly 1 succeeds and 9,999 fail with `OptimisticLockingFailureException`. The 99.9% abort rate wastes CPU and destroys user experience.
+      2. **Pessimistic Locking (`SELECT ... FOR UPDATE`)**:
+         - Acquires an exclusive row lock in PostgreSQL.
+         - *Flash Sale Flaw*: 10,000 threads queue up in Tomcat and HikariCP waiting for the row lock. Active connections hit maximum pool size, and threads time out after 30 seconds (`CannotGetJdbcConnectionException`).
+      3. **Atomic In-Place SQL Update (The Production Standard)**:
+         ```sql
+         UPDATE products 
+         SET stock = stock - :quantityToReserve 
+         WHERE id = :productId AND stock >= :quantityToReserve;
+         ```
+         - Executed directly inside PostgreSQL: the database evaluates the condition atomically inside its row lock engine.
+         - If the update returns `1 row affected`, the reservation succeeded. If it returns `0 rows affected`, stock was exhausted.
+         - *Throughput*: Zero application thread holding locks; handles 5,000+ reservations/second on a single PostgreSQL primary.
+    - **Ultra-Scale In-Memory Decoupling (Redis Lua Script)**:
+      ```lua
+      -- Pre-allocate inventory into Redis cluster before flash sale
+      local currentStock = redis.call('GET', KEYS[1])
+      if currentStock and tonumber(currentStock) >= tonumber(ARGV[1]) then
+          redis.call('DECRBY', KEYS[1], ARGV[1])
+          return 1 -- RESERVATION GRANTED
+      else
+          return 0 -- SOLD OUT
+      end
+      ```
+      - Successful reservations are pushed to a Kafka topic for asynchronous asynchronous database persistence and payment processing.
+  </Accordion>
+
+  <Accordion title="2. Design an Immutable Financial Double-Entry Ledger">
+    - **The Immutable Ledger Invariant**:
+      - Balances must never be stored as an editable number in an account row. Updating a balance in place destroys auditability and allows silent data corruption.
+      - **Every financial movement is a balanced transaction consisting of at least two legs**:
+        - **DEBIT** increases asset/expense accounts.
+        - **CREDIT** increases liability/equity accounts.
+        - $\sum \text{Debits} \equiv \sum \text{Credits}$ for every transaction.
+    - **Database Schema**:
+      ```sql
+      CREATE TABLE ledger_transactions (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+          description TEXT NOT NULL,
+          posted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE ledger_entries (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          transaction_id UUID NOT NULL REFERENCES ledger_transactions(id),
+          account_id UUID NOT NULL REFERENCES accounts(id),
+          amount NUMERIC(19, 4) NOT NULL,
+          entry_type VARCHAR(10) NOT NULL CHECK (entry_type IN ('DEBIT', 'CREDIT')),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX idx_ledger_entries_account 
+      ON ledger_entries (account_id, created_at);
+      ```
+    - **Fencing Tokens Against Split-Brain Double-Spending**:
+      - If a service uses distributed locks (e.g., Redis `SETNX`) to coordinate balance validation, a long JVM GC pause can cause the lock lease to expire while the worker is paused.
+      - Once unpaused, the zombie worker attempts to write, unaware that another worker acquired the lock.
+      - **Defense (Martin Kleppmann's Fencing Tokens)**:
+        - The lock manager issues a monotonically increasing sequence token with every lock grant (e.g., Token 42).
+        - The database enforces that every write must supply a token strictly greater than the highest token previously written:
+          ```sql
+          UPDATE account_locks 
+          SET highest_fencing_token = 42 
+          WHERE account_id = 'ACC-100' AND highest_fencing_token < 42;
+          ```
+        - If the zombie worker with Token 41 attempts to write, the database rejects the statement, mathematically eliminating split-brain corruption.
+  </Accordion>
+</AccordionGroup>

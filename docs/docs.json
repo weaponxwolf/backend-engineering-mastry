@@ -15,14 +15,6 @@
   "search": {
     "prompt": "Search backend topic..."
   },
-  "navbar": {
-    "links": [
-      {
-        "label": "GitHub",
-        "href": "https://github.com/"
-      }
-    ]
-  },
   "navigation": {
     "tabs": [
       {
@@ -34,8 +26,11 @@
             "pages": [
               "index",
               "getting-started/how-to-use",
+              "getting-started/first-program",
               "getting-started/backend-roadmap",
               "getting-started/mastery-plan",
+              "getting-started/mastery-assessments",
+              "getting-started/versions-and-evidence",
               "getting-started/book-standard",
               "getting-started/curriculum-audit",
               "getting-started/simple-english-rule"
@@ -180,10 +175,5 @@
         ]
       }
     ]
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/"
-    }
   }
 }

@@ -49,7 +49,7 @@ If you copy the fat JAR directly (`COPY target/app.jar app.jar`), Docker invalid
 
 ### The Solution: Spring Boot Layered Extraction
 
-Spring Boot includes `layertools`, which unpacks the fat JAR into 4 distinct physical layers ordered by change frequency:
+Spring Boot 3.3 provides `jarmode=tools`. With `extract --layers`, it separates the archive for Docker layer reuse. The command and entry point below follow the [Spring Boot 3.3 Dockerfile layout](https://docs.spring.io/spring-boot/3.3/reference/packaging/container-images/dockerfiles.html). Older `layertools` examples use a different layout and launcher.
 
 ```mermaid
 flowchart TD
@@ -73,8 +73,8 @@ WORKDIR /builder
 ARG JAR_FILE=target/*.jar
 COPY ${JAR_FILE} application.jar
 
-# Spring Boot 3 layertools extraction command
-RUN java -Djarmode=tools -jar application.jar extract --destination extracted
+# Spring Boot 3.3 tools extraction, including layer directories
+RUN java -Djarmode=tools -jar application.jar extract --layers --destination extracted
 
 # ==========================================
 # STAGE 2: Minimal, Hardened Runtime Image
@@ -82,8 +82,8 @@ RUN java -Djarmode=tools -jar application.jar extract --destination extracted
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
 
-# Hardening Rule 1: Never run as root (UID 0) to prevent host kernel exploits
-RUN addgroup -S spring && adduser -S spring -G spring
+# Reduce privileges; this alone does not prevent container escape
+RUN addgroup -S -g 10001 spring && adduser -S -u 10001 spring -G spring
 USER spring:spring
 
 # Copy extracted layers in order of change frequency (Least frequent first)
@@ -100,8 +100,7 @@ ENTRYPOINT ["java", \
   "-XX:+UseContainerSupport", \
   "-XX:MaxRAMPercentage=75.0", \
   "-XX:+ExitOnOutOfMemoryError", \
-  "-Djava.security.egd=file:/dev/./urandom", \
-  "org.springframework.boot.loader.launch.JarLauncher"]
+  "-jar", "application.jar"]
 ```
 
 ---
@@ -138,12 +137,12 @@ flowchart TD
 If your Kubernetes container memory limit is `1Gi` and you configure `-Xmx1024m`, your JVM heap alone claims 100% of the container allowance. As soon as the JVM allocates Metaspace, threads, or Netty direct byte buffers, total memory reaches ~1.3GB, and the Linux kernel triggers an immediate **Exit Code 137 OOMKill**!
 </Warning>
 
-### 3.3 The Production Formula
+### 3.3 Choose a heap budget, then measure native memory
 Configure Java to automatically adapt to container limits:
-```text
+```bash
 -XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0
 ```
-This dynamically reserves 75% of container RAM for heap while leaving a generous 25% safety margin for thread stacks, Metaspace, and native memory allocations.
+For typical container sizes, `MaxRAMPercentage` helps size the maximum heap from the memory visible to the JVM. It does not reserve the remaining memory or cap total process usage. An explicit `-Xmx` overrides percentage-based maximum heap sizing. Start with a measured budget, then inspect container usage, threads, direct buffers, and native memory under load. Twenty-five percent may be insufficient. See [Java 21 memory options](https://docs.oracle.com/en/java/javase/21/docs/specs/man/java.html).
 
 ---
 
@@ -163,15 +162,14 @@ flowchart TD
 ### 4.1 The Fatal Liveness Probe Anti-Pattern
 A widespread production disaster is pointing Kubernetes `livenessProbe` directly at `/actuator/health`:
 
-```text
-The Self-Inflicted Cascading Outage Scenario:
-1. Under heavy load, PostgreSQL becomes slow or restarts.
-2. Spring Boot's /actuator/health check marks the status DOWN because the database connection timed out.
-3. The Kubernetes Liveness Probe detects DOWN and REBOOTS the container pod!
-4. All 20 application pods reboot simultaneously.
-5. While booting, all 20 pods hammer the database with new connection handshakes, keeping the database overloaded.
-Result: The entire cluster enters an unrecoverable restart crash loop!
-```
+> [!CAUTION]
+> **The Self-Inflicted Cascading Outage Scenario**:
+> 1. Under heavy load, PostgreSQL becomes slow or restarts.
+> 2. Spring Boot's `/actuator/health` check marks status `DOWN` because the database connection timed out.
+> 3. The Kubernetes Liveness Probe detects `DOWN` and **reboots the container pod**!
+> 4. All 20 application pods reboot simultaneously.
+> 5. While booting, all 20 pods hammer the database with new connection handshakes, keeping the database overloaded.
+> **Result**: The entire cluster enters an unrecoverable restart crash loop!
 
 ### 4.2 Production Standard: Dedicated Probes in Spring Boot 3
 Spring Boot 3 natively exposes isolated probe endpoints:
@@ -243,11 +241,13 @@ spring:
     timeout-per-shutdown-phase: 30s
 ```
 
-### Why This Guarantees Zero Dropped Requests:
-1. When Kubernetes initiates pod termination, the `preStop` hook executes `sleep 15` **before** `SIGTERM` is delivered.
-2. During these 15 seconds, Kubernetes updates `kube-proxy`, iptables, and ingress controllers, safely diverting all new customer traffic to other healthy pods.
-3. After 15 seconds, zero new requests are arriving. Kubernetes delivers `SIGTERM`.
-4. Spring Boot's graceful shutdown drains any remaining in-flight requests (allowing up to 30 seconds to finish) and cleanly closes database connections.
+### How this reduces dropped requests
+1. Kubernetes starts the termination grace period, then runs `preStop` before sending `SIGTERM`.
+2. Endpoint and load-balancer updates propagate asynchronously while the application can still serve traffic.
+3. After the hook, `SIGTERM` starts Spring's graceful shutdown so in-flight requests can finish.
+4. The hook and shutdown share the same grace-period budget. If it expires, remaining processes can be killed.
+
+A 15-second sleep is a starting value, not proof that routing has drained. Test rolling restarts under traffic using your ingress, keep-alive connections, slow requests, and WebSockets. Allow enough time for all shutdown phases and infrastructure delays. See [Kubernetes termination behavior](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/).
 
 ---
 
@@ -280,6 +280,14 @@ spec:
         - name: notes-api
           image: ghcr.io/myorg/notes-api:1.4.0
           imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: 8080
           resources:
@@ -369,11 +377,11 @@ spec:
 
 <AccordionGroup>
   <Accordion title="1. Why does an application crash with Exit Code 137 in Kubernetes? How do you fix it?">
-    Exit Code 137 indicates that the Linux kernel terminated the process with `SIGKILL` ($128 + 9 = 137$) because the container exceeded its cgroup memory limit (`resources.limits.memory`). 
+    Exit Code 137 means the process received `SIGKILL` ($128 + 9 = 137$). Check container termination reason and node events: an OOM kill is one cause, but a forced shutdown can produce the same exit code. 
     
     This occurs when developers set `-Xmx` too close to the container limit. Process memory includes heap, Metaspace, thread stacks, direct byte buffers, and JIT code cache. 
     
-    **The Fix**: Use `-XX:+UseContainerSupport` and `-XX:MaxRAMPercentage=75.0`. This dynamically restricts the Java heap to 75% of the container limit, preserving the remaining 25% for Metaspace, thread stacks, and OS overhead.
+    **The Fix**: Measure heap and native-memory demand under realistic traffic, then adjust heap and container limits. `MaxRAMPercentage=75.0` is an example starting point; it cannot guarantee protection from an OOM kill.
   </Accordion>
 
   <Accordion title="2. Why should you never point a Kubernetes livenessProbe at a database health check?">
@@ -382,10 +390,10 @@ spec:
     If the database experiences a momentary overload or brief network glitch, pointing the liveness probe at `/actuator/health` causes the probe to fail. Kubernetes will reboot all application pods simultaneously. When all pods reboot at once, they execute database startup connection pools and schema checks at the same time, worsening the database outage and causing a cluster-wide death spiral. Liveness probes should only check internal JVM responsiveness via `/actuator/health/liveness`.
   </Accordion>
 
-  <Accordion title="3. Why is a preStop sleep hook necessary for zero-downtime rolling updates in Kubernetes?">
+  <Accordion title="3. What can a preStop delay do, and what must you still test?">
     During pod deletion, Kubernetes asynchronously updates network routing tables (iptables/kube-proxy) while sending `SIGTERM` to the container. 
     
-    Because network propagation takes 2 to 5 seconds across nodes, ingress proxies continue sending customer HTTP requests to the terminating pod after `SIGTERM` has already been sent, causing `502 Bad Gateway` errors. A `preStop` hook executing `sleep 15` delays the `SIGTERM` signal, giving the network layer ample time to route traffic away before the application shuts down.
+    A delay gives routing updates time to propagate before application shutdown. Measure that delay with the actual ingress and request mix. Fixed sleep durations cannot guarantee zero failed requests, especially for long-lived connections.
   </Accordion>
 
   <Accordion title="4. How do Spring Boot Layered JARs speed up Docker build and deployment pipelines?">
@@ -407,10 +415,10 @@ spec:
 ## 9. Done Checklist
 
 <Check>
-Multi-stage Dockerfile unpacks layered JARs (`jarmode=tools`) for 90%+ CI layer cache hit rates.
+Build the image using the version-matched tools layout, start it, and measure Docker layer reuse.
 </Check>
 <Check>
-Container executes as an unprivileged, non-root user (`USER spring:spring`).
+Container runs as non-root with unnecessary capabilities dropped and privilege escalation disabled. These controls reduce risk; they do not eliminate kernel vulnerabilities. See [Kubernetes restricted security controls](https://kubernetes.io/docs/concepts/security/pod-security-standards/).
 </Check>
 <Check>
 JVM memory is dynamically governed by `-XX:+UseContainerSupport` and `-XX:MaxRAMPercentage=75.0` to eliminate Exit Code 137 OOMKills.

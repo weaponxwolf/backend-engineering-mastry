@@ -158,15 +158,29 @@ Creating an index on a multi-million row table using standard `CREATE INDEX` acq
 ### The Solution: `CREATE INDEX CONCURRENTLY`
 PostgreSQL allows non-blocking index creation using `CONCURRENTLY`. However, `CREATE INDEX CONCURRENTLY` **cannot execute inside an active transaction block**!
 
-Flyway wraps every migration file in a transaction by default. To make it work, add the Flyway non-transactional directive at the top of the script:
+Keep the index build in its own migration. Configure that migration with a **sibling script configuration file**, whose name includes both `.sql` and `.conf`. A SQL comment named `flyway:transactional` is not a supported Flyway setting.
 
 ```sql
 -- src/main/resources/db/migration/V4__create_orders_created_at_idx.sql
--- flyway:transactional=false
-
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_orders_created_at 
+CREATE INDEX CONCURRENTLY idx_orders_created_at
 ON orders (created_at);
 ```
+
+```properties
+# src/main/resources/db/migration/V4__create_orders_created_at_idx.sql.conf
+executeInTransaction=false
+```
+
+This is Flyway's documented [per-script configuration mechanism](https://documentation.red-gate.com/flyway/reference/script-configuration). For Flyway versions using PostgreSQL transactional advisory locks, configure the migration runner to use session locks:
+
+```properties
+# flyway.conf for the standalone Flyway runner
+flyway.postgresql.transactional.lock=false
+```
+
+This is a separate setting from migration transaction boundaries. See [Flyway's PostgreSQL lock setting](https://documentation.red-gate.com/flyway/reference/configuration/flyway-namespace/flyway-postgresql-namespace/flyway-postgresql-transactional-lock-setting). Verify both settings using the exact Flyway version and runner you deploy; a standalone `flyway.conf` is not automatically Spring Boot configuration.
+
+`CONCURRENTLY` permits normal writes, but still takes locks, waits for transactions, and consumes CPU and I/O. A failed build can leave an invalid index. Avoid `IF NOT EXISTS` as a repair mechanism: an existing index with the same name might be invalid or have a different definition. Inspect it before retrying. See [PostgreSQL concurrent index rules](https://www.postgresql.org/docs/16/sql-createindex.html).
 
 ### Cleaning Up `INVALID` Indexes
 If a concurrent index creation fails (e.g., due to a disk space issue or dead lock cancellation), PostgreSQL leaves behind an **`INVALID` index** that wastes disk and degrades writes:
@@ -281,7 +295,7 @@ public class OrderDataBackfillService {
 | :--- | :--- | :--- | :--- |
 | **`flyway_schema_history` Checksum Mismatch** | Modifying an already-applied migration file | Application fails to boot | Never edit applied files; create a new versioned migration (`V+1`). |
 | **Migration Lock Timeout** | Multiple web pods boot simultaneously fighting for lock | Readiness probes fail; pods CrashLoop | Run migrations via dedicated **Kubernetes Pre-Install Job**. |
-| **Concurrent Index Deadlock** | `CREATE INDEX CONCURRENTLY` without non-transactional directive | Flyway fails with `cannot run inside transaction block` | Add `-- flyway:transactional=false` to script header. |
+| **Concurrent Index Deadlock** | `CREATE INDEX CONCURRENTLY` without non-transactional directive | Flyway fails with `cannot run inside transaction block` | Add a sibling `.sql.conf` with `executeInTransaction=false`; check PostgreSQL advisory-lock mode. |
 | **Replication Lag Blackout** | Single giant `UPDATE` query on 10M rows | Replicas fall behind by 30 mins; reads serve stale data | Execute data migrations using **Chunked Cursor Backfills**. |
 | **Accidental Production Drop** | Hibernate `ddl-auto: create-drop` or `update` enabled | Data corrupted or tables dropped on restart | Set `spring.jpa.hibernate.ddl-auto: validate` in production. |
 
@@ -312,6 +326,6 @@ public class OrderDataBackfillService {
 - [ ] Understand the Flyway migration lifecycle and inspect `flyway_schema_history`.
 - [ ] Separate schema migrations from web pod startup using dedicated Kubernetes Jobs.
 - [ ] Enforce `spring.jpa.hibernate.ddl-auto: validate` in all production profiles.
-- [ ] Execute non-blocking index creation using `-- flyway:transactional=false` and `CREATE INDEX CONCURRENTLY`.
+- [ ] Execute non-blocking index creation using a sibling `.sql.conf` with `executeInTransaction=false` and `CREATE INDEX CONCURRENTLY`.
 - [ ] Implement Chunked Keyset Cursor Backfills in Spring Boot for multi-million row table updates.
 </Check>

@@ -313,11 +313,10 @@ When an HTTP request triggers a chain of asynchronous service calls and Kafka ev
 
 Modern microservices follow the **W3C Trace Context** specification:
 
-```text
-W3C traceparent Header Format:
-00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
- |               |                  |            |
-Ver           TraceId             ParentId     Flags (01 = Sampled)
+```http
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+             |  |                                |                |
+            Ver TraceId                          ParentId         Flags (01 = Sampled)
 ```
 
 - **Trace ID**: Unique 128-bit identifier representing the entire end-to-end journey across all services.
@@ -358,24 +357,18 @@ When using Spring Boot 3's `RestClient`, `WebClient`, or `KafkaTemplate`, the tr
 
 If microservices are implemented incorrectly, you incur all the operational costs of distributed systems with none of the benefits. This disaster is known as a **Distributed Monolith**:
 
-```text
-The 4 Hallmarks of a Distributed Monolith:
-1. Shared Database:
-   Multiple microservices connect to the exact same PostgreSQL schema.
-   Consequence: A schema migration in Service A breaks Service B in production.
-
-2. Deep Synchronous Call Chains:
-   Service A calls Service B -> calls Service C -> calls Service D.
-   Consequence: Latency is additive, and availability is multiplicative. If one service hiccups, all upstream callers crash.
-
-3. Distributed Transactions (2PC):
-   Attempting cross-service ACID locks across network boundaries.
-   Consequence: HikariCP connection pool exhaustion and deadlocks.
-
-4. Lockstep Deployments:
-   Service A cannot be deployed unless Service B and C are deployed simultaneously.
-   Consequence: Destroys independent team agility.
-```
+1. **Shared Database**:
+   - Multiple microservices connect directly to the exact same PostgreSQL schema.
+   - *Consequence*: A schema migration in Service A breaks Service B in production; eliminates database autonomy.
+2. **Deep Synchronous Call Chains**:
+   - Service A calls Service B $\rightarrow$ calls Service C $\rightarrow$ calls Service D.
+   - *Consequence*: Latency is additive, and availability is multiplicative ($A_{\text{total}} = A_1 \times A_2 \times A_3$). If one service hiccups, all upstream callers crash with 504 timeouts.
+3. **Distributed Transactions (2PC)**:
+   - Attempting cross-service ACID locks across network boundaries.
+   - *Consequence*: HikariCP connection pool exhaustion, blocking coordinator crashes, and deadlocks.
+4. **Lockstep Deployments**:
+   - Service A cannot be deployed unless Service B and C are deployed simultaneously.
+   - *Consequence*: Completely eliminates independent team velocity and horizontal scaling autonomy.
 
 ---
 

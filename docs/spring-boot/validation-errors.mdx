@@ -13,12 +13,14 @@ Good APIs reject bad input early and return clean responses.
 
 ## Mental Model
 
-```text
-Request enters controller
-Validation checks DTO
-Controller calls service only if data is valid
-Service throws business exceptions
-Global handler converts exceptions to HTTP responses
+```mermaid
+flowchart TD
+    A["1. Request Enters Controller"] --> B["2. Jakarta Validation Checks DTO"]
+    B -->|Valid| C["3. Controller Calls Service"]
+    B -->|Invalid| E["5. Global @RestControllerAdvice"]
+    C --> D["4. Service Enforces Business Rules & Exceptions"]
+    D --> E
+    E --> F["6. Standard RFC 9457 ProblemDetail Response"]
 ```
 
 ## Starter Dependency
@@ -70,17 +72,15 @@ public record CreateUserRequest(
 
 Common annotations:
 
-```text
-@NotNull   value must exist
-@NotBlank  string must not be empty or spaces
-@Size      length or collection size
-@Email     valid email shape
-@Min       minimum number
-@Max       maximum number
-@Positive  number must be positive
-@Past      date must be in past
-@Future    date must be in future
-```
+| Annotation | Validation Rule |
+| :--- | :--- |
+| `@NotNull` | Value must not be `null` (accepts empty strings) |
+| `@NotBlank` | CharSequence must not be null and must contain at least one non-whitespace character |
+| `@Size` | Size of string, collection, or array must be within boundaries |
+| `@Email` | String must conform to standard email address format |
+| `@Min` / `@Max` | Numeric value must satisfy minimum/maximum limit |
+| `@Positive` | Numeric value must be strictly greater than zero |
+| `@Past` / `@Future` | Date/time must be in the past/future |
 
 ## Controller
 
@@ -122,12 +122,10 @@ Some rules cannot be checked by annotations.
 
 Example:
 
-```text
-Email must be unique
-Product must have stock
-User can update only own note
-Payment amount must match order amount
-```
+- **Email uniqueness**: checked against the database (`userRepository.existsByEmail()`).
+- **Inventory availability**: checked against current stock (`product.getStock() >= requestedQty`).
+- **Resource ownership**: verified against authentication context (`note.getOwnerId().equals(userId)`).
+- **Payment balance**: checked against order grand total (`payment.getAmount().equals(order.getTotal())`).
 
 Put business validation in service layer.
 
@@ -259,15 +257,15 @@ Use custom `ErrorResponse` records if your frontend team has an existing contrac
 
 Use status codes honestly.
 
-```text
-400 Bad Request    request shape or validation failed
-401 Unauthorized   user is not logged in
-403 Forbidden      user is logged in but not allowed
-404 Not Found      resource does not exist
-409 Conflict       duplicate or state conflict
-422 Unprocessable  valid JSON, but business rule failed
-500 Server Error   unexpected backend bug
-```
+| Status Code | Meaning | Backend Use Case |
+| :--- | :--- | :--- |
+| **`400 Bad Request`** | Request shape or validation failed | Missing required DTO fields, blank title |
+| **`401 Unauthorized`** | Authentication missing or invalid | Missing or expired JWT bearer token |
+| **`403 Forbidden`** | Authenticated, but lacks permission | User attempting to edit another user's note |
+| **`404 Not Found`** | Resource does not exist | ID does not match any existing database row |
+| **`409 Conflict`** | State conflict or duplicate data | Attempting to register an already taken email |
+| **`422 Unprocessable`** | Valid JSON syntax, but invariant violated | Domain semantic failure |
+| **`500 Server Error`** | Unexpected backend bug | Uncaught runtime exception or database crash |
 
 Many Spring APIs use `400` for validation and `409` for duplicate data.
 

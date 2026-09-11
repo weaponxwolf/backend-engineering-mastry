@@ -1,0 +1,192 @@
+---
+title: "Your First Java Program"
+description: "Install Java, compile a small backend rule, understand its parts, reproduce a failure, and run the executable foundations lab."
+---
+
+# Your First Java Program
+
+You will calculate an order total, change the rule, and see a test detect a mistake. You need no previous Java knowledge.
+
+A **program** is a set of instructions a computer runs. A backend program also receives requests and works with stored data. We will start with one rule that could later live inside a backend: calculate the cost of a quantity of items.
+
+## 1. Install the tools for this lesson
+
+Install a **Java Development Kit**, or **JDK**, version **21**. The JDK includes the compiler that checks your code and the runtime that executes it. This course uses Java 21 as its learning baseline; newer releases also exist.
+
+Choose your operating system and CPU type on the [Eclipse Temurin download page](https://adoptium.net/temurin/releases/). Select version 21 and package type JDK. Follow the [official installer instructions](https://adoptium.net/installation/) for your operating system. Reopen your terminal after installation.
+
+A **terminal** is an app where you type commands. Open Terminal on macOS or Linux, or PowerShell on Windows. An editor is where you save code as a plain file; use the editor you already have.
+
+Run each command separately:
+
+```bash
+java -version
+javac -version
+```
+
+Both results should identify version `21` or `21.0...`. The vendor and patch number may differ. If only `java` works, check that you installed a JDK and that its `bin` folder is on `PATH`, the list of folders your terminal searches for commands. [Java's getting-started guide](https://dev.java/learn/getting-started/) explains this setup.
+
+<Tip>
+This lesson uses Java and an editor. Maven, Docker, PostgreSQL, and Node.js become relevant in later projects. You can complete this program without running the documentation site.
+</Tip>
+
+## 2. Create a source file
+
+Choose a folder where you keep your exercises. In a terminal opened there, run:
+
+```bash
+mkdir backend-first-program
+cd backend-first-program
+```
+
+`mkdir` creates a folder. `cd` changes the folder in which commands run. In your editor, create **HelloBackend.java** inside that new folder. The spelling and uppercase letters must match the class name below.
+
+Save this complete program:
+
+```java HelloBackend.java
+public class HelloBackend {
+    public static long lineTotal(int quantity, long unitPriceCents) {
+        if (quantity <= 0) {
+            throw new IllegalArgumentException("Quantity must be positive");
+        }
+        if (unitPriceCents < 0) {
+            throw new IllegalArgumentException("Price cannot be negative");
+        }
+        return Math.multiplyExact(unitPriceCents, quantity);
+    }
+
+    public static void main(String[] args) {
+        int quantity = 3;
+        long unitPriceCents = 2500;
+        long totalCents = lineTotal(quantity, unitPriceCents);
+        System.out.println("Order total: " + totalCents + " cents");
+    }
+}
+```
+
+In this exercise, one currency unit contains 100 cents. `2500` cents represents `25.00` units. We use whole cents so this calculation does not need fractional values. A real price model must also define the currency and rounding rules.
+
+## 3. Compile and run
+
+From `backend-first-program`, run:
+
+```bash
+javac --release 21 -d build HelloBackend.java
+java -cp build HelloBackend
+```
+
+The compiler should finish without printing an error. The second command should print:
+
+> Order total: 7500 cents
+
+`javac` checks source code and writes a `.class` file. `--release 21` selects the Java 21 language and API target. `-d build` places compiled files in `build`. These options are described in the [Java 21 compiler reference](https://docs.oracle.com/en/java/javase/21/docs/specs/man/javac.html).
+
+`java -cp build HelloBackend` looks in `build` for the class to run and starts its `main` method. The command takes the class name without `.java` or `.class`.
+
+You have now executed one business rule. It has no HTTP endpoint and does not save an order or charge a payment.
+
+## 4. Understand the pieces you used
+
+| Piece | Meaning in this program |
+| --- | --- |
+| `class HelloBackend` | Groups the program's methods under a name. |
+| `main` | The starting method called when you launch this program. |
+| `String[] args` | Command-line arguments; this program does not use them yet. |
+| `int quantity = 3` | A variable: a named value. `int` is an integer type. |
+| `long unitPriceCents = 2500` | A larger integer type used for the price. |
+| `lineTotal(...)` | A method: a named operation you can call with input values. |
+| `public static` | This method is accessible and can be called without creating a `HelloBackend` object. |
+| `if (quantity <= 0)` | A condition: run the enclosed block when the comparison is true. |
+| `throw new IllegalArgumentException(...)` | Stop this calculation by reporting an invalid input. |
+| `return` | Send a result back to the method's caller. |
+| `System.out.println(...)` | Print one line to the terminal. |
+
+An **exception** reports a problem while the program runs. **Overflow** happens when a calculation cannot fit in its number type. `Math.multiplyExact` reports integer overflow with an exception instead of returning a wrapped number. [Java 21's Math API](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Math.html) defines this behavior.
+
+## 5. Make a change and predict the result
+
+Change `quantity = 3` to `quantity = 4`. Before running it, calculate the expected total yourself.
+
+Run **both** compilation and launch commands again. Expect:
+
+> Order total: 10000 cents
+
+Now change the quantity to `0`, compile, and launch again. Expect an `IllegalArgumentException` containing:
+
+> Quantity must be positive
+
+The lines after the message form a **stack trace**: they show where the exception happened and which methods called that code. Find the reference to `HelloBackend.java` and compare it with the `throw` line. Restore quantity `3` afterward.
+
+<Note>
+Changing a source file does not update an existing `.class` file. If compilation fails, the old class can still exist. Fix the compiler error and compile successfully before trusting a new run.
+</Note>
+
+## 6. Repeat a calculation with a loop
+
+Replace only the `main` method with this version:
+
+```java
+public static void main(String[] args) {
+    int[] quantities = {1, 2, 3};
+    long totalCents = 0;
+
+    for (int quantity : quantities) {
+        long nextLine = lineTotal(quantity, 2500);
+        totalCents = Math.addExact(totalCents, nextLine);
+    }
+
+    System.out.println("Cart total: " + totalCents + " cents");
+}
+```
+
+An **array** stores a fixed number of values. This array contains three quantities. A **loop** repeats instructions; this `for` loop visits each quantity once. The total starts at zero and grows by one line's cost each time. `Math.addExact` also checks for overflow.
+
+Predict the intermediate totals: `2500`, then `7500`, then `15000`. Compile and run. Expect:
+
+> Cart total: 15000 cents
+
+This is the beginning of a shopping cart. All three lines use the same unit price for now. The next lab gives each line its own price and adds automated tests.
+
+## 7. Run the repository's executable lab
+
+Open a terminal in your local copy of **this documentation repository**, the folder containing `package.json`, `docs/`, and `examples/`. This is a different directory from the exercise folder you created above.
+
+In Bash on Linux, macOS, WSL, or Git Bash, run:
+
+```bash
+bash examples/java-foundations/run.sh
+```
+
+Expected output is `Order total: 2598 cents`, followed by `PASS: 12 checks`. The script compiles both source and tests, runs them, and removes its temporary compiled files.
+
+For PowerShell or another shell, run these individual commands from the repository root:
+
+```bash
+cd examples/java-foundations
+javac --release 21 -d build src/OrderCalculator.java test/OrderCalculatorTest.java
+java -cp build OrderCalculator
+java -cp build OrderCalculatorTest
+```
+
+Read `src/OrderCalculator.java` before `test/OrderCalculatorTest.java`. A **test** is code that checks an expected result and fails when the behavior differs. These tests check invalid quantities, negative prices, missing values, empty carts, and arithmetic overflow.
+
+The lab introduces a **record**, a type that groups named values, and a **list**, a collection of items. Here, a record groups one price and quantity. The list contains the cart's lines. Follow [OOP](/java/oop) and [Collections](/java/collections-exceptions) after running the example.
+
+## 8. Diagnose one failure yourself
+
+Try each change in your own copy and restore the working version afterward.
+
+| Change | What should happen | What to inspect |
+| --- | --- | --- |
+| Remove a semicolon from `HelloBackend.java` | Compilation fails | First error location and the preceding line |
+| Run from a directory without the source file | Compiler reports a missing file | Current directory and exact file name |
+| Set the quantity to zero | Program reports an invalid quantity | Input and validation condition |
+| Make the lab's quantity check accept zero | The test suite fails | The test that expected invalid input to be rejected |
+
+Write down the smallest change that caused the failure. Do not replace the whole program to repair one line.
+
+## Ready for the next stage
+
+You are ready when you can compile from a terminal, change an input, explain a method and a loop, and identify a failing test. Use [assessment 0](/getting-started/mastery-assessments#assessment-0-change-a-java-business-rule) to make one independent rule change.
+
+Continue with [Stage 1 of the roadmap](/getting-started/backend-roadmap#stage-1-java-and-http-foundations). You will connect these program behaviors to HTTP requests before adding Spring.

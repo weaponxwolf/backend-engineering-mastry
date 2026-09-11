@@ -1,7 +1,7 @@
 ---
 title: "PostgreSQL Engine Internals & Query Performance Mastery"
 sidebarTitle: "Database Performance"
-description: "Master PostgreSQL performance engineering. Deep dive into query execution stages, EXPLAIN ANALYZE BUFFERS deconstruction, B-Tree vs GIN internals, HikariCP sizing math, and O(1) keyset pagination."
+description: "Master PostgreSQL performance engineering. Deep dive into query execution stages, EXPLAIN ANALYZE BUFFERS deconstruction, B-Tree vs GIN internals, HikariCP sizing math, and indexed keyset pagination."
 ---
 
 ## 1. Mental Model: The Hardware Bottleneck Reality
@@ -101,7 +101,7 @@ WHERE u.status = 'ACTIVE' AND o.created_at > '2026-01-01';
 ```
 
 ### Deconstructing the Plan Output:
-```text
+```sql
 Hash Join  (cost=125.50..1420.30 rows=512 width=48) (actual time=1.210..14.350 rows=480 loops=1)
   Hash Cond: (o.user_id = u.id)
   Buffers: shared hit=840 read=12
@@ -152,35 +152,17 @@ Execution Time: 14.850 ms
 
 ---
 
-## 5. HikariCP Connection Pool Sizing: The Golden Math
+## 5. HikariCP Connection Pool Sizing: Measure the Database Budget
 
-A common myth is that increasing database connection pool size improves application performance. In reality, **oversizing connection pools destroys performance**:
+A connection pool limits how many requests may use the database at once. More connections can improve utilization when queries wait for I/O. Too many can increase contention and make every query slower.
 
-```mermaid
-flowchart TD
-    subgraph Pool Oversizing Disaster (100 Connections)
-        C1[100 Active Web Threads] --> H1[HikariCP: 100 Connections]
-        H1 --> DB[(8-Core PostgreSQL Server)]
-        DB --> CPU["100 Threads Contend for 8 CPU Cores!<br/>Context-Switching Thrashing & CPU Cache Eviction!<br/>Disk Queue Saturated!"]
-        CPU --> Latency["p99 Latency Spikes to 5,000ms!"]
-    end
+HikariCP documents this historical **starting point**:
 
-    subgraph Optimal Sizing (18 Connections)
-        C2[100 Active Web Threads] --> H2[HikariCP: 18 Connections]
-        H2 --> DB2[(8-Core PostgreSQL Server)]
-        DB2 --> CPU2["18 Connections Smoothly Scheduled on 8 Cores!<br/>Zero Context-Switching Waste!<br/>Queries Execute in RAM!"]
-        CPU2 --> Fast["p99 Latency Drops to 8ms!"]
-    end
-```
+$$\text{Active Connections} \approx (\text{CPU Cores} \times 2) + \text{Effective Spindle Count}$$
 
-### Brett Wooldridge's HikariCP Formula:
-The official formula recommended by the PostgreSQL development team and HikariCP creator:
+It is not a hardware law. Effective spindle count describes disk wait; it is zero for a fully cached workload and does not map directly to NVMe device count. Choose a starting value, then measure throughput, p95/p99 latency, pool wait, and database saturation under realistic traffic. See [HikariCP's pool-sizing guidance](https://github.com/brettwooldridge/HikariCP/wiki/About-Pool-Sizing).
 
-$$\text{Maximum Pool Size} = (\text{CPU Cores} \times 2) + \text{Effective Spindle Count}$$
-
-- On an 8-core database server with an NVMe SSD (where effective spindle count $\approx 1-2$):
-  $$\text{Pool Size} = (8 \times 2) + 2 = \mathbf{18 \text{ connections}}$$
-- An 18-connection pool will serve thousands of concurrent web requests with vastly lower latency than a 100-connection pool!
+Budget across **all replicas and background jobs**. Ten pods with a pool of 20 can open 200 connections. Reserve database capacity for migrations, operations, and failover. Match pool acquisition timeouts to the request deadline; waiting 20 seconds is not fast failure for a 1-second API budget.
 
 ### Production `application.yml` HikariCP Configuration:
 ```yaml
@@ -190,7 +172,7 @@ spring:
       maximum-pool-size: 20
       minimum-idle: 10
       idle-timeout: 300000       # 5 minutes
-      connection-timeout: 20000  # 20 seconds (fail fast if pool exhausted)
+      connection-timeout: 500    # Example only: leave time within the request deadline
       max-lifetime: 1800000      # 30 minutes (retires old connections cleanly)
       leak-detection-threshold: 3000 # Alert if a thread holds connection > 3s!
 ```
@@ -208,37 +190,39 @@ FROM articles
 ORDER BY created_at DESC 
 LIMIT 20 OFFSET 1000000;
 ```
-#### Why `OFFSET` is $O(N)$ Disk Waste:
-PostgreSQL cannot jump directly to row 1,000,000. It must **read, parse, and sort 1,000,020 rows from disk**, and then discard the first 1,000,000 rows to return only 20! For deep pages, this query takes **5 to 30 seconds**.
+#### Why deep offsets cost more
+PostgreSQL must compute and discard the skipped rows. A matching index may avoid sorting, and cached pages may avoid disk reads, but neither removes the work of stepping over the offset. For offset $o$ and page size $k$, this typically means processing at least $o + k$ rows. See [PostgreSQL LIMIT and OFFSET](https://www.postgresql.org/docs/16/queries-limit.html).
 
----
-
-### The Production Solution: Keyset (Cursor) Pagination ($O(1)$)
-Instead of an offset, pass the values of the last record seen on the previous page (`cursor`):
+### Keyset pagination: seek to a known position
+A cursor stores the last row's sort keys. Use a unique tie-breaker so rows with equal timestamps have a stable order:
 
 ```sql
--- O(1) CONSTANT TIME LOOKUP VIA B-TREE INDEX!
-SELECT id, title, created_at 
-FROM articles 
+CREATE INDEX idx_articles_created_id ON articles (created_at DESC, id DESC);
+
+SELECT id, title, created_at
+FROM articles
 WHERE (created_at, id) < ('2026-03-01 14:20:00+00', 98452)
-ORDER BY created_at DESC, id DESC 
+ORDER BY created_at DESC, id DESC
 LIMIT 20;
 ```
 
+For a matching B-tree index and selective query, the useful model is **$O(\log N + k)$**: seek into the tree, then read a page of $k$ rows. The work does not grow with the page number as an offset does. Filters, visibility checks, cache state, and row width still affect cost. This is an inference from [PostgreSQL's ordered-index behavior](https://www.postgresql.org/docs/16/indexes-ordering.html), not a constant-time latency guarantee.
+
 ```mermaid
-flowchart TD
-    subgraph Keyset B-Tree Seek: O(1)
-        Query["WHERE (created_at, id) < (2026-03-01, 98452)"] --> Seek[B-Tree Index Seek]
-        Seek -->|Instant Pointer Lookup in 0.2ms| Target["Leaf Node at exact cursor position"]
-        Target --> Fetch["Fetch exactly next 20 rows! Zero waste!"]
-    end
+flowchart LR
+    Cursor[Last timestamp and ID] --> Seek[B-tree seek]
+    Seek --> Scan[Read next matching index entries]
+    Scan --> Page[Return up to 20 rows]
 ```
 
-### Complete Spring Data JPA Keyset Implementation:
+Use non-null, stable sort columns. Include tenant and filter constraints on every page. Encode the cursor as an API token and validate it on input. Keyset pagination supports next/previous navigation; arbitrary page numbers and consistent snapshots across separate requests need additional design.
+
+### Spring Data JPA repository shape
 
 ```java
 package com.backend.mastery.database.pagination;
 
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -252,24 +236,24 @@ public interface ArticleRepository extends JpaRepository<Article, Long> {
     @Query("""
         SELECT a FROM Article a 
         ORDER BY a.createdAt DESC, a.id DESC 
-        LIMIT :limit
         """)
-    List<Article> findFirstPage(@Param("limit") int limit);
+    List<Article> findFirstPage(Pageable pageable);
 
-    // Subsequent pages via O(1) Keyset Seek
+    // Subsequent pages use a cursor predicate and a page-size limit
     @Query("""
         SELECT a FROM Article a 
         WHERE (a.createdAt < :lastCreatedAt) 
            OR (a.createdAt = :lastCreatedAt AND a.id < :lastId) 
         ORDER BY a.createdAt DESC, a.id DESC 
-        LIMIT :limit
         """)
     List<Article> findNextPage(
             @Param("lastCreatedAt") Instant lastCreatedAt,
             @Param("lastId") Long lastId,
-            @Param("limit") int limit);
+            Pageable pageable);
 }
 ```
+
+Pass `PageRequest.of(0, 20)` for **every** cursor query. Changing the page number would reintroduce an offset. A `List` return type avoids an extra total-count query. The `Article` entity must map `createdAt` and `id` to the indexed columns. Use `EXPLAIN (ANALYZE, BUFFERS)` on the emitted SQL; the expanded `OR` predicate may produce a different plan from the SQL row comparison.
 
 ---
 
@@ -300,8 +284,8 @@ LIMIT 5;
 | Failure Mode | Root Cause | Impact | Production Defense |
 | :--- | :--- | :--- | :--- |
 | **Sequential Scan Spike** | Missing index or unindexed foreign key | 100% CPU utilization; queries take seconds | Inspect `EXPLAIN (ANALYZE)` and create covering indexes. |
-| **HikariCP Starvation** | Connection pool oversized or long transaction holding socket | Application threads block waiting for connections | Size pool to $(\text{Cores} \times 2) + \text{Spindles}$; set leak detector. |
-| **Deep Offset Thrashing** | Client requests page 50,000 using `OFFSET` | Database scans 1,000,000 rows to return 20 | Refactor to $O(1)$ **Keyset (Cursor) Pagination**. |
+| **HikariCP Starvation** | Connection pool oversized or long transaction holding socket | Application threads block waiting for connections | Load-test a shared connection budget across every application replica. |
+| **Deep Offset Thrashing** | Client requests page 50,000 using `OFFSET` | Database scans 1,000,000 rows to return 20 | Use keyset pagination with a matching composite index. |
 | **Index Bloat** | Frequent updates on tables with default `fillfactor=100` | Leaf page splits increase index size by 2-3x | Set `WITH (fillfactor = 90)` on update-heavy tables. |
 | **Memory Sort Spill** | `work_mem` too small for large sorts | PostgreSQL spills sort to temporary disk files | Increase `work_mem` (e.g. 16MB - 64MB) per connection. |
 
@@ -311,15 +295,15 @@ LIMIT 5;
 
 <AccordionGroup>
   <Accordion title="1. Why does increasing HikariCP connection pool size from 20 to 100 often degrade throughput?">
-    PostgreSQL processes queries using one OS backend process per connection. When 100 connections are active on an 8-core server, 100 processes contend for 8 CPU cores. The operating system spends more time performing expensive CPU context switches, thrashing L1/L2 hardware CPU caches, and queuing disk I/O requests than executing queries. An optimal pool sized to $(\text{Cores} \times 2) + \text{Spindles}$ (e.g., 18 connections) keeps all cores busy with zero context-switching waste, maximizing throughput.
+    PostgreSQL processes queries using one OS backend process per connection. When 100 connections are active on an 8-core server, 100 processes contend for 8 CPU cores. The operating system spends more time performing expensive CPU context switches, thrashing L1/L2 hardware CPU caches, and queuing disk I/O requests than executing queries. A smaller pool may improve throughput, but measure the actual workload before choosing its size. Include all application replicas in the connection budget.
   </Accordion>
 
   <Accordion title="2. What is the difference between an Index Scan and an Index Only Scan?">
-    An **Index Scan** walks the B-Tree index to locate matching keys, extracts the Tuple IDs (TIDs), and performs random heap lookups to fetch the table row data. An **Index Only Scan** finds all required columns directly within the index itself (e.g., using covering indexes with `INCLUDE`). If the table's **Visibility Map** indicates the target 8KB page contains no unvacuumed dead tuples, it completely skips reading the heap table, cutting disk I/O in half.
+    An **Index Scan** walks the B-Tree index to locate matching keys, extracts the Tuple IDs (TIDs), and performs random heap lookups to fetch the table row data. An **Index Only Scan** finds all required columns directly within the index itself (e.g., using covering indexes with `INCLUDE`). If the visibility map marks the heap page **all-visible**, PostgreSQL can skip the heap visibility check. Otherwise an index-only scan still fetches heap pages. Measure `Heap Fetches`; there is no fixed I/O reduction.
   </Accordion>
 
-  <Accordion title="3. Why is Keyset pagination strictly superior to OFFSET pagination for large tables?">
-    `OFFSET N` forces the database engine to sequentially scan, parse, and sort $N + \text{LIMIT}$ rows from disk before throwing away the first $N$ rows, resulting in an $O(N)$ time complexity that degrades as users navigate deeper into pages. Keyset pagination uses a deterministic condition (`WHERE (created_at, id) < (:lastDate, :lastId)`) that maps directly to a B-Tree index seek, jumping directly to the target record in $O(1)$ constant time regardless of whether you are on page 1 or page 10,000.
+  <Accordion title="3. When should you choose keyset pagination over OFFSET?">
+    Choose keyset pagination for deep sequential navigation using stable, indexed sort keys. A typical indexed page costs $O(\log N + k)$ for $k$ returned rows. Offset pagination is simpler for small datasets and numbered pages, but work grows with the skipped row count. Neither approach alone freezes data across requests; concurrent edits can change what later pages contain.
   </Accordion>
 </AccordionGroup>
 
@@ -330,8 +314,8 @@ LIMIT 5;
 <Check>
 - [ ] Understand the 5 stages of the PostgreSQL query engine lifecycle.
 - [ ] Deconstruct `EXPLAIN (ANALYZE, BUFFERS)` output: cost math, buffer hit ratios, and execution times.
-- [ ] Size HikariCP connection pools using Brett Wooldridge's formula: $(\text{Cores} \times 2) + \text{Spindles}$.
-- [ ] Implement $O(1)$ Keyset (Cursor) pagination in Spring Data JPA and eliminate `LIMIT / OFFSET`.
+- [ ] Load-test the total HikariCP connection budget and explain the sizing trade-off.
+- [ ] Implement indexed keyset pagination and compare deep-page plans against OFFSET.
 - [ ] Create Covering Indexes with `INCLUDE` clauses to achieve zero-heap Index Only Scans.
 - [ ] Diagnose slow production queries using the `pg_stat_statements` catalog.
 </Check>

@@ -46,11 +46,9 @@ Because Core 1 buffers writes in its local cache, **Core 2 reading the same memo
 
 ### The Two Concurrency Hazards
 
-```text
-1. Atomicity: Can an operation be interrupted mid-execution?
-   Example: count++ decomposes into 3 distinct CPU instructions (read, add, write).
-2. Visibility: When Thread A mutates a variable in its CPU cache, when does Thread B on another core see that update?
-```
+1. **Atomicity**: Can an operation be interrupted mid-execution?
+   - *Example*: `count++` decomposes into 3 distinct CPU bytecode instructions (`getfield`, `iadd`, `putfield`).
+2. **Visibility**: When Thread A mutates a variable in its CPU cache, when does Thread B on another core see that update?
 
 ### The `happens-before` Guarantee (JSR-133)
 The Java Memory Model (JMM) provides formal ordering guarantees known as `happens-before`. If action $X$ `happens-before` action $Y$, the results of $X$ are guaranteed to be visible to $Y$:
@@ -207,7 +205,11 @@ sequenceDiagram
     VT-->>Request: Return JSON response
 ```
 
-### The Carrier Pinning Trap: The #1 Virtual Thread Disaster
+### Carrier Pinning in Java 21
+
+<Note>
+This section targets Java 21. JDK 24 changed monitor handling to reduce pinning caused by `synchronized`; check your runtime before changing locks. See [JDK 24 migration notes](https://docs.oracle.com/en/java/javase/24/migrate/significant-changes-jdk-24.html).
+</Note>
 
 When a Virtual Thread is **pinned**, it cannot unmount from its underlying OS Carrier Thread during blocking I/O. If all Carrier Threads become pinned, the entire JVM freezes, causing total outage!
 
@@ -287,19 +289,13 @@ graph TD
 
 Modern backend microservices run either **G1GC** or Java 21's **Generational ZGC**:
 
-```text
-+-----------------------+-----------------------------+------------------------------+
-| Dimension             | G1GC (Default)              | Generational ZGC (Java 21)   |
-+-----------------------+-----------------------------+------------------------------+
-| Heap Size Range       | 4 GB - 64 GB                | 16 GB - 16 TB                |
-| Target Pause Time     | 100 - 200 ms                | Under 1 ms (Sub-millisecond) |
-| Mechanism             | Region-based evacuation     | Colored pointers & Load      |
-|                       | with incremental pauses     | barriers (Fully concurrent)  |
-| Throughput Overhead   | Low (~2-5% CPU overhead)    | Moderate (~5-10% CPU overhead)|
-| Recommended Use Case  | Standard APIs, general pods | Low-latency APIs, finance,   |
-|                       | with standard latency SLA   | large cache in-memory nodes  |
-+-----------------------+-----------------------------+------------------------------+
-```
+| Dimension | G1GC (Default) | Generational ZGC (Java 21) |
+| :--- | :--- | :--- |
+| **Heap Size Range** | 4 GB – 64 GB | 16 GB – 16 TB |
+| **Target Pause Time** | 100 – 200 ms | Under 1 ms (Sub-millisecond) |
+| **Mechanism** | Region-based evacuation with incremental STW pauses | Colored pointers & Load barriers (fully concurrent) |
+| **Throughput Overhead** | Low (~2–5% CPU overhead) | Moderate (~5–10% CPU overhead) |
+| **Recommended Use Case** | Standard APIs, general pods with standard latency SLA | Low-latency APIs, financial trading, massive in-memory caches |
 
 #### Enabling Generational ZGC in Java 21
 ```bash
@@ -408,7 +404,7 @@ jcmd <PID> Thread.dump_to_file -format=text /dumps/thread_dump.txt
 ```
 
 #### Deadlock Output in Thread Dump
-```text
+```console
 Found one Java-level deadlock:
 =============================
 "http-nio-8080-exec-1":
@@ -468,7 +464,7 @@ If a container crashes from OOM, Kubernetes immediately terminates the pod and s
   </Accordion>
 
   <Accordion title="2. Why doesn't the volatile keyword make counter++ thread-safe?">
-    `counter++` is a compound read-modify-write operation consisting of three distinct bytecode instructions: `getfield`, `iadd`, and `putfield`. While `volatile` guarantees visibility (ensuring the `getfield` reads the most recent value from cache and `putfield` flushes immediately), it does not guarantee mutual exclusion. If two threads execute `counter++` concurrently, both can read the same initial value before either writes the incremented result, causing lost updates.
+    `counter++` is a compound read-modify-write operation consisting of three distinct bytecode instructions: `getfield`, `iadd`, and `putfield`. While `volatile` guarantees visibility (providing the visibility and ordering guarantees of a volatile write followed by a read of that field), it does not guarantee mutual exclusion. If two threads execute `counter++` concurrently, both can read the same initial value before either writes the incremented result, causing lost updates.
   </Accordion>
 
   <Accordion title="3. What is carrier thread pinning in Java 21 Virtual Threads, and how do you avoid it?">

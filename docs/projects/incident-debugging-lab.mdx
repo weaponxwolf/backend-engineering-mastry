@@ -65,7 +65,7 @@ ORDER BY duration DESC;
 ```
 
 #### The Diagnostic Output
-```text
+```console
   pid  |    duration    | state  | wait_event_type | wait_event | query
 -------+----------------+--------+-----------------+------------+-------------------------------------------------------------
  14201 | 00:04:12.41821 | active | DataFileRead    | BufferIO   | SELECT * FROM analytics_large_sales_export();
@@ -135,7 +135,7 @@ Every 4 hours under normal traffic, a Spring Boot pod in Kubernetes spontaneousl
 ```bash
 kubectl describe pod order-service-67b4f59c8-x9z2w
 ```
-```text
+```console
 Last State:     Terminated
   Reason:       OOMKilled
   Exit Code:    137
@@ -243,7 +243,7 @@ curl -s http://localhost:8080/actuator/threaddump | jq '.threads[] | select(.thr
 ```
 
 #### The Diagnostic Output
-```text
+```console
 "http-nio-8080-exec-1" - TIMED_WAITING on java.net.SocketInputStream.socketRead0
 "http-nio-8080-exec-2" - TIMED_WAITING on java.net.SocketInputStream.socketRead0
 ...
@@ -294,7 +294,7 @@ The notification worker consumer group lag surges from 5 messages to **450,000 m
 kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
   --describe --group notification-workers
 ```
-```text
+```console
 GROUP                TOPIC             PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
 notification-workers order-events      0          10482           160482          150000
 notification-workers order-events      1          10480           160480          150000
@@ -305,7 +305,7 @@ notification-workers order-events      2          10481           160481        
 
 ### 2. Evidence Collection: Inspecting Consumer Container Logs
 
-```text
+```console
 2026-09-10 19:02:11.102 ERROR [notification-workers-0-C-1] o.s.k.l.KafkaMessageListenerContainer: 
 Error handler threw an exception
 org.apache.kafka.common.errors.RecordDeserializationException: 

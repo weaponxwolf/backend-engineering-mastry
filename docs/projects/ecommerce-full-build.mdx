@@ -1,6 +1,6 @@
 ---
 title: "Build E-commerce Backend (Complete Production Build)"
-description: "Complete production-grade Spring Boot 3.3 e-commerce backend: atomic inventory reservation, idempotency keys, Stripe webhook HMAC-SHA256 signature verification, Outbox events, and concurrent Testcontainers integration tests."
+description: "E-commerce design walkthrough: inventory transactions, duplicate checkout detection, webhook verification boundaries, and concurrency exercises."
 ---
 
 # Build E-commerce Backend (Complete Production Build)
@@ -16,6 +16,10 @@ It brings together every architectural concept taught across the curriculum into
 - **Comprehensive Testcontainers Suite**: Multi-threaded concurrency testing verifying that exactly $K$ orders succeed when $N$ concurrent users race for $K$ items ($N > K$).
 
 ---
+
+<Warning>
+This is an integration walkthrough, not a checked-in, tested production application. Several surrounding repositories, DTOs, outbox components, and provider integration pieces still need implementation. The test excerpts below have not been executed as one complete project. Start with the [runnable Todo lab](/projects/todo-api-full-build) and use the [advanced assessments](/getting-started/mastery-assessments) to verify your implementation.
+</Warning>
 
 ## 1. System Architecture & Module Boundaries
 
@@ -174,7 +178,7 @@ CREATE TABLE orders (
     user_id BIGINT NOT NULL,
     status VARCHAR(40) NOT NULL,
     total_cents BIGINT NOT NULL CHECK (total_cents >= 0),
-    idempotency_key VARCHAR(120) NOT NULL UNIQUE,
+    idempotency_key VARCHAR(120) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -249,7 +253,7 @@ public class Order {
     @Column(name = "total_cents", nullable = false)
     private Long totalCents;
 
-    @Column(name = "idempotency_key", nullable = false, unique = true, length = 120)
+    @Column(name = "idempotency_key", nullable = false, length = 120)
     private String idempotencyKey;
 
     @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
@@ -419,7 +423,6 @@ import com.example.ecommerce.product.domain.Product;
 import com.example.ecommerce.product.repository.ProductRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -445,13 +448,8 @@ public class OrderService {
 
     @Transactional
     public OrderResponse processCheckout(Long userId, CheckoutRequest request) {
-        // 1. Idempotency Check: Return existing order if key was already processed
-        var existingOrder = orderRepository.findByIdempotencyKey(request.idempotencyKey());
-        if (existingOrder.isPresent()) {
-            log.info("Idempotent replay detected for key={}", request.idempotencyKey());
-            return OrderResponse.from(existingOrder.get());
-        }
-
+        // This teaching version detects duplicate submissions; it does not replay responses.
+        // The database constraint, not a preliminary SELECT, decides concurrent conflicts.
         // 2. Instantiate pending order
         Order order = Order.createPending(userId, request.idempotencyKey());
 
@@ -474,13 +472,9 @@ public class OrderService {
             order.addItem(product.getId(), product.getName(), product.getPriceCents(), itemReq.quantity());
         }
 
-        // 6. Save order (Database UNIQUE constraint defends against concurrent duplicate keys)
-        try {
-            order = orderRepository.saveAndFlush(order);
-        } catch (DataIntegrityViolationException ex) {
-            log.warn("Concurrent duplicate checkout caught by database unique constraint: key={}", request.idempotencyKey());
-            return OrderResponse.from(orderRepository.findByIdempotencyKey(request.idempotencyKey()).orElseThrow());
-        }
+        // A uniqueness failure must escape this transaction so inventory changes roll back.
+        // Map the named checkout-key constraint to HTTP 409 outside the transactional proxy.
+        order = orderRepository.saveAndFlush(order);
 
         // 7. Enqueue Transactional Outbox Event in the same atomic database transaction
         outboxEventService.publishEvent(
@@ -498,115 +492,53 @@ public class OrderService {
 
 ---
 
-## 7. Cryptographic Stripe Webhook Handler (Constant-Time Verification)
+### Duplicate detection is only the first step
+
+Add a user-scoped uniqueness constraint in a migration:
+
+```sql
+ALTER TABLE orders
+ADD CONSTRAINT orders_user_checkout_key UNIQUE (user_id, idempotency_key);
+```
+
+The service above lets a concurrent constraint violation roll back its whole transaction, including inventory changes. Do not catch that exception and query within the failed PostgreSQL transaction. Map only the named duplicate-key violation to `409` after rollback; unrelated integrity failures are not duplicate requests.
+
+To return the original successful response on retries, add a request record scoped by authenticated user, operation, and key. Store a canonical request fingerprint and the committed result. Reject the same key with a different payload. Claim the record atomically and commit it with the business changes. Test simultaneous retries and a lost response after commit. That replay implementation is not supplied here.
+
+## 7. Stripe Webhook Verification Boundary
+
+Use the Stripe SDK's `Webhook.constructEvent` with the original request body, the complete `Stripe-Signature` header, and the endpoint secret. Do not compare `HMAC(payload)` directly with the header. [Stripe signature verification](https://docs.stripe.com/webhooks/signature)
+
+This focused Java method requires a pinned `com.stripe:stripe-java` dependency and these imports. It verifies and parses an event; it does not mark an order paid:
 
 ```java
-package com.example.ecommerce.payment.web;
+import com.stripe.exception.SignatureVerificationException;
+import com.stripe.model.Event;
+import com.stripe.net.Webhook;
 
-import com.example.ecommerce.order.domain.Order;
-import com.example.ecommerce.order.repository.OrderRepository;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.bind.annotation.*;
-
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-
-@RestController
-@RequestMapping("/api/payments")
-public class PaymentWebhookController {
-
-    private static final Logger log = LoggerFactory.getLogger(PaymentWebhookController.class);
-
-    @Value("${stripe.webhook.secret}")
-    private String webhookSigningSecret;
-
-    private final OrderRepository orderRepository;
-
-    public PaymentWebhookController(OrderRepository orderRepository) {
-        this.orderRepository = orderRepository;
-    }
-
-    @PostMapping("/stripe/webhook")
-    @Transactional
-    public ResponseEntity<String> handleStripeWebhook(
-            @RequestHeader("Stripe-Signature") String signatureHeader,
-            @RequestBody String rawPayload) {
-
-        // 1. Verify cryptographic HMAC-SHA256 signature in constant time
-        if (!verifyStripeSignature(rawPayload, signatureHeader, webhookSigningSecret)) {
-            log.warn("Invalid webhook signature rejected!");
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Invalid signature");
-        }
-
-        // 2. Parse payload event (Extracting mock provider payment id & orderId)
-        Long orderId = extractOrderIdFromPayload(rawPayload);
-        String eventType = extractEventType(rawPayload);
-
-        Order order = orderRepository.findById(orderId).orElse(null);
-        if (order == null) {
-            log.error("Webhook references unknown orderId={}", orderId);
-            return ResponseEntity.ok("Acknowledged");
-        }
-
-        // 3. Idempotent state transitions: Ignore if order already settled
-        if (order.getStatus() == com.example.ecommerce.order.domain.OrderStatus.PAID) {
-            log.info("Webhook duplicate replay for already paid orderId={}", orderId);
-            return ResponseEntity.ok("Already processed");
-        }
-
-        if ("payment_intent.succeeded".equals(eventType)) {
-            order.markAsPaid();
-            log.info("Order marked as PAID: orderId={}", orderId);
-        } else if ("payment_intent.payment_failed".equals(eventType)) {
-            order.markAsPaymentFailed();
-            log.warn("Order marked as PAYMENT_FAILED: orderId={}", orderId);
-        }
-
-        return ResponseEntity.ok("Event processed");
-    }
-
-    /**
-     * Constant-time comparison defends against timing attacks.
-     */
-    private boolean verifyStripeSignature(String payload, String signatureHeader, String secret) {
-        try {
-            Mac sha256Hmac = Mac.getInstance("HmacSHA256");
-            SecretKeySpec keySpec = new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256");
-            sha256Hmac.init(keySpec);
-
-            byte[] hash = sha256Hmac.doFinal(payload.getBytes(StandardCharsets.UTF_8));
-            StringBuilder hexString = new StringBuilder();
-            for (byte b : hash) {
-                hexString.append(String.format("%02x", b));
-            }
-
-            // MessageDigest.isEqual executes constant-time array comparison
-            return MessageDigest.isEqual(
-                    hexString.toString().getBytes(StandardCharsets.UTF_8),
-                    signatureHeader.getBytes(StandardCharsets.UTF_8)
-            );
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private Long extractOrderIdFromPayload(String payload) { return 1001L; }
-    private String extractEventType(String payload) { return "payment_intent.succeeded"; }
+public Event verifyEvent(String rawPayload, String signature, String endpointSecret)
+        throws SignatureVerificationException {
+    return Webhook.constructEvent(rawPayload, signature, endpointSecret);
 }
 ```
+
+In the HTTP adapter, reject a missing/bad signature or malformed payload with `400`. Do not modify or reserialize the body before verification. Configure the SDK/API versions together and retain its timestamp tolerance. [Stripe webhook handling](https://docs.stripe.com/webhooks)
+
+The application processor still needs to:
+
+1. Map the verified provider payment ID to a stored order; never use a hardcoded order ID or a client-selected owner.
+2. Check the provider account, live/test mode, amount, currency, and expected state against the stored payment attempt.
+3. Deduplicate the event ID and update payment/order state in one database transaction, with concurrency protection.
+4. Handle duplicate and out-of-order events without undoing a later state.
+5. Acknowledge only after processing or durable enqueue commits. Retry/reconcile failures without silently discarding an unknown payment.
+
+Required tests include altered payload, wrong secret, expired signature timestamp, repeated delivery, concurrent delivery, wrong amount, and a database failure before commit. The old hardcoded event parser and hand-written signature comparison are intentionally removed because they did not implement this contract.
 
 ---
 
 ## 8. Multi-Threaded Concurrency Testcontainers Test Suite
 
-This integration test proves that when **10 concurrent threads** attempt to buy the last **2 units** of stock simultaneously, exactly 2 succeed and 8 fail with HTTP 409 Conflict, without overselling:
+This integration test proves that when **10 concurrent threads** attempt to buy the last **2 units** of stock simultaneously, exactly 2 succeed and 8 raise the expected business exception, without overselling. It calls the service directly; a separate MVC test must verify HTTP 409 mapping:
 
 ```java
 package com.example.ecommerce;
@@ -723,7 +655,7 @@ class ConcurrentCheckoutIntegrationTest {
 | Requirement | Production Verification Standard |
 | :--- | :--- |
 | **Atomic Inventory Safety** | `reserveStock` uses atomic `UPDATE ... WHERE available_quantity >= :qty`. Zero negative stock. |
-| **Idempotent Retries** | Database `UNIQUE` constraint on `idempotency_key` guarantees duplicate client submissions return existing order. |
+| **Idempotent Retries** | User-scoped uniqueness detects duplicates; original-response replay and request-fingerprint validation remain required integration work. |
 | **Price Snapshotting** | Unit prices and product names copied into `order_items` snapshot; future catalog price edits do not mutate historical orders. |
 | **Webhook Security** | Constant-time `HMAC-SHA256` signature verification (`MessageDigest.isEqual`) neutralizing timing attacks. |
 | **Outbox Durability** | Outbox events written within the same database transaction boundary (`@Transactional`) as order creation. |

@@ -5,16 +5,33 @@ description: "Master the fundamental anatomy of backend engineering: The 4 core 
 
 # Modern Backend Architecture: Systems, Lifecycles & Invariant Protection
 
-When a user taps "Buy Now" on an e-commerce mobile application, the user interface merely triggers an animation and dispatches an HTTP request.
+A backend is a program that receives requests, applies rules, and works with stored data. For example, a task app asks the backend to save a task:
 
-Everything that makes that transaction legally and physically real—charging the customer's payment method, verifying that the last item in a warehouse is not double-sold under concurrent race conditions, applying tiered loyalty discounts, snapshotting tax rates, generating an immutable audit ledger entry, and streaming events to automated fulfillment centers—**happens entirely within the backend**.
+```http
+POST /api/todos HTTP/1.1
+Host: localhost:8080
+Content-Type: application/json
 
-The frontend is an untrusted, ephemeral presentation layer running on customer-controlled hardware.
-**The backend is the authoritative brain, the persistent state engine, and the uncompromising guardian of business invariants**.
+{"title":"Learn HTTP"}
+```
 
-This masterclass provides an exhaustive, production-grade manual for modern backend architecture, the physical request lifecycle across cloud infrastructure, invariant protection in Java 21, and the operational responsibilities of a senior backend engineer.
+The backend checks the title, saves the task, and returns a response. On a fresh database in our Todo lab, it includes an ID:
 
----
+```http
+HTTP/1.1 201 Created
+Location: /api/todos/1
+Content-Type: application/json
+
+{"id":1,"title":"Learn HTTP","description":"","completed":false,"createdAt":"2026-09-11T00:00:00Z"}
+```
+
+The timestamp above is illustrative. The ID identifies the saved task. `201` means a resource was created. You can run this exchange using `examples/todo-api/README.md` in your checkout.
+
+A **business invariant** is a rule that must stay true, such as stock never becoming negative. The backend must check rules even if the user interface already checks them. A caller can send requests without using your interface.
+
+<Note>
+**First pass:** understand request → rule → data → response. Complete [Your First Program](/getting-started/first-program), then follow the [roadmap](/getting-started/backend-roadmap). The architectures and code excerpts below are later reference material. Their domain types and infrastructure require a surrounding application.
+</Note>
 
 ## The 4 Pillars of Backend Engineering
 
@@ -49,7 +66,7 @@ mindmap
 The compute layer processes business logic, transforms data, and executes domain rules. In modern Java backends, this runtime is the **HotSpot JVM (Java Virtual Machine)** executing Spring Boot. The primary compute challenge is managing concurrency and thread allocation without exhausting physical host CPU and memory.
 
 ### 2. State & Persistence
-Compute is transient; if a container crashes, its memory is lost instantly. State is permanent. The persistence layer guarantees durability and consistency across hardware reboots. The legal single source of truth is almost always a **relational database (PostgreSQL)** enforcing ACID transactions, supported by distributed caches (Redis) and event logs (Kafka).
+A process loses its in-memory values when it stops. A database can retain committed data across restarts, subject to its storage and durability configuration. This course uses PostgreSQL as the main store. Backups and tested restores are still necessary; persistence does not make data loss impossible.
 
 ### 3. Integration & Networking
 No backend operates in an isolated silo. Backends communicate inbound with client devices (web browsers, mobile apps), laterally with internal services (via gRPC or REST), and outbound with external third parties (Stripe, Twilio, SendGrid). The integration layer manages network boundaries, socket timeouts, and circuit breakers.
@@ -336,17 +353,17 @@ curl -v -X POST https://api.store.internal/api/v1/orders \
 
 ### The Output Annotated Line-by-Line
 
-```text
+```console
 *   Trying 192.168.1.50:443...
 ```
 > **1. TCP SYN Packet Dispatched**: The client operating system initiates the TCP 3-way handshake to destination IP `192.168.1.50` on port 443.
 
-```text
+```console
 * Connected to api.store.internal (192.168.1.50) port 443
 ```
 > **2. TCP Established**: Received `SYN-ACK` from the server and replied with `ACK`. Connection established in 1 RTT.
 
-```text
+```console
 * ALPN: offers h2, http/1.1
 * TLSv1.3 (OUT), TLS handshake, Client hello (1):
 * TLSv1.3 (IN), TLS handshake, Server hello (2):
@@ -357,7 +374,7 @@ curl -v -X POST https://api.store.internal/api/v1/orders \
 ```
 > **3. TLS 1.3 Cryptographic Handshake & ALPN**: The client and server agree on `TLS_AES_256_GCM_SHA384` cipher suite via Diffie-Hellman key exchange (1 RTT). Application-Layer Protocol Negotiation (ALPN) negotiates `h2` (HTTP/2 binary framing) over the socket.
 
-```text
+```http
 > POST /api/v1/orders HTTP/2
 > Host: api.store.internal
 > User-Agent: curl/8.5.0
@@ -369,7 +386,7 @@ curl -v -X POST https://api.store.internal/api/v1/orders \
 ```
 > **4. HTTP Request Headers & Stream Ingestion**: The client streams the request headers and 37-byte JSON payload across stream ID 1.
 
-```text
+```http
 < HTTP/2 201 
 < location: /api/v1/orders/ORD-88219
 < content-type: application/json
@@ -384,7 +401,7 @@ curl -v -X POST https://api.store.internal/api/v1/orders \
 > - `location`: URI of the newly created resource.
 > - `x-correlation-id`: Distributed trace ID generated by the API Gateway or Spring Boot filter for log aggregation.
 
-```text
+```console
 * Connection #0 to host api.store.internal left intact
 ```
 > **6. Connection Keep-Alive**: The TCP/TLS connection is NOT closed. It remains open in the client connection pool, allowing subsequent requests to bypass handshakes and achieve near-zero network latency.

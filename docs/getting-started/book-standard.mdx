@@ -9,6 +9,12 @@ This guide should not be a collection of small notes.
 
 Every serious topic must teach enough that a learner can build, debug, explain, and defend the idea in an interview.
 
+## Evidence Before Labels
+
+State prerequisites and versions. Identify whether code is a complete runnable lab, a project walkthrough, an excerpt, or an intentional failure. A runnable claim requires checked-in files and a successful fresh-checkout build/test command. MDX validation alone never verifies Java or SQL.
+
+Start with a small example, then explain why it works. Add an independent variation and a reviewable expected result. Use the [mastery assessments](/getting-started/mastery-assessments) for larger gates. Avoid universal performance numbers and guarantees unless their assumptions and evidence are supplied.
+
 ## Chapter Standard
 
 Every major chapter should include:
@@ -33,7 +39,7 @@ If a page only defines words, it is not a mastery chapter.
 
 Use four levels for every topic.
 
-```text
+```console
 Level 1  I know the definition
 Level 2  I can write a small example
 Level 3  I can use it in a real project
@@ -60,7 +66,7 @@ Mastery means:
 
 A learner should complete these before claiming backend mastery:
 
-```text
+```console
 Todo API
 Notes API with auth
 Blog API with roles and comments
@@ -90,7 +96,7 @@ For each capstone, the learner should have:
 
 Bad learning:
 
-```text
+```console
 Read topic
 Feel familiar
 Move on
@@ -98,7 +104,7 @@ Move on
 
 Good learning:
 
-```text
+```console
 Read topic
 Build feature
 Break feature

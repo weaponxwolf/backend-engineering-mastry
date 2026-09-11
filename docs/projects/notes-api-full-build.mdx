@@ -5,7 +5,9 @@ description: "Build a complete Spring Boot Notes API with PostgreSQL, validation
 
 # Build Notes API From Zero
 
-This is the serious build path.
+<Warning>
+This walkthrough is not yet a verified standalone application. In particular, the referenced `JwtService` and a complete bearer-authentication integration must be supplied and tested. Follow the [security guide](/spring-boot/spring-security-production) and prove ownership using two different users before treating this project as secure. For a complete beginner application, start with the checked-in [Todo lab](/projects/todo-api-full-build).
+</Warning>
 
 <Info>
 For project requirements, entity tables, API contracts, and testing criteria, see [Project: Notes API](/projects/notes-api).
@@ -35,25 +37,16 @@ You will build a Notes API where users can:
 
 ## Tech Stack
 
-```text
-Java 21
-Spring Boot
-Spring Web
-Spring Data JPA
-Spring Validation
-Spring Security
-PostgreSQL
-Flyway
-JUnit
-MockMvc
-Testcontainers
-```
+- **Java 21 LTS**
+- **Spring Boot 3.5** (Web, Data JPA, Validation, Security)
+- **PostgreSQL 16** & **Flyway** migrations
+- **JUnit 5**, **MockMvc**, & **Testcontainers**
 
 ## Project Structure
 
 Keep the structure boring and clear.
 
-```text
+```bash
 com.example.notes
   auth
   config

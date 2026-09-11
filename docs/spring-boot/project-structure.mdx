@@ -59,7 +59,7 @@ graph TD
 
 By packaging by feature, we can leverage Java's **Package-Private (default)** access modifier. Only the classes meant to be called from the outside are marked `public`. All internal service helpers, entities, and repositories remain package-private:
 
-```text
+```bash
 com.example.store
 ├── order/
 │   ├── OrderController.java         (public - exposed HTTP endpoint)
@@ -300,7 +300,7 @@ graph LR
     B -->|Injects| A
 ```
 
-```text
+```console
 Caused by: org.springframework.beans.factory.BeanCurrentlyInCreationException: 
 Error creating bean with name 'orderService': Requested bean is currently in creation: 
 Is there an unresolvable circular reference?

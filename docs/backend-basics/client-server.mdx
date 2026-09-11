@@ -140,7 +140,7 @@ When the party that initiates the connection close (usually the client/calling s
   1. To ensure the final `ACK` reaches the remote server (if the `ACK` is lost, the server retransmits `FIN`, and the client in `TIME_WAIT` can re-acknowledge it).
   2. To allow delayed duplicate packets from old connections to expire in the internet without corrupting newly opened connections on the same port.
 - **The Disaster**: Linux provides $\sim 28,000$ to $60,000$ ephemeral ports (`cat /proc/sys/net/ipv4/ip_local_port_range`). If an application makes 1,000 new HTTP connections per second without connection pooling, after 30 seconds it exhausts all available ports:
-  ```text
+  ```console
   java.net.NoRouteToHostException: Cannot assign requested address (Address already in use)
   ```
 

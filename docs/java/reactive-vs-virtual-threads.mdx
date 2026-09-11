@@ -163,12 +163,15 @@ public Mono<OrderResponse> processOrder(OrderRequest request) {
 }
 ```
 
-### Loom's Solution: Scoped Values (JEP 446 / JEP 481)
-Virtual threads maintain their own lightweight thread-local storage, but for maximum performance and immutability across child tasks, Java introduces `ScopedValue`:
+### Scoped Values: preview API in Java 21
+
+`ScopedValue` binds a value for a limited execution scope. In Java 21 it is a **preview API**, so it needs `javac --release 21 --enable-preview` and `java --enable-preview`. The following is a fragment requiring your `UserPrincipal` and service types. It is optional reading; the core labs use no preview APIs. See the [Java 21 API](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/ScopedValue.html).
+
+Bindings can be inherited by child tasks created through the supported structured concurrency API. They are not automatically inherited by arbitrary new threads or executor submissions.
 ```java
 public final static ScopedValue<UserPrincipal> CURRENT_USER = ScopedValue.newInstance();
 
-// Bound for the duration of the lambda, inherited by virtual child tasks, automatically cleaned up
+// Available during this call; the binding ends when the scope exits
 ScopedValue.where(CURRENT_USER, authenticatedUser).run(() -> {
     orderService.process();
 });
@@ -176,15 +179,19 @@ ScopedValue.where(CURRENT_USER, authenticatedUser).run(() -> {
 
 ---
 
-## 6. The Modern Architectural Decision Rubric (2026+)
+<Note>
+The monitor pinning advice here targets Java 21. JDK 24 changed `synchronized` so a blocked virtual thread can release its carrier. Do not apply the older workaround mechanically to every newer runtime. See [JDK 24 migration notes](https://docs.oracle.com/en/java/javase/24/migrate/significant-changes-jdk-24.html).
+</Note>
+
+## 6. Choosing an Execution Model
 
 | Evaluation Dimension | Spring WebFlux (Reactor / Netty) | Spring MVC + Virtual Threads (Loom) |
 | :--- | :--- | :--- |
 | **Programming Paradigm** | Declarative Functional / Monadic Streams | Familiar Synchronous / Imperative |
 | **Debugging & Stack Traces** | Cryptic operator assembly traces; hard to debug | Pristine line-by-line sequential stack traces |
-| **Relational DB Ecosystem** | Requires R2D2 (limited features, no Hibernate) | Full JPA / Hibernate 6, Liquibase, Flyway |
-| **Third-Party Libraries** | Any blocking library poisons the EventLoop | Any blocking library works seamlessly |
-| **Backpressure Support** | Native, fine-grained stream backpressure | TCP socket-level backpressure only |
+| **Relational DB Ecosystem** | R2DBC for nonblocking SQL; blocking JPA calls need explicit offloading | Full JPA / Hibernate 6, Liquibase, Flyway |
+| **Third-Party Libraries** | Any blocking library poisons the EventLoop | Blocking APIs remain usable; bound concurrency and test pinning on Java 21 |
+| **Backpressure Support** | Native, fine-grained stream backpressure | Bounded queues, semaphores, admission limits, and transport flow control |
 | **Streaming & Push Protocols** | Native SSE, WebSockets, RSocket, gRPC bidirectional | Supported, but requires chunked async workers |
 | **Context Propagation** | Complex Reactor `Context` wrapping | Native `ThreadLocal` and `ScopedValue` |
 | **Memory Footprint** | Extremely low (~few hundred bytes per stream) | Very low (~1-2KB per virtual thread) |
@@ -194,10 +201,10 @@ ScopedValue.where(CURRENT_USER, authenticatedUser).run(() -> {
 2. **Infinite Data Streams**: Long-lived Server-Sent Events (SSE) or WebSocket push feeds (e.g., stock market tick tickers, live chat backplanes).
 3. **Reactive Native Datastores**: Workloads backed strictly by reactive-native engines like MongoDB Reactive, Redis Reactive, or Apache Cassandra.
 
-### When to Choose Spring MVC + Virtual Threads (90% of Backend Applications):
+### When to Consider Spring MVC + Virtual Threads:
 1. **Relational Database Core**: Any application relying on PostgreSQL, MySQL, JPA, Hibernate, or Spring Data JDBC.
 2. **Enterprise Business Logic**: Complex domain models with extensive branch conditions, domain exceptions, and transaction propagation.
-3. **Engineering Team Productivity**: Teams that want clear stack traces, step-through breakpoints, and zero risk of freezing event loops.
+3. **Engineering Team Productivity**: Teams that want clear stack traces, step-through breakpoints, and familiar control flow and bounded resource use.
 
 ---
 

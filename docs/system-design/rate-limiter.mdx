@@ -71,17 +71,16 @@ To eliminate the boundary burst without storing every individual timestamp in me
 
 $$\text{Estimated Count} = \text{Count}_{\text{current}} + \left( \text{Count}_{\text{previous}} \times (1 - \text{Overlap Percentage}) \right)$$
 
-```text
-Numerical Example:
-- Rate Limit: 100 requests per minute.
-- Previous Minute (12:00 - 12:01): 80 requests.
-- Current Minute (12:01 - 12:02): 30 requests so far.
-- Current Time: 12:01:18 (We are 18 seconds into current minute = 30% through window).
-- Overlap remaining from previous minute: 100% - 30% = 70% (0.70).
-
-Estimated Rolling Requests = 30 + (80 * 0.70) = 30 + 56 = 86 requests.
-Since 86 < 100, the incoming request is ALLOWED!
-```
+> [!TIP]
+> **Numerical Approximation Walkthrough**:
+> - Rate Limit: 100 requests per minute.
+> - Previous Minute ($12:00\text{--}12:01$): 80 requests.
+> - Current Minute ($12:01\text{--}12:02$): 30 requests so far.
+> - Current Time: $12:01:18$ (18 seconds into minute = 30% through window).
+> - Overlap remaining from previous minute: $100\% - 30\% = 70\%$ ($0.70$).
+> - **Estimated Rolling Requests**:
+>   $$30 + (80 \times 0.70) = 30 + 56 = 86\text{ requests}$$
+> - Since $86 < 100$, the incoming request is **ALLOWED**.
 
 - **Memory Consumption**: Exactly two integers per client in Redis ($\approx 16 \text{ bytes}$).
 - **Accuracy**: $99.9\%$ accuracy with zero boundary spikes.

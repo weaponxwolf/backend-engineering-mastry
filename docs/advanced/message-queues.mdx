@@ -86,7 +86,7 @@ Because Kafka **never modifies existing records** in place and only executes seq
 
 Traditional server applications read data from disk and send it over the network using 4 context switches and 3 memory buffer copies:
 
-```text
+```console
 Traditional File Transfer Path (Inefficient):
 1. Disk -> OS Page Cache (DMA Copy)
 2. OS Page Cache -> JVM User-Space Memory (CPU Copy & Context Switch)
@@ -151,7 +151,7 @@ sequenceDiagram
 - `acks=all` (or `-1`): The producer blocks until the leader AND all current **In-Sync Replicas (ISR)** confirm write to disk.
 
 <Warning>
-Setting `acks=all` alone does not guarantee safety! If two follower brokers crash and only the leader remains in the ISR pool, `acks=all` will succeed with only 1 copy. You must set `min.insync.replicas=2` on the broker or topic. If the ISR drops below 2, the leader rejects new writes with `NotEnoughReplicasException`, guaranteeing that zero data loss occurs during cluster degradation.
+Setting `acks=all` alone does not guarantee safety! If two follower brokers crash and only the leader remains in the ISR pool, `acks=all` will succeed with only 1 copy. You must set `min.insync.replicas=2` on the broker or topic. If the ISR drops below 2, the leader rejects new writes with `NotEnoughReplicasException`, rejecting writes that cannot meet the configured replica requirement. This does not protect against every correlated failure or unsafe leader-election setting.
 </Warning>
 
 ### 3.2 The Idempotent Producer
@@ -179,7 +179,7 @@ $$\text{Partition} = \text{toPositive}(\text{murmur2}(\text{key})) \pmod{\text{n
 kafkaTemplate.send("order-events", order.getOrderId().toString(), eventPayload);
 ```
 
-All events sharing `orderId = "10492"` are guaranteed to land on the identical partition and will be consumed strictly in the order they were produced.
+With the same serializer and partitioner and an unchanged partition count, the same key maps to the same partition. Kafka orders records as appended there. Multiple producers, asynchronous processing, retry topics, key salting, and partition-count changes require separate ordering decisions.
 
 ---
 
@@ -220,19 +220,9 @@ flowchart TD
 
 Consumers store their progress by committing **Offsets** to an internal, highly-compacted Kafka topic named `__consumer_offsets`.
 
-Kafka provides `enable.auto.commit=true` by default, which commits offsets periodically in the background (every 5,000 ms). **This is an enterprise anti-pattern:**
+The Kafka client defaults to auto-commit, while Spring Kafka listener containers normally disable it and manage commits. Auto-commit happens as the consumer polls; it is misleading to imagine a timer committing arbitrary in-flight synchronous processing independently of `poll()`.
 
-```text
-The Auto-Commit Disaster Scenario:
-1. Consumer polls a batch of 100 messages (Offsets 100 to 199).
-2. Background thread timer triggers and automatically commits Offset 200 to Kafka.
-3. At Offset 140, the Java process throws an unhandled OutOfMemoryError or the container gets killed.
-4. Kubernetes restarts the container.
-5. Consumer starts reading from Offset 200.
-Result: Messages 140 through 199 are SILENTLY LOST forever!
-```
-
-**Production Standard**: Disable auto-commit (`enable.auto.commit=false`) and use Spring Kafka manual immediate acknowledgment (`AckMode.MANUAL_IMMEDIATE`) executed strictly after local business logic commits.
+The risky shape is: poll records, hand them to another thread, then poll again before that work finishes. Progress can be committed for work that later fails. Use `enable.auto.commit=false` and a clear completion boundary. `RECORD` and `BATCH` container acknowledgment modes are valid choices. This chapter uses `MANUAL_IMMEDIATE` to make **database commit before offset commit** explicit. See [Spring Kafka offset modes](https://docs.spring.io/spring-kafka/reference/3.3/kafka/receiving-messages/message-listener-container.html).
 
 ### 4.3 The Poll Loop & The Dreaded `CommitFailedException`
 
@@ -251,7 +241,7 @@ Kafka consumers operate an event loop driven by `poll(Duration timeout)`. The ba
 
 **The Fix**:
 1. Reduce `max.poll.records` to a small batch (e.g., 20 to 50 records).
-2. Offload heavy I/O processing to Java 21 Virtual Threads while committing offsets deterministically.
+2. Bound processing time with database and HTTP deadlines. Keep processing on the listener thread until you have designed partition ordering, backpressure, acknowledgments, and rebalance handling for asynchronous work. Virtual threads alone do not solve offset safety.
 
 ---
 
@@ -280,9 +270,11 @@ flowchart TD
     DLT --> Triage["Manual Inspection & Replay CLI Tool"]
 ```
 
-### 5.2 Production Spring Boot Configuration
+### 5.2 Short blocking retries followed by a DLT
 
-Below is the production configuration implementing `DefaultErrorHandler` with `DeadLetterPublishingRecoverer`, exponential backoff, and non-retryable exception filtering:
+The configuration below retries **in the listener container**, then publishes to a DLT. It does not create delay topics. Use this when short delays and the resulting partition stall fit your processing budget.
+
+A DLT must have at least as many partitions as its source when routing to the same partition number. Configure compatible serializers for the recoverer; raw deserialization failures may require a `byte[]` serializer as well as the normal JSON serializer. See [Spring Kafka exception handling](https://docs.spring.io/spring-kafka/reference/3.3/kafka/annotation-error-handling.html).
 
 ```java
 package com.example.infrastructure.kafka;
@@ -301,7 +293,7 @@ import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.kafka.support.serializer.ErrorHandlingDeserializer;
 import org.springframework.kafka.support.serializer.JsonDeserializer;
-import org.springframework.util.backoff.ExponentialBackOff;
+import org.springframework.util.backoff.FixedBackOff;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -321,11 +313,13 @@ public class KafkaConsumerConfig {
             (record, exception) -> new TopicPartition(record.topic() + ".DLT", record.partition())
         );
 
-        // 2. Exponential backoff: Initial 1s delay, 2.0 multiplier, max 3 delivery attempts
-        ExponentialBackOff backOff = new ExponentialBackOff(1000L, 2.0);
-        backOff.setMaxElapsedTime(15000L); // Stop retrying after 15s total elapsed time
+        // Do not declare recovery successful when publication fails.
+        recoverer.setFailIfSendResultIsError(true);
 
-        DefaultErrorHandler errorHandler = new DefaultErrorHandler(recoverer, backOff);
+        // Initial delivery + 2 retries, each delayed by 1 second.
+        DefaultErrorHandler errorHandler = new DefaultErrorHandler(
+                recoverer, new FixedBackOff(1000L, 2L));
+        errorHandler.setCommitRecovered(true); // Required with MANUAL_IMMEDIATE
 
         // 3. Poison pill exceptions that should NEVER be retried (routed to DLT immediately)
         errorHandler.addNotRetryableExceptions(
@@ -358,6 +352,25 @@ public class KafkaConsumerConfig {
 }
 ```
 
+### 5.3 Longer delays with retry topics
+
+For independent events, configure `@RetryableTopic` or `RetryTopicConfiguration` to create retry consumers. Later main-topic events can overtake a failed event. A stable partition key does **not** preserve business ordering after this handoff. See [Spring Kafka's retry-topic ordering warning](https://docs.spring.io/spring-kafka/reference/3.3/retrytopic/how-the-pattern-works.html).
+
+```java
+// Alternative listener configuration; do not also register the earlier listener.
+@RetryableTopic(
+    attempts = "4",
+    backoff = @Backoff(delay = 1000, multiplier = 2.0),
+    kafkaTemplate = "kafkaTemplate")
+@KafkaListener(topics = "independent-notifications", groupId = "notification-workers")
+public void receive(NotificationRequested event) {
+    notificationService.recordDeliveryIntent(event);
+}
+```
+
+Imports are `org.springframework.kafka.annotation.RetryableTopic` and `org.springframework.retry.annotation.Backoff`. This is a configuration shape; supply the event type, service, retry-topic infrastructure, and JSON serializers in the application. Use a separate consumer factory with `AckMode.RECORD` for this alternative. Nonblocking retry topics cannot be combined with Kafka container transactions; a local database service transaction is a separate boundary. See [supported retry configurations](https://docs.spring.io/spring-kafka/reference/3.3/retrytopic.html).
+
+
 ---
 
 ## 6. End-to-End Idempotent Consumer Implementation
@@ -368,84 +381,77 @@ In distributed systems, the network **will** occasionally drop an ACK packet, ca
 
 ```sql
 CREATE TABLE processed_events (
-    event_id UUID PRIMARY KEY,
+    event_id UUID NOT NULL,
     topic VARCHAR(100) NOT NULL,
     consumer_group VARCHAR(100) NOT NULL,
-    processed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    processed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (consumer_group, event_id)
 );
 
 CREATE INDEX idx_processed_events_date ON processed_events(processed_at);
 ```
 
-### 6.2 Consumer Service with Idempotency Guard
+### 6.2 Commit the database before acknowledging Kafka
+
+`@Transactional` commits after the annotated method returns. Calling `acknowledge()` inside that method can advance Kafka before the database commit fails. Use a transaction template so the commit finishes before control reaches the acknowledgment:
 
 ```java
 package com.example.consumer;
 
 import com.example.domain.order.OrderPaymentService;
 import com.example.domain.order.event.OrderPaidEvent;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @Component
 public class PaymentEventConsumer {
-
-    private static final Logger log = LoggerFactory.getLogger(PaymentEventConsumer.class);
-    private final JdbcClient jdbcClient;
+    private static final String GROUP = "payment-fulfillment-group";
+    private final JdbcClient jdbc;
     private final OrderPaymentService paymentService;
+    private final TransactionTemplate databaseTransaction;
 
-    public PaymentEventConsumer(JdbcClient jdbcClient, OrderPaymentService paymentService) {
-        this.jdbcClient = jdbcClient;
+    public PaymentEventConsumer(JdbcClient jdbc,
+                                OrderPaymentService paymentService,
+                                PlatformTransactionManager transactionManager) {
+        this.jdbc = jdbc;
         this.paymentService = paymentService;
+        this.databaseTransaction = new TransactionTemplate(transactionManager);
     }
 
-    @KafkaListener(
-        topics = "order-events",
-        groupId = "payment-fulfillment-group",
-        containerFactory = "kafkaListenerContainerFactory"
-    )
-    @Transactional
+    @KafkaListener(topics = "order-events", groupId = GROUP,
+                   containerFactory = "kafkaListenerContainerFactory")
     public void onOrderPaid(OrderPaidEvent event, Acknowledgment ack) {
-        log.info("Received event {} for order {}", event.eventId(), event.orderId());
+        databaseTransaction.executeWithoutResult(status -> {
+            int inserted = jdbc.sql("""
+                    INSERT INTO processed_events (event_id, topic, consumer_group)
+                    VALUES (:id, :topic, :group)
+                    ON CONFLICT (consumer_group, event_id) DO NOTHING
+                    """)
+                    .param("id", event.eventId())
+                    .param("topic", "order-events")
+                    .param("group", GROUP)
+                    .update();
 
-        // Step 1: Idempotency Check via Atomic Database Insert
-        try {
-            int inserted = jdbcClient.sql("""
-                INSERT INTO processed_events (event_id, topic, consumer_group)
-                VALUES (:id, :topic, :group)
-                ON CONFLICT (event_id) DO NOTHING
-            """)
-            .param("id", event.eventId())
-            .param("topic", "order-events")
-            .param("group", "payment-fulfillment-group")
-            .update();
-
-            if (inserted == 0) {
-                log.warn("Duplicate event {} detected! Discarding without re-executing business logic.", event.eventId());
-                ack.acknowledge();
-                return;
+            if (inserted == 1) {
+                // Local database changes using the SAME transaction manager.
+                paymentService.fulfillPayment(event.orderId(), event.amountCents());
             }
-        } catch (DataIntegrityViolationException ex) {
-            log.warn("Concurrent duplicate insertion for event {}", event.eventId());
-            ack.acknowledge();
-            return;
-        }
+        }); // Commit has succeeded here; failures propagate to the error handler.
 
-        // Step 2: Execute Core Business Logic
-        paymentService.fulfillPayment(event.orderId(), event.amountCents());
-
-        // Step 3: Commit Kafka Offset strictly after DB transaction commits
-        ack.acknowledge();
-        log.info("Successfully processed and acknowledged event {}", event.eventId());
+        ack.acknowledge(); // Still on the consumer thread.
     }
 }
 ```
+
+This example assumes one database transaction manager, no outer listener transaction, and synchronous processing. If the application has multiple managers, qualify the database manager explicitly. `fulfillPayment` must join this transaction and must not call a remote payment provider. For external effects, insert an outbox intent here and use provider idempotency when delivering it.
+
+A crash after database commit but before offset commit causes redelivery. The unique `(consumer_group, event_id)` key makes that redelivery a no-op for the same business handler. Do not catch every database integrity error as a duplicate: it may mean a different constraint failed, and PostgreSQL may already have aborted the transaction. See [Spring transaction-template semantics](https://docs.spring.io/spring-framework/reference/data-access/transaction/programmatic.html).
+
+Prove the boundary with integration tests: fail the business write and assert no dedup row remains; deliver the same event twice and assert one business change; fail offset commit after the database commit and verify redelivery remains safe. The DLT smoke-test shape below does not establish those guarantees by itself.
 
 ---
 
@@ -556,10 +562,10 @@ class PaymentEventConsumerIntegrationTest {
      kafka-consumer-groups.sh --bootstrap-server kafka:9092 \
        --describe --group payment-fulfillment-group
      ```
-  2. If all lag is concentrated on **one single partition**, a hot key (e.g. `orderId = null` or celebrity merchant ID) is bottlenecking a single worker. Apply key salting (`key + "_" + random(1..4)`).
+  2. If all lag is concentrated on **one single partition**, a hot key (e.g. `orderId = null` or celebrity merchant ID) is bottlenecking a single worker. First decide whether per-key order is required. Salting a key splits its records across partitions and breaks that order; use it only when the business operation supports independent processing.
   3. If lag is distributed evenly across all partitions:
-     - Check if consumer count is less than partition count. If so, scale up consumer container pods in Kubernetes until `num_pods == num_partitions`.
-     - If consumer pods already match partition count, increase topic partitions dynamically (requires caution regarding key hashing) or switch consumer logic to async Java 21 Virtual Threads.
+     - Check if consumer count is less than partition count. If so, scale the total number of consumer threads toward the partition count, accounting for each pod’s configured concurrency.
+     - If consumer pods already match partition count, increase topic partitions dynamically (requires caution regarding key hashing) or redesign the workload after proving safe offset and ordering behavior.
 
 ### 8.2 The Rebalance Storm
 - **Symptom**: Consumers spend 80% of their CPU cycles rebalancing instead of processing records. Log outputs repeat: `Member ... has been evicted from group ... due to max.poll.interval.ms timeout`.
@@ -589,17 +595,17 @@ class PaymentEventConsumerIntegrationTest {
     
     **The Disaster**: If the leader sends the acknowledgment back to the producer and immediately dies (due to a power outage or hardware kernel panic) before follower replicas have fetched the new offset, the remaining replicas will elect a new leader that **does not possess that message**. The message is permanently lost, even though the producer was told the write was successful.
     
-    With `acks=all` (and `min.insync.replicas=2`), the write is only acknowledged once the leader and at least one in-sync follower have persisted the record to disk, guaranteeing zero data loss.
+    With `acks=all`, acknowledgments wait for the current in-sync replicas, and `min.insync.replicas=2` rejects writes when too few replicas are available. Replication acknowledgments do not mean an `fsync` for every record. Durability also depends on replica failures and leader election. See [Kafka replication design](https://kafka.apache.org/38/design/design/).
   </Accordion>
 
   <Accordion title="3. What happens if you have 8 partitions in a Kafka topic and 12 consumer instances in the same consumer group?">
     Only **8 consumer instances** will actively receive and process messages. Exactly one partition is assigned to at most one consumer instance within a single consumer group. The remaining **4 consumer instances will sit completely idle** in standby mode. They only activate if one of the 8 active instances crashes or disconnects.
   </Accordion>
 
-  <Accordion title="4. Why should you never use in-place retries (e.g. Thread.sleep) inside a Kafka consumer?">
+  <Accordion title="4. When should you use blocking retries or retry topics?">
     In-place sleeping causes **Head-of-Line Blocking**. Because a consumer reads messages from a partition in strict sequential order, pausing the consumer thread to retry a failing message prevents all subsequent healthy messages on that partition from being processed. 
     
-    Furthermore, if the total retry sleep time exceeds `max.poll.interval.ms` (default 5 minutes), the Kafka group coordinator assumes the worker has died, evicts it from the group, and triggers a cascading rebalance storm across the cluster. The solution is non-blocking retry topics (`topic.retry-1m`, `topic.DLT`).
+    If processing prevents polling within `max.poll.interval.ms`, the consumer can lose its assignment. Short bounded retries are reasonable when order matters. Retry topics allow the main partition to progress during long delays, but later events can overtake failed ones.
   </Accordion>
 
   <Accordion title="5. How does Kafka guarantee idempotency at the Producer level?">
@@ -626,7 +632,7 @@ Auto-commit is disabled (`enable.auto.commit=false`), and manual immediate ackno
 Consumer partitions use `CooperativeStickyAssignor` to eliminate stop-the-world rebalance storms.
 </Check>
 <Check>
-A non-blocking Dead-Letter Topic pipeline (`DefaultErrorHandler` with `DeadLetterPublishingRecoverer`) isolates poison pills without halting healthy partition processing.
+Choose short blocking retries with `DefaultErrorHandler`, or retry topics with their ordering trade-off. Test DLT publication failure and offset recovery.
 </Check>
 <Check>
 Consumers implement an atomic database deduplication check to enforce idempotency against duplicate at-least-once message deliveries.

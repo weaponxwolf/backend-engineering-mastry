@@ -32,11 +32,11 @@ flowchart TD
 | Pattern | Read Path | Write Path | Strengths | Trade-offs |
 | :--- | :--- | :--- | :--- | :--- |
 | **Cache-Aside** (Default) | Read Cache $\rightarrow$ On miss, read DB $\rightarrow$ Populate Cache | Write DB $\rightarrow$ Evict Cache (`DEL key`) | Only requested data is cached; cache downtime does not take down the app | Cache miss incurs 3 network hops; momentary eventual consistency window |
-| **Write-Through** | Read Cache $\rightarrow$ On miss, read DB | Write Cache $\rightarrow$ Cache synchronously writes DB | Cache is never stale; read hits are guaranteed | High write latency (waits for both cache and DB writes) |
+| **Write-Through** | Read Cache $\rightarrow$ On miss, read DB | Write Cache $\rightarrow$ Cache synchronously writes DB | Can keep writes and cache updates aligned when all writes use the same path | High write latency (waits for both cache and DB writes) |
 | **Write-Behind** | Read Cache | Write Cache $\rightarrow$ Async worker batch flushes to DB | Maximum write throughput (absorbs massive write spikes) | Cache node crash before flush causes **permanent data loss** |
 | **Refresh-Ahead** | Read Cache | Background scheduled job refreshes hot keys before TTL | Near-zero read latency; eliminates cache misses on hot data | Miscalculating access frequency wastes RAM on cold keys |
 
-### The Golden Rule: Invalidate (`DEL`), Never Update (`SET`)
+### Cache-aside writes: invalidate after commit, then handle races
 When mutating data in a Cache-Aside architecture, developers often make the mistake of updating the cache value directly:
 
 ```mermaid
@@ -52,10 +52,18 @@ sequenceDiagram
     Note over T1,Cache: Network delay / thread scheduling stall
     T2->>Cache: 3. SET product:42 price = 300 (C)
     T1->>Cache: 4. SET product:42 price = 200 (B)
-    Note over DB,Cache: DISASTER: DB holds 300, but Cache permanently holds stale 200!
+    Note over DB,Cache: DB holds 300; cache holds 200 until expiry or repair
 ```
 
-**The Solution**: Always **delete (evict)** the cache entry upon database mutation. If concurrent writes interleave, the next read will simply trigger a clean cache miss and fetch the latest committed database state.
+For cache-aside, deleting the entry **after the database commits** avoids this delayed-writer `SET` race. It does not make the cache strongly consistent. Consider this different sequence:
+
+1. Reader A misses the cache and reads the old database value.
+2. Writer B commits a new value and deletes the cache key.
+3. Reader A resumes and caches the old value after the deletion.
+
+The key is stale again. The process can also crash between commit and deletion. A cache-loader lock alone does not coordinate writers. Define acceptable staleness, set a TTL, and use durable invalidation events where needed. TTL limits entry age, not time since the database write, if a delayed reader refills it. Version checks require a design that rejects older refills as well as older writes.
+
+Treat the database as the authority for inventory reservation, authorization, and other invariants. Caching a product display is different from deciding whether a purchase is allowed. See [cache-aside consistency limits](https://learn.microsoft.com/en-us/azure/architecture/patterns/cache-aside).
 
 ---
 
@@ -311,7 +319,7 @@ $$\text{Slot} = \text{CRC16}(\text{key}) \pmod{16384}$$
 
 - **Hash Tags `{...}` for Multi-Key Operations**:
   If an operation requires updating multiple keys in a single transaction (or Lua script), all keys must map to the **exact same hash slot**. Enforce this using curly braces:
-  ```text
+  ```redis
   user:{104}:profile  -> CRC16('104') % 16384 -> Slot 8192
   user:{104}:orders   -> CRC16('104') % 16384 -> Slot 8192
   ```
@@ -323,14 +331,14 @@ $$\text{Slot} = \text{CRC16}(\text{key}) \pmod{16384}$$
 For extreme high-throughput architectures (e.g., 500,000 requests/sec), querying Redis over the network incurs 0.5 to 1.5 milliseconds of network latency and socket serialization overhead.
 
 A **Two-Tier Cache** combines in-process memory (L1) with distributed memory (L2):
-- **L1 Cache (Caffeine)**: Stored in JVM heap. Access time: **under 50 nanoseconds** ($O(1)$ RAM lookup, zero network hops).
-- **L2 Cache (Redis)**: Shared distributed cache across all microservice instances. Access time: **1 millisecond**.
+- **L1 Cache (Caffeine)**: Stored in JVM heap, with no network hop. Measure actual lookup and serialization costs.
+- **L2 Cache (Redis)**: Shared across application instances. Latency depends on network placement, command cost, and load.
 
 ```mermaid
 flowchart TD
-    Req["Incoming API Request"] --> L1["L1: Caffeine In-JVM Cache\n(50 Nanoseconds)"]
+    Req["Incoming API Request"] --> L1["L1: Caffeine In-JVM Cache"]
     L1 -->|Hit| Res1["Return Cached Response"]
-    L1 -->|Miss| L2["L2: Redis Distributed Cache\n(1 Millisecond)"]
+    L1 -->|Miss| L2["L2: Redis Distributed Cache"]
     L2 -->|Hit| Res2["Populate L1 & Return"]
     L2 -->|Miss| DB[(PostgreSQL Database)]
     DB --> Res3["Populate L2, Populate L1 & Return"]
@@ -341,6 +349,10 @@ flowchart TD
     PubSub --> Worker1["Worker 1 (Evict L1)"]
     PubSub --> Worker2["Worker 2 (Evict L1)"]
 ```
+
+Redis Pub/Sub is **at-most-once**: a disconnected instance misses invalidations. Use short L1 TTLs and clear or reconcile local entries after reconnect. Durable delivery needs a retained event stream and per-instance replay or another reconciliation design. A single competing-consumer group does not broadcast every invalidation to every cache instance. See [Redis Pub/Sub delivery semantics](https://redis.io/docs/latest/develop/pubsub/).
+
+A useful failure test pauses a reader after its database read, commits a writer and its eviction, then releases the reader. Assert that your chosen version or TTL policy handles the resulting stale refill. Also disconnect one L1 subscriber during an update and verify it recovers without relying on a missed message.
 
 ---
 
@@ -356,7 +368,7 @@ flowchart TD
   <Accordion title="2. Why should you delete (evict) a cache key on database update instead of updating the cached value?">
     Updating the cache on write creates severe race conditions when multiple concurrent writes occur. 
     
-    If Thread 1 updates the database to $V_1$ and Thread 2 updates the database to $V_2$, network jitter can cause Thread 2's cache write to land before Thread 1's cache write. The cache ends up storing $V_1$ while the database holds $V_2$, creating permanent data corruption. Deleting the key ensures that subsequent reads fetch the authoritative committed state from the database.
+    If Thread 1 updates the database to $V_1$ and Thread 2 updates the database to $V_2$, network jitter can cause Thread 2's cache write to land before Thread 1's cache write. The cache ends up storing $V_1$ while the database holds $V_2$, leaving stale data until expiration or repair. Deletion after commit removes that write/write race, but a delayed reader can still refill an old value. Add an explicit staleness policy and test the read/write race.
   </Accordion>
 
   <Accordion title="3. What is the difference between Cache Stampede, Cache Penetration, and Cache Avalanche?">

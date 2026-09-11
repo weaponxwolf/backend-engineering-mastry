@@ -168,7 +168,7 @@ ALTER TABLE users DROP COLUMN name;
 Understanding how PostgreSQL physically handles different schema modifications prevents accidental multi-minute table locks on tables with millions of rows.
 
 ### 3.1 Adding Columns with Default Values
-- **PostgreSQL 11+**: Adding a column with a default value (e.g. `ALTER TABLE orders ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'PENDING';`) is **instantaneous** ($O(1)$). It records the default value in PostgreSQL table metadata (`pg_attribute`) without rewriting heap pages.
+- **PostgreSQL 11+**: A non-volatile default, such as `DEFAULT 'PENDING'`, usually avoids a table rewrite. A volatile expression such as `random()` still requires a rewrite. Both forms need an `ACCESS EXCLUSIVE` lock, so even a metadata-only change can wait behind other transactions. Use a short `lock_timeout` and retry deliberately. See [PostgreSQL column changes](https://www.postgresql.org/docs/16/ddl-alter.html).
 - **Legacy Databases**: Rewrites every physical page on disk, holding an `ACCESS EXCLUSIVE` lock for minutes on large tables.
 
 ### 3.2 Adding Foreign Keys Safely
@@ -215,23 +215,36 @@ ON orders(customer_id, created_at DESC);
 ```
 
 #### How Concurrent Indexing Operates (3-Phase Scan):
-1. **Phase 1**: Registers the index in PostgreSQL system catalogs (`pg_index`). Live writes begin updating the new index structure.
+1. **Phase 1**: Registers an invalid index in PostgreSQL system catalogs (`pg_index`). It becomes ready for write maintenance later in the build.
 2. **Phase 2 (Table Scan 1)**: Scans all existing table pages to build the initial B-Tree. Reads and writes proceed normally!
-3. **Phase 3 (Table Scan 2)**: Executes a second scan to catch up with changes made during Phase 2, then marks the index valid (`indisvalid = true`).
+3. **Phase 3 (Table Scan 2)**: Validates changes from concurrent writes. PostgreSQL then waits for relevant old snapshots before marking the index valid (`indisvalid = true`).
 
 ### 4.2 Flyway Multi-Statement Rule
 `CREATE INDEX CONCURRENTLY` **cannot execute inside a multi-statement transaction block**. 
 
-You must instruct Flyway to execute the migration outside a transaction using the special comment header:
+Keep the index build in its own migration. Configure that migration with a **sibling script configuration file**, whose name includes both `.sql` and `.conf`. A SQL comment named `flyway:transactional` is not a supported Flyway setting.
 
 ```sql
--- V5__add_orders_customer_idx.sql
--- flyway:transactional=false
-
-SET lock_timeout = '5s';
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_orders_customer_date 
-ON orders(customer_id, created_at DESC);
+-- src/main/resources/db/migration/V5__add_orders_customer_idx.sql
+CREATE INDEX CONCURRENTLY idx_orders_customer_date
+ON orders (customer_id, created_at DESC);
 ```
+
+```properties
+# src/main/resources/db/migration/V5__add_orders_customer_idx.sql.conf
+executeInTransaction=false
+```
+
+This is Flyway's documented [per-script configuration mechanism](https://documentation.red-gate.com/flyway/reference/script-configuration). For Flyway versions using PostgreSQL transactional advisory locks, configure the migration runner to use session locks:
+
+```properties
+# flyway.conf for the standalone Flyway runner
+flyway.postgresql.transactional.lock=false
+```
+
+This is a separate setting from migration transaction boundaries. See [Flyway's PostgreSQL lock setting](https://documentation.red-gate.com/flyway/reference/configuration/flyway-namespace/flyway-postgresql-namespace/flyway-postgresql-transactional-lock-setting). Verify both settings using the exact Flyway version and runner you deploy; a standalone `flyway.conf` is not automatically Spring Boot configuration.
+
+`CONCURRENTLY` permits normal writes, but still takes locks, waits for transactions, and consumes CPU and I/O. A failed build can leave an invalid index. Avoid `IF NOT EXISTS` as a repair mechanism: an existing index with the same name might be invalid or have a different definition. Inspect it before retrying. See [PostgreSQL concurrent index rules](https://www.postgresql.org/docs/16/sql-createindex.html).
 
 ### 4.3 Detecting and Cleaning Up Broken `INVALID` Indexes
 If a concurrent index build fails (e.g., query cancellation, timeout, or duplicate key violation on unique index), PostgreSQL leaves behind an `INVALID` index. 
@@ -301,7 +314,7 @@ spring:
   <Accordion title="3. Why can CREATE INDEX CONCURRENTLY not run inside a Flyway transaction?">
     Concurrent index creation requires PostgreSQL to execute multiple distinct transactions and table scans under the hood (registering the index, building the B-tree, and catching up with concurrent modifications). 
     
-    PostgreSQL explicitly forbids running `CREATE INDEX CONCURRENTLY` inside an existing user transaction block (`BEGIN ... COMMIT`). To run it via Flyway, the migration file must include `-- flyway:transactional=false` as the very first line.
+    PostgreSQL explicitly forbids running `CREATE INDEX CONCURRENTLY` inside an existing user transaction block (`BEGIN ... COMMIT`). To run it via Flyway, put `executeInTransaction=false` in the migration’s sibling `.sql.conf` file and configure PostgreSQL session advisory locks when required by the Flyway runner.
   </Accordion>
 
   <Accordion title="4. What is an INVALID index in PostgreSQL, and why is it dangerous?">
@@ -333,7 +346,7 @@ Every production DDL migration script sets `SET lock_timeout = '2s'` and `SET st
 Breaking schema changes strictly follow the 4-phase Expand and Contract lifecycle across separate deployments.
 </Check>
 <Check>
-All large table indexing uses `CREATE INDEX CONCURRENTLY` with `-- flyway:transactional=false`.
+All large table indexing uses `CREATE INDEX CONCURRENTLY` with `executeInTransaction=false` in the migration’s sibling `.sql.conf` file.
 </Check>
 <Check>
 Automated monitoring queries check for `indisvalid = false` to detect and drop broken index leftovers.

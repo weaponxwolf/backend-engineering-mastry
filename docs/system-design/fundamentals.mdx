@@ -81,13 +81,12 @@ $$\text{Speedup}(S) = \frac{1}{(1 - P) + \frac{P}{N}}$$
 - $(1 - P) = B$ : Serial portion that must execute sequentially (e.g., database row locks, TCP handshakes).
 - $N$ : Number of parallel processor cores or worker nodes.
 
-```text
-Example:
-If 5% of your checkout request is strictly serial (acquiring an exclusive database row lock):
-Even with INFINITE servers (N -> ∞):
-Max Theoretical Speedup = 1 / (0.05 + 0) = 20x speedup!
-Adding more servers beyond 20 nodes yields ZERO additional performance!
-```
+> [!IMPORTANT]
+> **Amdahl's Law Speedup Ceiling**:
+> If 5% of your checkout request is strictly serial (e.g., acquiring an exclusive PostgreSQL row lock):
+> Even with infinite parallel worker nodes ($N \to \infty$):
+> $$\text{Max Theoretical Speedup} = \frac{1}{0.05 + 0} = 20\times \text{ speedup}$$
+> Adding more compute instances beyond 20 nodes yields zero additional throughput because the serial lock becomes the bottleneck!
 
 ---
 

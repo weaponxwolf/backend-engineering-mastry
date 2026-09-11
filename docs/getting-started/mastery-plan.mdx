@@ -1,66 +1,73 @@
 ---
 title: "Mastery Plan"
-description: "Use the guide as a serious backend mastery program."
+description: "Turn a reading path into independent implementation, debugging, and design skills with an evidence portfolio."
 ---
 
 # Mastery Plan
 
-Mastery does not come from reading once.
+Track what you can do after the tutorial is closed. Page count, study streaks, and familiarity with terminology do not demonstrate the same skill as building and debugging.
 
-It comes from building, breaking, fixing, explaining, and repeating.
+Follow the [roadmap](/getting-started/backend-roadmap). Use the [assessments](/getting-started/mastery-assessments) after each stage, and keep the evidence in your own learning repository.
 
-## Three Tracks
+## Four levels of evidence
 
-Use this guide in three tracks.
+| Level | What you can demonstrate | Evidence |
+| --- | --- | --- |
+| Recognize | Explain a term and identify it in code | A short explanation and a concrete example |
+| Build with guidance | Follow a walkthrough and get the expected behavior | Source, run command, and results |
+| Build independently | Implement a changed requirement without the walkthrough | A new implementation and behavior tests |
+| Diagnose and judge | Reproduce a failure, fix its cause, and defend a tradeoff | Failing/passing test, diagnostic notes, and alternatives |
 
-```text
-Learn    understand the idea
-Build    implement the idea in a project
-Master   handle mistakes, scale, tests, and production issues
-```
+Advance to the next stage when its required outcomes work independently. Keep deeper topics open for later practice. You can be independent at REST validation while still learning database isolation.
 
-Do not skip the build track.
+## Keep a small evidence portfolio
 
-Backend skill becomes real only when your code handles bad input, missing data, slow queries, and failures.
+For each feature, save one record with these fields. A Markdown file in your application repository is sufficient.
 
-## Weekly Method
+| Field | Example: Todo title validation |
+| --- | --- |
+| Requirement | Titles must contain visible text and be at most 120 characters. |
+| Prediction | A request containing only spaces returns 400 and creates no row. |
+| Reproduction | Exact request, application version, database setup, and test command. |
+| Result | Response body plus the database assertion after the request. |
+| Failure found | Update initially accepted blank titles even though create rejected them. |
+| Fix | Apply the same boundary rule to both operations. |
+| Regression proof | Tests fail on the old implementation and pass after the fix. |
+| Independent variation | Add a 120/121-character boundary test without the walkthrough. |
+| Open question | Decide how the product should count Unicode characters before supporting this requirement across clients. |
 
-```text
-Day 1-2  learn topic and write notes
-Day 3-4  build small feature
-Day 5    write tests
-Day 6    debug and refactor
-Day 7    explain the topic and review mistakes
-```
+Record actual results. A planned test remains planned until you run it. If your environment blocks a test, record the blocker and the last verified step.
 
-## Mastery Checklist
+## Repeat skills with a changed problem
 
-For every important topic, you should be able to:
+Revisit a skill in a later session and again after another project. These are practice suggestions, not deadlines.
 
-- Explain it in simple English
-- Write a working example
-- Test the happy path
-- Test the failure path
-- Name common mistakes
-- Debug a broken version
-- Explain when not to use it
+| First exercise | Later transfer exercise |
+| --- | --- |
+| Reject invalid task input | Reject invalid note updates and prove no row changed |
+| Find an item in a Java map | Distinguish missing database rows from unauthorized access |
+| Roll back a two-row change | Prevent negative inventory under concurrent requests |
+| Retry a failed local operation | Handle a repeated event without repeating a business action |
+| Measure one endpoint | Explain why its load-test result does not predict a different workload |
 
-## Project Ladder
+Before opening old notes, predict the design and the failure cases. Compare your result with the earlier evidence afterward.
 
-Progress through the capstones in sequence:
+## Build a sequence, then maintain something
 
-- [Todo API](/projects/todo-api-full-build) — CRUD, layers, validation, and error shapes
-- [Notes API](/projects/notes-api-full-build) — User authentication, JWT, ownership checks, and Flyway migrations
-- [Blog API](/projects/blog-api-full-build) — Roles, permissions, comments, and pagination
-- [Ecommerce Backend](/projects/ecommerce-full-build) — Multi-table transactions, payment idempotency, and inventory races
-- [Notification Worker](/projects/notification-worker-full-build) — Message queues, worker retries, dead letter queues, and idempotency
-- [System Design Implementations](/system-design/fundamentals) — Scale, capacity estimation, rate limiting, and fault tolerance
+The core sequence is plain Java → [Todo](/projects/todo-api-full-build) → [Notes](/projects/notes-api-full-build) → [Deployment](/projects/deployment-lab) → [Incident Debugging](/projects/incident-debugging-lab). Each step depends on the earlier behavior working.
 
+Use [Blog](/projects/blog-api-full-build) for relationships and roles. Use [E-commerce](/projects/ecommerce-full-build), [Rate Limiter](/projects/rate-limiter-full-build), and [Notification Worker](/projects/notification-worker-full-build) for concurrency and distributed failure practice after their prerequisites.
 
-## Rule
+Keep one service alive across several changes. Add a feature without breaking existing clients. Migrate data that already exists. Diagnose a report written by another person. Remove an unnecessary component and explain the tradeoff. This develops judgment that isolated walkthroughs cannot supply.
 
-Reading gives vocabulary.
+## Review your progress
 
-Building gives skill.
+At the end of a study cycle, answer these questions using links to your evidence:
 
-Debugging gives judgment.
+- Which behavior can I now build independently?
+- Which bug did I reproduce and prevent with a test?
+- Which assumption did the result disprove?
+- Which requirement would change my design?
+- What is the next smallest exercise that closes a specific gap?
+
+Choose the next exercise from the failed assessment criterion. If the missing skill is SQL rollback, practice a two-statement transaction; adding Kafka will not close that gap.

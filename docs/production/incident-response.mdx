@@ -97,46 +97,46 @@ ORDER BY duration DESC;
 Find which transaction holds the lock that is queuing dozens of other requests:
 
 ```sql
-SELECT 
-    blocked_locks.pid AS blocked_pid,
-    blocking_locks.pid AS blocking_pid,
-    blocked_activity.query AS blocked_statement,
-    blocking_activity.query AS current_statement_in_blocking_process
-FROM pg_catalog.pg_locks blocked_locks
-JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
-JOIN pg_catalog.pg_locks blocking_locks 
-    ON blocking_locks.locktype = blocked_locks.locktype
-    AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database
-    AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
-    AND blocking_locks.page IS NOT DISTINCT FROM blocked_locks.page
-    AND blocking_locks.tuple IS NOT DISTINCT FROM blocked_locks.tuple
-    AND blocking_locks.virtualxid IS NOT DISTINCT FROM blocked_locks.virtualxid
-    AND blocking_locks.transactionid IS NOT DISTINCT FROM blocked_locks.transactionid
-    AND blocking_locks.classid IS NOT DISTINCT FROM blocked_locks.classid
-    AND blocking_locks.objid IS NOT DISTINCT FROM blocked_locks.objid
-    AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid
-    AND blocking_locks.pid != blocked_locks.pid
-JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
-WHERE NOT blocked_locks.granted;
+SELECT blocked.pid AS blocked_pid,
+       blocker.pid AS blocking_pid,
+       blocker.usename,
+       blocker.application_name,
+       blocker.state,
+       now() - blocker.xact_start AS blocking_transaction_age,
+       blocked.query AS blocked_statement,
+       blocker.query AS blocking_statement
+FROM pg_stat_activity AS blocked
+CROSS JOIN LATERAL unnest(pg_blocking_pids(blocked.pid)) AS p(pid)
+JOIN pg_stat_activity AS blocker ON blocker.pid = p.pid
+WHERE blocked.datname = current_database();
 ```
 
-#### Step 3: Safely Terminate the Rogue Query
+#### Step 3: Choose the smallest effective intervention
+
+Identify the transaction owner and query first. A queued DDL statement may be causing the traffic pile-up; canceling that migration can be enough. An idle transaction can hold locks even though it has no running query to cancel. Recheck PID, application name, and transaction start immediately before intervention. Do not terminate every slow connection.
+
 ```sql
--- Step 3a: Attempt graceful query cancellation
-SELECT pg_cancel_backend(blocking_pid);
-
--- Step 3b: If the query fails to cancel within 5 seconds, terminate connection forcefully:
-SELECT pg_terminate_backend(blocking_pid);
+-- psql only: replace 12345 with the reviewed PID from the diagnostic query.
+\set target_pid 12345
+SELECT pg_cancel_backend(:target_pid);
 ```
+
+Re-run the diagnostic query. Cancellation stops the current statement; it does not promise that every transaction lock is released. If the connection still blocks recovery and its work can be aborted, terminate that reviewed session:
+
+```sql
+SELECT pg_terminate_backend(:target_pid);
+```
+
+Termination rolls back uncommitted database work and disconnects the client. It cannot undo external side effects. Record the action and verify recovery using pool wait, blocked sessions, and error rate. See [PostgreSQL administration functions](https://www.postgresql.org/docs/16/functions-admin.html).
 
 ---
 
 ### Runbook 2: JVM OutOfMemoryError (OOM) & Container Restarts
 
-**Symptoms**: Kubernetes pods restarting repeatedly with `Exit Code 137` (`OOMKilled`). Application logs show `java.lang.OutOfMemoryError: Java heap space`.
+**Symptoms**: Repeated restarts may come from a JVM `OutOfMemoryError` or a container OOM kill. These are different failures. Exit 137 means SIGKILL; confirm `OOMKilled` in container status and correlate memory metrics before concluding that memory caused it.
 
 #### Step 1: Verify Heap Dump Capture on Crash
-Ensure the container generates an `.hprof` heap dump before terminating:
+Configure a heap dump for JVM-thrown `OutOfMemoryError`. A cgroup SIGKILL gives the JVM no chance to write one. The dump path needs writable persistent storage and enough free space; inspect existing container status and previous logs first:
 
 ```dockerfile
 ENTRYPOINT ["java", \
@@ -168,15 +168,21 @@ Inspect the captured `oom_dump.hprof` to find the culprit:
 
 **Symptoms**: Downstream payment gateway or inventory service latency jumps from 150ms to 9,000ms. All Tomcat worker threads are blocked waiting for responses.
 
-#### Step 1: Trip the Circuit Breaker via Spring Boot Actuator
-Manually force the circuit breaker into `OPEN` state to fail fast immediately:
+#### Step 1: Apply the tested dependency-disable control
 
-```bash
-curl -X POST http://localhost:8080/actuator/circuitbreakers/paymentService/transitionToOpen
+The documented `/actuator/circuitbreakers` endpoint lists breakers; it does not imply a built-in POST endpoint named `/transitionToOpen`. Inspect the endpoints and controls actually deployed. See [Resilience4j Spring Boot endpoints](https://resilience4j.readme.io/docs/getting-started-3).
+
+An application-owned administrative action can call the registry:
+
+```java
+// Inside a tested, authenticated, audited operational control:
+registry.circuitBreaker("paymentService").transitionToForcedOpenState();
 ```
 
+This changes one application's in-memory breaker. Apply the intended policy to every replica. `FORCED_OPEN` remains closed to calls until explicitly reset or transitioned; ordinary `OPEN` can allow trial calls later. Define the recovery action and verify it in staging. See [Resilience4j breaker states](https://resilience4j.readme.io/docs/circuitbreaker).
+
 #### Step 2: Verify Degradation & Fallback Behavior
-Ensure the API returns a graceful HTTP 503 or fallback response (*"Payment service temporarily unavailable; your order has been queued for processing"*) rather than timing out and holding connection pools hostage.
+Verify bounded latency and the documented unavailable response. Say an order is queued only after its intent is durably stored. Confirm that in-flight calls also have timeouts; opening a breaker does not cancel them.
 
 ---
 
@@ -190,17 +196,30 @@ kafka-consumer-groups.sh --bootstrap-server kafka:9092 \
   --describe --group order-fulfillment-group
 ```
 
-#### Step 2: Isolate or Skip the Poison Pill
-If the poison pill lacks an automated Dead-Letter Topic (DLT), manually advance the committed offset past the poisoned record:
+#### Step 2: Preserve the record and repair the consumer
+
+Prefer deploying error-handling deserialization and a DLT so malformed data is retained for investigation. An offset reset skips business work for the group. Use it only after identifying the exact poisoned offset, saving the raw key/value and headers, and recording how the skipped action will be repaired.
+
+Stop **all consumers in the group** and verify that the group is inactive. Save the current offsets. If the confirmed poison record is offset 417 in partition 2, the intended next offset is 418:
 
 ```bash
-# Advance partition 2 offset forward by 1 to skip the poisoned record:
 kafka-consumer-groups.sh --bootstrap-server kafka:9092 \
-  --group order-fulfillment-group \
-  --reset-offsets --shift-by 1 \
-  --topic order-events:2 \
-  --execute
+  --describe --group order-fulfillment-group > offsets-before.txt
+
+kafka-consumer-groups.sh --bootstrap-server kafka:9092 \
+  --group order-fulfillment-group --topic order-events:2 \
+  --reset-offsets --to-offset 418 --dry-run
 ```
+
+Inspect the planned offset, then execute the **same reviewed target**:
+
+```bash
+kafka-consumer-groups.sh --bootstrap-server kafka:9092 \
+  --group order-fulfillment-group --topic order-events:2 \
+  --reset-offsets --to-offset 418 --execute
+```
+
+Restart consumers, verify lag and business outcomes, and replay the preserved record after repair. Avoid a blind `--shift-by 1`: the committed offset may not be the failing offset. See [Kafka consumer-group offset operations](https://kafka.apache.org/38/operations/basic-kafka-operations/).
 
 ---
 

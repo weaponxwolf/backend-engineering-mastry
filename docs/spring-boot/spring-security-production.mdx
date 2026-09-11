@@ -1,135 +1,160 @@
 ---
 title: "Spring Security Production Guide"
-description: "Master production Spring Security 6 architecture, method-level authorization with SpEL, CORS configuration, and RFC 7807 error handling."
+description: "Master production Spring Security 6 architecture, method-level authorization with SpEL, CORS configuration, and RFC 9457 error handling."
 ---
 
 # Spring Security Production Guide
 
 Spring Security protects backend applications at the outer perimeter before any controller logic executes.
 
-In production systems, security is not just checking whether a user has logged in. A robust backend architecture enforces authentication, role-based authorization, granular resource ownership, strict CORS policies, and RFC 7807 error standardization.
+In production systems, security is not just checking whether a user has logged in. A robust backend architecture enforces authentication, role-based authorization, granular resource ownership, strict CORS policies, and RFC 9457 error standardization.
 
 ---
 
-## 1. Modern Spring Security 6 Architecture & Lambda DSL
+## 1. Choose Security Rules by Credential Transport
 
-Spring Boot 3 / Spring Security 6 completely retired legacy adapter classes (`WebSecurityConfigurerAdapter`). Configuration is now purely functional using component-based bean definitions and modern Lambda DSL.
+**CSRF** means a malicious site causes a browser to send an unwanted authenticated request. Browsers attach cookies automatically. Calling an application stateless does not remove this risk.
 
-```mermaid
-flowchart TD
-    Req["Incoming HTTP Request"] --> Cors["1. CorsFilter\nValidates Origin & Handles Preflight OPTIONS"]
-    Cors --> Csrf["2. CsrfFilter\nDisabled for Stateless APIs; Enforced for Cookies"]
-    Csrf --> Jwt["3. JwtAuthenticationFilter\nParses Bearer Token & Verifies Signature"]
-    Jwt --> Ctx["4. SecurityContextHolder\nPopulates UsernamePasswordAuthenticationToken"]
-    Ctx --> Authz["5. AuthorizationFilter\nEvaluates matchers: permitAll vs hasRole"]
-    Authz --> Dispatcher["6. DispatcherServlet\nInvokes @RestController"]
-```
+This example serves two kinds of endpoints:
 
-### The Production SecurityConfig Bean
+| Routes | Credentials | CSRF rule |
+| :--- | :--- | :--- |
+| `/api/auth/**` | Login request or refresh cookie | Keep CSRF protection. Fetch a token before POST requests. |
+| Other API routes | Access token in the `Authorization` header only | CSRF can be disabled if these routes never accept cookies, HTTP Basic, or session authentication. |
+
+Add `spring-boot-starter-oauth2-resource-server`. Configure its JWT decoder using [issuer, audience, and algorithm validation](/production/security-jwt#4-2-spring-boot-3-resource-server-configuration). This uses Spring Security's bearer filter instead of an undefined custom JWT filter.
+
+### Two Filter Chains
 
 ```java
 package com.example.config;
 
-import com.example.security.JwtAuthenticationFilter;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
-import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
+import org.springframework.security.oauth2.server.resource.authentication.JwtGrantedAuthoritiesConverter;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.access.AccessDeniedHandler;
-import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.web.cors.CorsConfigurationSource;
 
 @Configuration
-@EnableWebSecurity
-@EnableMethodSecurity // Enables @PreAuthorize and @PostAuthorize
+@EnableMethodSecurity
 public class SecurityConfig {
 
-    private final JwtAuthenticationFilter jwtFilter;
-    private final AuthenticationEntryPoint authEntryPoint;
-    private final AccessDeniedHandler accessDeniedHandler;
-    private final CorsConfigurationSource corsConfigurationSource;
-
-    public SecurityConfig(
-        JwtAuthenticationFilter jwtFilter,
-        AuthenticationEntryPoint authEntryPoint,
-        AccessDeniedHandler accessDeniedHandler,
-        CorsConfigurationSource corsConfigurationSource
-    ) {
-        this.jwtFilter = jwtFilter;
-        this.authEntryPoint = authEntryPoint;
-        this.accessDeniedHandler = accessDeniedHandler;
-        this.corsConfigurationSource = corsConfigurationSource;
+    @Bean
+    @Order(1)
+    SecurityFilterChain browserAuth(HttpSecurity http,
+            CorsConfigurationSource cors,
+            AccessDeniedHandler denied) throws Exception {
+        return http
+            .securityMatcher("/api/auth/**")
+            .cors(c -> c.configurationSource(cors))
+            // Default CSRF storage uses the session. This chain may create one.
+            .csrf(csrf -> {})
+            .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
+            .exceptionHandling(e -> e.accessDeniedHandler(denied))
+            .authorizeHttpRequests(a -> a
+                .requestMatchers(HttpMethod.GET, "/api/auth/csrf").permitAll()
+                .requestMatchers(HttpMethod.POST, "/api/auth/login",
+                    "/api/auth/register", "/api/auth/refresh").permitAll()
+                .anyRequest().denyAll())
+            .build();
     }
 
     @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+    @Order(2)
+    SecurityFilterChain bearerApi(HttpSecurity http,
+            CorsConfigurationSource cors,
+            AuthenticationEntryPoint unauthenticated,
+            AccessDeniedHandler denied) throws Exception {
+        JwtGrantedAuthoritiesConverter roles = new JwtGrantedAuthoritiesConverter();
+        // Contract: trusted issuer sends roles: ["USER", "ADMIN"].
+        roles.setAuthoritiesClaimName("roles");
+        roles.setAuthorityPrefix("ROLE_");
+        JwtAuthenticationConverter converter = new JwtAuthenticationConverter();
+        converter.setJwtGrantedAuthoritiesConverter(roles);
+
         return http
-            .cors(cors -> cors.configurationSource(corsConfigurationSource))
-            .csrf(AbstractHttpConfigurer::disable) // Safe for stateless JWT bearer tokens
-            .sessionManagement(session -> 
-                session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
-            )
-            .exceptionHandling(exceptions -> exceptions
-                .authenticationEntryPoint(authEntryPoint) // 401 Handler
-                .accessDeniedHandler(accessDeniedHandler)  // 403 Handler
-            )
-            .authorizeHttpRequests(auth -> auth
-                // Public Endpoints
-                .requestMatchers("/api/auth/**", "/api/public/**").permitAll()
-                .requestMatchers(HttpMethod.GET, "/api/products/**").permitAll()
-                .requestMatchers("/actuator/health", "/actuator/info").permitAll()
-                
-                // Role-Restricted Endpoints
+            .cors(c -> c.configurationSource(cors))
+            .csrf(AbstractHttpConfigurer::disable)
+            .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .authorizeHttpRequests(a -> a
+                .requestMatchers(HttpMethod.GET, "/api/products/**", "/actuator/health").permitAll()
                 .requestMatchers("/api/admin/**").hasRole("ADMIN")
-                
-                // Everything else requires valid authentication
-                .anyRequest().authenticated()
-            )
-            .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
+                .anyRequest().authenticated())
+            .exceptionHandling(e -> e.authenticationEntryPoint(unauthenticated)
+                .accessDeniedHandler(denied))
+            .oauth2ResourceServer(o -> o
+                .jwt(j -> j.jwtAuthenticationConverter(converter))
+                .authenticationEntryPoint(unauthenticated)
+                .accessDeniedHandler(denied))
             .build();
     }
 }
 ```
 
----
+Spring chooses the first matching chain. The auth chain's `permitAll()` allows access without an access token; it does **not** bypass its CSRF check. The roles converter above replaces default scope mapping; add a combined converter if the API also requires scopes.
 
-## 2. Method-Level Security with SpEL (`@PreAuthorize`)
-
-While URL pattern matching (`hasRole('ADMIN')`) handles broad routing boundaries, granular business authorization requires **Method Security** with Spring Expression Language (SpEL).
-
-Enable method security with `@EnableMethodSecurity` on your configuration class.
-
-### Enforcing Ownership at Method Invocation
+### Give the Browser a CSRF Token
 
 ```java
-@Service
-public class NoteService {
+package com.example.security;
 
-    private final NoteRepository noteRepository;
+import org.springframework.http.CacheControl;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.web.csrf.CsrfToken;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
 
-    public NoteService(NoteRepository noteRepository) {
-        this.noteRepository = noteRepository;
-    }
+@RestController
+public class CsrfController {
+    public record CsrfResponse(String headerName, String token) {}
 
-    // Only an ADMIN or the author of the note may delete it:
-    @PreAuthorize("hasRole('ADMIN') or #authorId == authentication.principal.id")
-    public void deleteNote(Long noteId, Long authorId) {
-        noteRepository.deleteById(noteId);
-    }
-
-    // Dynamic checks using Spring Beans inside SpEL:
-    @PreAuthorize("@securityService.canAccessProject(#projectId)")
-    public ProjectDto getProject(Long projectId) {
-        return projectService.load(projectId);
+    @GetMapping("/api/auth/csrf")
+    ResponseEntity<CsrfResponse> csrf(CsrfToken csrf) {
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
+            .body(new CsrfResponse(csrf.getHeaderName(), csrf.getToken()));
     }
 }
 ```
+
+The browser first fetches this endpoint with `credentials: "include"`. It sends the returned token in the returned header name, usually `X-CSRF-TOKEN`, on login and refresh POST requests. It also sends the associated session cookie. Fetch a fresh CSRF token after authentication or logout clears the old one. Refresh responses must use `Cache-Control: no-store`. Set session and refresh cookies to `Secure` in HTTPS deployments and choose `SameSite` for the actual frontend/API site relationship. [Spring Security CSRF reference](https://docs.spring.io/spring-security/reference/6.5/servlet/exploits/csrf.html)
+
+## 2. Authorize the Stored Resource
+
+Never trust an `authorId` supplied beside a `noteId`. An attacker can send their own author ID together with somebody else's note ID. The database must connect the authenticated identity to the target row.
+
+This example assumes `Note.ownerSubject` stores the validated JWT subject from one configured issuer. For multiple issuers, map `(issuer, subject)` to a local account. The create endpoint must assign ownership from authentication, never the request body.
+
+```java
+// NoteRepository.java: one atomic, ownership-scoped database statement.
+@Modifying
+@Query("delete from Note n where n.id = :id and n.ownerSubject = :subject")
+int deleteOwnedNote(@Param("id") Long id, @Param("subject") String subject);
+```
+
+```java
+// NoteService.java: called through the Spring bean proxy.
+@PreAuthorize("isAuthenticated()")
+@Transactional
+public void deleteNote(Long noteId) {
+    String subject = SecurityContextHolder.getContext().getAuthentication().getName();
+    if (noteRepository.deleteOwnedNote(noteId, subject) == 0) {
+        throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Note not found");
+    }
+}
+```
+
+These are repository and service excerpts, not standalone files. They use Spring Data JPA's `@Modifying`, `@Query`, and `@Param`, plus Spring Security's `@PreAuthorize` and `SecurityContextHolder`. The `404` response treats another user's resource like an absent resource. Administrative deletion should have a separate method with `@PreAuthorize("hasRole('ADMIN')")` and an audit record.
+
+With Spring's JWT resource server, the principal is a `Jwt`, and `authentication.name` normally comes from `sub`; it is not a custom object with an `id` property. [Spring Security JWT authentication](https://docs.spring.io/spring-security/reference/6.5/servlet/oauth2/resource-server/jwt.html)
 
 ---
 
@@ -163,12 +188,11 @@ public class CorsConfig {
         // Explicit allowed origins (Never use "*" in production!)
         config.setAllowedOrigins(List.of(
             "https://app.example.com",
-            "https://admin.example.com",
-            "http://localhost:3000" // Local frontend development
+            "https://admin.example.com"
         ));
         
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
-        config.setAllowedHeaders(List.of("Authorization", "Content-Type", "Idempotency-Key"));
+        config.setAllowedHeaders(List.of("Authorization", "Content-Type", "Idempotency-Key", "X-CSRF-TOKEN"));
         config.setExposedHeaders(List.of("Location", "X-Total-Count"));
         config.setAllowCredentials(true);
         config.setMaxAge(3600L); // Cache preflight response for 1 hour
@@ -182,11 +206,11 @@ public class CorsConfig {
 
 ---
 
-## 4. Standardized Security Exceptions with RFC 7807
+## 4. Standardized Security Exceptions with RFC 9457
 
 Because the Spring Security filter chain executes **before** the `DispatcherServlet`, exceptions thrown in filters (e.g. invalid JWT or forbidden role) never reach your `@RestControllerAdvice`.
 
-If not customized, Spring returns default empty bodies or HTML error pages. Configure dedicated handlers to return standardized RFC 7807 `ProblemDetail` JSON.
+If not customized, Spring returns default empty bodies or HTML error pages. Configure dedicated handlers to return standardized RFC 9457 `ProblemDetail` JSON.
 
 ### Custom 401 Unauthorized Handler
 
@@ -210,7 +234,11 @@ import java.time.Instant;
 @Component
 public class CustomAuthenticationEntryPoint implements AuthenticationEntryPoint {
 
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper;
+
+    public CustomAuthenticationEntryPoint(ObjectMapper objectMapper) {
+        this.objectMapper = objectMapper;
+    }
 
     @Override
     public void commence(
@@ -227,6 +255,8 @@ public class CustomAuthenticationEntryPoint implements AuthenticationEntryPoint 
         problem.setProperty("timestamp", Instant.now());
         problem.setProperty("path", request.getRequestURI());
 
+        new org.springframework.security.oauth2.server.resource.web.BearerTokenAuthenticationEntryPoint()
+            .commence(request, response, authException);
         response.setStatus(HttpStatus.UNAUTHORIZED.value());
         response.setContentType(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
         objectMapper.writeValue(response.getOutputStream(), problem);
@@ -256,7 +286,11 @@ import java.time.Instant;
 @Component
 public class CustomAccessDeniedHandler implements AccessDeniedHandler {
 
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper;
+
+    public CustomAccessDeniedHandler(ObjectMapper objectMapper) {
+        this.objectMapper = objectMapper;
+    }
 
     @Override
     public void handle(
@@ -284,14 +318,19 @@ public class CustomAccessDeniedHandler implements AccessDeniedHandler {
 
 ## 5. Automated Security Testing
 
-Test all authentication and authorization pathways with `@WebMvcTest` and `@WithMockUser`:
+Start with role checks using a Spring test context that imports the actual configuration and both error handlers. Provide a mock `JwtDecoder` in this slice because these tests inject an already authenticated user. These tests cover authorization; they do not verify token signatures.
 
 ```java
 @WebMvcTest(AdminController.class)
+@Import({SecurityConfig.class, CorsConfig.class,
+    CustomAuthenticationEntryPoint.class, CustomAccessDeniedHandler.class})
 class AdminControllerSecurityTest {
 
     @Autowired
     private MockMvc mockMvc;
+
+    @MockBean
+    private JwtDecoder jwtDecoder;
 
     @Test
     void shouldRejectAnonymousUserFromAdminApi() throws Exception {
@@ -318,6 +357,19 @@ class AdminControllerSecurityTest {
 
 ---
 
+### Adversarial Tests You Must Add
+
+| Test | Expected evidence |
+| :--- | :--- |
+| Bob deletes Alice's note while submitting Bob's author ID | `404`; Alice's row remains. |
+| Missing/incorrect CSRF token on refresh POST | `403`; no token is rotated. |
+| Valid CSRF token and matching session on refresh POST | Auth service receives the request. |
+| JWT signed correctly but for another issuer or audience | `401` using the real decoder, not `jwt()` test helpers. |
+| Missing token or expired token | Problem JSON plus `WWW-Authenticate: Bearer`. |
+| Timestamp in error response | Serializes successfully using Boot's configured `ObjectMapper`. |
+
+Use `@SpringBootTest` with PostgreSQL for ownership and refresh tests. Injecting `@WithMockUser` or the MockMvc `jwt()` helper bypasses cryptographic verification. Test the real decoder separately with keys created for the test.
+
 ## 6. Production Security Checklist
 
 <Check>
@@ -327,10 +379,10 @@ class AdminControllerSecurityTest {
 CORS is configured with an explicit whitelist of trusted production origins (no wildcards with credentials).
 </Check>
 <Check>
-AuthenticationEntryPoint and AccessDeniedHandler return RFC 7807 `ProblemDetail` JSON.
+AuthenticationEntryPoint and AccessDeniedHandler return RFC 9457 `ProblemDetail` JSON.
 </Check>
 <Check>
-Security filter chain runs `SessionCreationPolicy.STATELESS` for JWT APIs.
+Bearer API chain uses `STATELESS`; cookie-based auth endpoints retain CSRF protection.
 </Check>
 <Check>
 Automated MockMvc tests verify that 401 Unauthorized and 403 Forbidden trigger reliably.

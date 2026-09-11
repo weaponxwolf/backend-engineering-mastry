@@ -41,12 +41,12 @@ flowchart TD
 
 In a multi-pod Kubernetes cluster, WebSocket connections are **stateful and pinned to a specific server instance**:
 
-```text
-The Cross-Pod Routing Dilemma:
-- Alice connects to Pod 1. Her open TCP socket lives in the RAM of Pod 1.
-- Bob connects to Pod 4. His open TCP socket lives in the RAM of Pod 4.
-- When Alice sends a direct message to Bob, Pod 1 cannot directly write to Bob's socket!
-```
+<Warning>
+**The Cross-Pod Routing Dilemma**:
+- **Alice connects to Pod 1**: Her open TCP socket lives strictly in the RAM of Pod 1.
+- **Bob connects to Pod 4**: His open TCP socket lives strictly in the RAM of Pod 4.
+- **The Failure**: When Alice sends a direct message to Bob, Pod 1 has no connection to Bob and cannot directly write to Bob's socket!
+</Warning>
 
 ### The Solution: Redis Pub/Sub Message Backplane
 

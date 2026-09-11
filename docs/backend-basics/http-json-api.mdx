@@ -100,7 +100,7 @@ Accept: application/json
 {"productId":"prod_991","quantity":2,"unitPrice":49.99}
 ```
 
-```text
+```http
 [Method] [Request-URI] [HTTP-Version] \r\n  <-- Request Line
 [Header-Name]: [Header-Value] \r\n          <-- Request Headers
 ...
@@ -147,10 +147,14 @@ An operation is **Safe** if it does not alter server state. Clients can call `GE
 An operation is **Idempotent** if making $N$ identical requests produces the exact same server side-effects as making 1 request:
 $$f(f(x)) = f(x)$$
 
-```text
-Example: PUT vs POST
-PUT /users/42 {"name": "Alice"} -> Sets name to Alice. Repeating it 10 times leaves name as Alice.
-POST /users/42/charges {"amount": 100} -> Charges $100. Repeating it 10 times charges $1,000!
+```http
+# PUT is Idempotent: repeating 10 times leaves state identical
+PUT /users/42 HTTP/1.1
+{"name": "Alice"}
+
+# POST is Non-Idempotent: repeating 10 times creates 10 separate charges!
+POST /users/42/charges HTTP/1.1
+{"amount": 100}
 ```
 
 #### 3. PUT vs PATCH
@@ -393,15 +397,11 @@ graph LR
 
 Leonard Richardson developed a model that measures the degree to which a web service embraces REST principles:
 
-```text
-Level 3: Hypermedia Controls (HATEOAS)
-         Responses contain URIs to discoverable next actions (_links).
-Level 2: HTTP Verbs & Status Codes
-         Correct use of GET, POST, PUT, DELETE, and HTTP 200, 201, 404, 409.
-Level 1: Resources
-         Individual URIs for separate entities (/orders/12, /users/4).
-Level 0: The Swamp of POX (Plain Old XML/JSON)
-         Single endpoint (e.g. POST /api/service) used for all operations (SOAP/RPC).
+```mermaid
+flowchart BT
+    L0["Level 0: The Swamp of POX<br/>Single RPC endpoint (POST /api/service)"] --> L1["Level 1: Resources<br/>Distinct URIs (/orders/12, /users/4)"]
+    L1 --> L2["Level 2: HTTP Verbs & Status Codes<br/>Proper GET, POST, PUT, DELETE & HTTP 201, 404"]
+    L2 --> L3["Level 3: Hypermedia Controls (HATEOAS)<br/>Self-documenting discoverable links (_links)"]
 ```
 
 ---

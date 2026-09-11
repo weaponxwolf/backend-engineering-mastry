@@ -1,6 +1,6 @@
 ---
 title: "Production Logging Architecture, MDC & Alerting SLOs"
-description: "Master backend observability: Logback async ring buffers, MDC context propagation across thread pools, structured JSON logs, PII masking, and Google SRE burn-rate alerts."
+description: "Master backend observability: Logback async queues, MDC context propagation across thread pools, structured JSON logs, PII masking, and Google SRE burn-rate alerts."
 ---
 
 # Production Logging Architecture, MDC & Alerting SLOs
@@ -27,7 +27,7 @@ graph TD
     SLF4J -->|Binds to Engine| Logback["Logback Core & Classic Engine"]
     
     subgraph Logback Engine
-        AsyncApp["AsyncAppender (Disruptor Ring Buffer / BlockingQueue)"]
+        AsyncApp["AsyncAppender (bounded BlockingQueue)"]
         ConsoleApp["ConsoleAppender (JSON Encoder)"]
         FileApp["RollingFileAppender (Time & Size based rolling)"]
     end
@@ -42,7 +42,7 @@ By default, standard logging writes synchronously to `STDOUT` or disk. Under hea
 - If the disk stalls or stdout buffers fill, **all application worker threads freeze**.
 
 <Tip>
-**Production Rule**: Always wrap file and console appenders with **`ch.qos.logback.classic.AsyncAppender`**. Log events are dropped into a lock-free memory buffer, allowing application threads to return in sub-microsecond time.
+Logback's `AsyncAppender` uses a bounded blocking queue and a worker thread. It can reduce time spent writing logs on request threads, but it is not a lock-free Disruptor appender. At saturation you must choose between blocking callers and dropping events. Defaults can discard lower-level events before the queue is full. See [Logback's AsyncAppender behavior](https://logback.qos.ch/manual/appenders-async-sift.html).
 </Tip>
 
 ---
@@ -148,7 +148,7 @@ Place this configuration in `src/main/resources/logback-spring.xml` using `logst
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
-<configuration scan="true" scanPeriod="30 seconds">
+<configuration>
 
     <springProperty scope="context" name="appName" source="spring.application.name" defaultValue="backend-api"/>
     <springProperty scope="context" name="env" source="spring.profiles.active" defaultValue="prod"/>
@@ -162,19 +162,21 @@ Place this configuration in `src/main/resources/logback-spring.xml` using `logst
                 <version>[ignore]</version>
                 <levelValue>[ignore]</levelValue>
             </fieldNames>
-            <!-- Auto-include all MDC key-values -->
-            <includeMdcKeyName>*</includeMdcKeyName>
+            <!-- Explicit allowlist: these are literal key names, not glob patterns. -->
+            <includeMdcKeyName>traceId</includeMdcKeyName>
+            <includeMdcKeyName>spanId</includeMdcKeyName>
+            <includeMdcKeyName>requestId</includeMdcKeyName>
             <timestampPattern>yyyy-MM-dd'T'HH:mm:ss.SSSZZ</timestampPattern>
         </encoder>
     </appender>
 
-    <!-- Async Wrapper: Non-blocking logging buffer -->
+    <!-- Async wrapper: favor log retention by blocking when full. -->
     <appender name="ASYNC_JSON" class="ch.qos.logback.classic.AsyncAppender">
         <appender-ref ref="CONSOLE_JSON"/>
         <queueSize>2048</queueSize>
-        <discardingThreshold>0</discardingThreshold> <!-- Never discard INFO/WARN under pressure -->
+        <discardingThreshold>0</discardingThreshold> <!-- Disable early level-based discarding -->
         <maxFlushTime>5000</maxFlushTime>
-        <neverBlock>true</neverBlock> <!-- Drop TRACE/DEBUG if buffer saturates rather than block threads -->
+        <neverBlock>false</neverBlock> <!-- Callers wait when the queue is full -->
     </appender>
 
     <root level="INFO">
@@ -183,6 +185,10 @@ Place this configuration in `src/main/resources/logback-spring.xml` using `logst
 
 </configuration>
 ```
+
+This example favors retaining logs under queue pressure. If request latency is more important for a particular diagnostic stream, `neverBlock=true` drops incoming events when full, including WARN and ERROR. Neither mode guarantees delivery on a crash or after the shutdown flush deadline. Exercise a slow-output failure before choosing the policy. Business audit events need their own durable design.
+
+Spring's `springProperty` extension cannot be combined with Logback configuration scanning. The MDC allowlist above uses literal names; `*` does not mean all fields. See [Spring Boot Logback extensions](https://docs.spring.io/spring-boot/reference/features/logging.html#features.logging.logback-extensions) and [the encoder's MDC options](https://github.com/logfellow/logstash-logback-encoder#mdc-fields).
 
 ### JSON Output on the Wire
 Every log statement is formatted as a single-line JSON document:
@@ -348,7 +354,7 @@ Logging a 100-line stack trace inside a loop that executes 50,000 times per minu
   </Accordion>
 
   <Accordion title="2. Why should logging in high-throughput backends always be asynchronous?">
-    Synchronous logging forces application worker threads to acquire locks and wait for physical I/O (disk flush or console serialization) on every log statement. When disk I/O degrades or logs volume spikes, worker threads stall, exhausting Tomcat thread pools and causing HTTP 504 timeouts. Asynchronous logging (via Logback's `AsyncAppender` with a memory buffer) decouples application threads from I/O, writing logs in sub-microsecond time.
+    Synchronous logging forces application worker threads to acquire locks and wait for physical I/O (disk flush or console serialization) on every log statement. When disk I/O degrades or logs volume spikes, worker threads stall, exhausting Tomcat thread pools and causing HTTP 504 timeouts. AsyncAppender moves output work to a worker while queue capacity remains. A full queue either blocks callers or drops events according to configuration; no fixed latency is guaranteed.
   </Accordion>
 
   <Accordion title="3. How does MDC work, and how do you prevent context loss across async thread pools?">

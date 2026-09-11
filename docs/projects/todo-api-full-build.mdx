@@ -5,7 +5,14 @@ description: "Build your first complete Spring Boot CRUD API with validation, JP
 
 # Build Todo API From Zero
 
-Todo API is your first complete backend project.
+Start with the complete, tested application under `examples/todo-api` in this repository:
+
+```bash
+mvn -f examples/todo-api/pom.xml verify
+mvn -f examples/todo-api/pom.xml spring-boot:run
+```
+
+Follow its README for requests and expected responses. It uses Java 21, Spring Boot 3.5.10, Flyway, and local H2. This older walkthrough below uses a different schema and title limit; study it as a separate design exercise, not as additional files to paste into the starter. See [verification scope](/getting-started/versions-and-evidence).
 
 <Info>
 For standalone project specifications, schema contracts, and challenge requirements, see [Project: Todo API](/projects/todo-api).
@@ -77,7 +84,7 @@ It is small enough to finish in an afternoon, yet serious enough to teach the co
 
     ### Package Structure
 
-    ```text
+    ```bash
     com.example.todo
       TodoApplication.java
       todo/

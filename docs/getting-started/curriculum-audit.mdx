@@ -1,140 +1,56 @@
 ---
 title: "Curriculum Audit"
-description: "Track whether this guide is strong enough to replace scattered books and tutorials."
+description: "Evidence for the learning path, executable examples, technical corrections, and remaining gaps."
 ---
 
 # Curriculum Audit
 
-This page keeps the guide honest.
+Reviewed on **11 September 2026**. This course has broad coverage, but breadth alone does not prove independent learning or production readiness.
 
-If a topic is marked mastery-level, it must teach enough to build, test, debug, and explain real systems.
+The review inventoried the original 84 MDX pages and 31,878 lines. It examined the entry path, representative capstones, and high-risk security, transaction, messaging, database, and runtime examples. It did not execute every snippet or certify every claim.
 
-## Current Standard
+## Executable evidence
 
-A topic is not complete when it has only:
+| Artifact | Evidence | Limit |
+| --- | --- | --- |
+| Java foundations | Checked-in source; 12 passing checks | A calculation rule, not an API |
+| Todo starter | Complete Maven project; 12 passing MVC/H2 test cases | No PostgreSQL verification or authentication |
+| Content audit | Four regression tests for structure and failure fixtures | Not a teaching-quality score |
+| Documentation checks | Pinned Mintlify and pull-request workflow | MDX and links do not compile chapter examples |
 
-- definition
-- small snippet
-- list of common tools
-- interview question list
+Use [Versions and Verification](/getting-started/versions-and-evidence) for commands and version boundaries.
 
-A topic is complete when it has:
+## Learning path improvements
 
-- mental model
-- real backend example
-- code shape
-- data model when needed
-- failure cases
-- common mistakes
-- tests
-- production notes
-- practice task
-- interview answers
+The [first program](/getting-started/first-program) now precedes JVM internals. The [roadmap](/getting-started/backend-roadmap) introduces a working API before distributed architecture. The [assessments](/getting-started/mastery-assessments) require changed requirements, observed failures, and independent explanations. The [mastery plan](/getting-started/mastery-plan) records evidence instead of page completion.
 
-## Strongest Chapters
+## Technical corrections
 
-These are currently the strongest book-replacement chapters:
+| Area | Correction | Why it matters |
+| --- | --- | --- |
+| [Refresh tokens](/production/security-jwt) | Serialize by family; commit revocation before returning an error | An unchecked exception could undo revocation |
+| [Authorization](/spring-boot/spring-security-production) | Check stored ownership; separate cookie CSRF and bearer APIs | A caller-supplied owner ID is not proof |
+| [Kafka](/advanced/message-queues) | Commit before acknowledgment; distinguish blocking retries from retry topics | Avoid losing work at the acknowledgment boundary |
+| [Schema changes](/database/schema-change-mastery) | Use actual Flyway script configuration | A SQL comment does not configure execution |
+| [Pagination](/database/database-performance-mastery) | Matching indexes and qualified keyset cost | Keyset access is not universally constant time |
+| [Caching](/production/caching) | Explain stale refill races | Deleting a key does not establish strong consistency |
+| [Quorums](/system-design/consistency-failures) | State overlap assumptions | Overlap alone does not establish linearizability |
+| [Java](/java/java-core) | Shallow record immutability and benchmark requirements | Measurements are not language guarantees |
+| [E-commerce](/projects/ecommerce-full-build) | Remove hardcoded webhook parsing and incorrect verification; let failed transactions roll back | Payment examples must expose integration gaps |
 
-- [Build Notes API From Zero](/projects/notes-api-full-build)
-- [Build E-commerce Backend](/projects/ecommerce-full-build)
-- [REST API](/spring-boot/rest-api)
-- [JPA And Hibernate](/spring-boot/jpa-hibernate)
-- [Testing](/production/testing)
-- [Spring Security Production Guide](/spring-boot/spring-security-production)
-- [Database Performance Mastery](/database/database-performance-mastery)
-- [SQL Basics](/database/sql-basics)
-- [Validation And Errors](/spring-boot/validation-errors)
-- [Transactions](/spring-boot/transactions)
-- [Message Queues](/advanced/message-queues)
-- [Docker And Kubernetes](/advanced/docker-kubernetes)
-- [Rate Limiter](/system-design/rate-limiter)
-- [URL Shortener](/system-design/url-shortener)
-- [Notification System](/system-design/notification-system)
-- [Build Todo API From Zero](/projects/todo-api-full-build)
-- [Blog API Full Build](/projects/blog-api-full-build)
-- [URL Shortener Full Build](/projects/url-shortener-full-build)
-- [Rate Limiter Full Build](/projects/rate-limiter-full-build)
-- [Notification Worker Full Build](/projects/notification-worker-full-build)
-- [Deployment Lab](/projects/deployment-lab)
-- [Incident Debugging Lab](/projects/incident-debugging-lab)
-- [Consistency And Failures](/system-design/consistency-failures)
-- [Java Backend Mastery](/java/java-backend-mastery)
-- [Schema Change Mastery](/database/schema-change-mastery)
+These corrections improve explanations. Most advanced excerpts still need complete integration projects before their behavior is verified here.
 
+## Remaining priorities
 
-## Extension Roadmap
+1. **PostgreSQL Todo continuation.** Add Testcontainers tests for migrations, persistence, rollback, and concurrency. Prove restore into a fresh database.
+2. **Complete authenticated Notes.** Supply missing auth integration. Test decoder failures, ownership, CSRF, rotation races, and committed family revocation.
+3. **Executable advanced capstones.** Give Blog, E-commerce, URL Shortener, Rate Limiter, and Notification Worker complete source, pinned builds, and CI. Separate simulations from provider integration.
+4. **Consistency across chapters.** Repeated explanations still risk drift. Link summaries to canonical chapters and continue reviewing numerical claims and API assumptions.
+5. **Beginner usability.** Test setup with a new learner. Record missing steps and unfamiliar terms, then add focused exercises where needed.
+6. **Operational proof.** Turn recovery and load exercises into repeatable fixtures with saved results. A runbook is not a completed drill.
 
-These areas are good enough for the main curriculum, but can keep growing into advanced reference material:
+## Stronger claims need stronger evidence
 
-- advanced JVM tuning
-- reactive Spring WebFlux
-- OAuth2 and OpenID Connect
-- multi-region systems
-- Kubernetes operators and service mesh
-- advanced PostgreSQL internals
-- event sourcing and CQRS
-- high-scale search systems
-- cloud-specific deployment guides
+Every core project should build from a fresh checkout, pass tests against real dependencies, and include an independent extension. A new learner should complete setup without undocumented help. Advanced claims need primary sources and reproducible experiments.
 
-## Capstone Coverage
-
-The core capstone path now includes:
-
-```text
-Todo API
-Blog API
-Notes API
-URL Shortener
-Rate Limiter
-Notification Worker
-E-commerce Backend
-Deployment Lab
-Incident Debugging Lab
-```
-
-These projects cover CRUD, validation, authentication, authorization, ownership, database modeling, transactions, caching, queues, idempotency, deployment, and production debugging.
-
-## Required Labs
-
-Labs should force learners to solve real problems.
-
-Examples:
-
-- fix N plus one query
-- add missing ownership check
-- recover failed migration
-- debug slow API with logs and metrics
-- handle duplicate payment callback
-- add idempotency key to checkout
-- prevent inventory race condition
-- add Testcontainers to repository tests
-- deploy Dockerized app with environment config
-
-## Book Replacement Rule
-
-The guide should reduce the need for books by combining:
-
-```text
-concept explanation
-project implementation
-production failure
-testing
-interview answer
-```
-
-Books are still useful for extra depth and different viewpoints.
-
-But this guide should be enough to build serious backend skill without jumping across many disconnected resources.
-
-## Maintenance Rule
-
-Every new page should answer:
-
-- What problem does this solve?
-- Where does it appear in a real backend?
-- How do I implement it?
-- How does it fail?
-- How do I test it?
-- How do I explain it in interview?
-
-If a page cannot answer these, it is not finished.
+Until that evidence exists, use this as an improving course and reference. Judge progress by what you can build, diagnose, and explain using the [assessment gates](/getting-started/mastery-assessments).

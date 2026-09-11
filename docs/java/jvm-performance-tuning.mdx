@@ -7,7 +7,7 @@ description: "Master low-overhead JVM profiling with async-profiler, reading fla
 
 In high-performance backend systems, application latency is not governed purely by algorithmic Big-O complexity. A microservice with $O(1)$ hash map lookups can still suffer catastrophic **p99 latency spikes exceeding 2,000 milliseconds** due to JVM Stop-The-World Garbage Collection (GC) pauses, safepoint synchronization stalls, or off-heap native memory fragmentation.
 
-Senior backend engineers do not guess or randomly tweak JVM arguments. They use **low-overhead production profilers (Java Flight Recorder, async-profiler), interpret Flame Graphs, and tune modern low-latency garbage collectors (Generational ZGC)** to achieve sub-millisecond tail latency.
+Senior backend engineers do not guess or randomly tweak JVM arguments. They use **low-overhead production profilers (Java Flight Recorder, async-profiler), interpret Flame Graphs, and tune modern low-latency garbage collectors (Generational ZGC)** to reduce pauses and measure application latency under realistic load. A short GC pause does not imply a short database call or HTTP request.
 
 ---
 
@@ -91,11 +91,11 @@ flowchart LR
 
 | Dimension | G1GC (Garbage-First) | Generational ZGC (Java 21+) |
 | :--- | :--- | :--- |
-| **Max Pause Time Goal** | 100ms to 250ms (`-XX:MaxGCPauseMillis`) | **Under 1 millisecond** guaranteed |
-| **Pause Time Scaling** | Scales with the number of live objects | **Constant time ($O(1)$)**; independent of heap size! |
-| **Heap Size Range** | 4GB to 16GB | 8GB to 16TB |
+| **Max Pause Time Goal** | 100ms to 250ms (`-XX:MaxGCPauseMillis`) | Designed for very short GC pauses; measure under your workload |
+| **Pause Time Scaling** | Scales with the number of live objects | Designed to keep pauses independent of heap size; allocation stalls are a separate concern |
+| **Heap Sizing** | Choose from measured live data and allocation rate | Needs room for concurrent collection; not limited to large heaps |
 | **Core Technique** | Regional marking, Stop-The-World compaction | Colored Pointers, Load Barriers, Concurrent Relocation |
-| **Throughput Trade-off**| High throughput (~98% application CPU) | Moderate throughput (~90-95% application CPU) |
+| **Throughput Trade-off** | Measure throughput and pause distribution | Concurrent GC uses CPU; measure the cost on the same workload |
 | **Production Activation**| Default in Java 17/21 | `-XX:+UseZGC -XX:+ZGenerational` |
 
 ---
@@ -152,11 +152,11 @@ jcmd <PID> VM.native_memory baseline
 After the container memory climbs by 500MB, execute a differential comparison:
 
 ```bash
-jcmd <PID> VM.native_memory detail.diff
+jcmd <PID> VM.native_memory summary.diff
 ```
 
 #### Sample NMT Differential Output:
-```text
+```console
 Total: reserved=2450MB +250MB, committed=1850MB +210MB
 
 - Java Heap: committed=1024MB (no change)
@@ -218,16 +218,16 @@ java \
   <Accordion title="2. How does Generational ZGC achieve sub-millisecond pause times on multi-gigabyte heaps?">
     Generational ZGC performs almost all garbage collection work **concurrently** while application threads are actively executing. 
     
-    It avoids Stop-The-World compaction pauses using **Colored Pointers** (encoding metadata in reference address bits) and **Load Barriers** (intercepting reads to relocate objects on the fly in nanoseconds). Because pause times are determined by small root set scanning rather than the number of live heap objects, pause times remain constant (under 1ms) even on terabyte heaps.
+    It avoids Stop-The-World compaction pauses using **Colored Pointers** (encoding metadata in reference address bits) and **Load Barriers** (intercepting reads to relocate objects on the fly in nanoseconds). Because pause times are determined by small root set scanning rather than the number of live heap objects, its design keeps pauses largely independent of heap size. This is not a hard deadline for every pause, allocation, or application request.
   </Accordion>
 
   <Accordion title="3. How do you diagnose a container Exit Code 137 when the JVM heap is only 50% utilized?">
-    Exit Code 137 means the Linux kernel sent `SIGKILL` because total container memory exceeded the Kubernetes memory limit. If the heap is only 50% full, the memory leak is occurring **off-heap** (Metaspace, thread stacks, or Netty direct byte buffers).
+    Exit code 137 indicates termination by `SIGKILL` under the usual shell convention. An OOM kill is one possible cause; forced termination after a shutdown timeout is another. Check the container's termination reason and events first. If memory exhaustion is confirmed, inspect total process memory as well as heap use. A half-full heap alone does not prove an off-heap leak.
     
     To diagnose:
     1. Start the container with `-XX:NativeMemoryTracking=summary`.
     2. Establish a baseline using `jcmd <PID> VM.native_memory baseline`.
-    3. As memory increases, run `jcmd <PID> VM.native_memory detail.diff`.
+    3. As memory increases, run `jcmd <PID> VM.native_memory summary.diff`.
     4. Inspect the output for growth in Metaspace, Thread stack allocations, or Direct Byte Buffers.
   </Accordion>
 
@@ -257,7 +257,7 @@ CPU and allocation profiling in production uses `async-profiler` or Java Flight 
 Flame graphs are analyzed by identifying wide horizontal plateaus at the top of the call stack.
 </Check>
 <Check>
-Low-latency workloads on Java 21 leverage Generational ZGC (`-XX:+UseZGC -XX:+ZGenerational`) for sub-millisecond tail latency.
+For Java 21, evaluate Generational ZGC with `-XX:+UseZGC -XX:+ZGenerational`. Compare request latency, allocation stalls, CPU, and memory against G1 on the same workload. The [Java 21 collector guide](https://docs.oracle.com/en/java/javase/21/gctuning/available-collectors.html) provides selection guidance; it does not replace a benchmark of your service.
 </Check>
 <Check>
 Container memory is configured with `-XX:+UseContainerSupport` and `-XX:MaxRAMPercentage=75.0`.

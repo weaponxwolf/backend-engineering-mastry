@@ -1,0 +1,41 @@
+---
+title: "Versions and Verification"
+description: "Know which examples run, which are excerpts, and what each verification command proves."
+---
+
+# Versions and Verification
+
+This course uses Java 21 and Spring Boot 3 as a teaching baseline. A teaching baseline is a reproducible set of versions, not a promise of current production support.
+
+## Run the right project
+
+| Artifact | Command from repository root | What it checks |
+| --- | --- | --- |
+| Documentation | `npm ci` then `npm run check` | Audit tests, page structure, Mintlify validation, and internal links |
+| Java foundations | `bash examples/java-foundations/run.sh` | Compilation and 12 checks of a calculation rule |
+| Todo starter | `mvn -f examples/todo-api/pom.xml verify` | Java compilation, Spring MVC behavior, Flyway, JPA, and H2 |
+| Other chapter snippets | Assemble the named dependencies and surrounding application | Not covered by the starter's tests |
+
+The Todo application has a complete build under `examples/todo-api`. Its H2 database is temporary and it has no authentication. The legacy Todo walkthrough describes a different contract; follow the starter README and source together rather than mixing their field limits and schemas.
+
+## Version rules
+
+- Java labs compile with release 21. Preview APIs are optional reference material and must say so.
+- The Todo starter pins Spring Boot 3.5.10, a [published release](https://spring.io/blog/2026/01/22/spring-boot-3-5-10-available-now/). This is not a latest-version claim.
+- Some older chapters use Spring Boot 3.3. Its open-source support ended with 3.3.13 in June 2025. Read these as historical examples and test an upgrade before deployment. [Spring's release notice](https://spring.io/blog/2025/06/19/spring-boot-3-3-13-available-now/)
+- Consult [Spring Boot support information](https://spring.io/projects/spring-boot#support) when starting a deployed application. Do not assume every Boot 3 minor release or Spring library can be mixed freely.
+- Mintlify is pinned in `package.json` and `package-lock.json`. Use `npm ci`; review and validate deliberate dependency updates.
+
+## Interpret verification narrowly
+
+A snippet can parse as MDX while containing Java that does not compile. A Java test can pass while its SQL behaves differently in PostgreSQL. A mock JWT can exercise role checks without exercising signature verification.
+
+The [Mintlify link command](https://www.mintlify.com/docs/cli/commands) checks internal links by default. `npm run links:external` checks external URLs separately; a timeout or rate limit needs investigation. It does not establish that a cited page supports a claim.
+
+The content inventory reports headings and code blocks for editorial review. It does not grade correctness or comprehension. Read the [curriculum audit](/getting-started/curriculum-audit) for concrete remaining gaps.
+
+## Evidence required for stronger claims
+
+Before labeling a project runnable, include every required source/configuration file, pinned dependencies, a fresh-checkout command, and its observed result. Before claiming production readiness, also test authorization, real database behavior, migrations on existing data, failure recovery, and realistic load.
+
+For performance claims, record workload, hardware, runtime, warmup, concurrency, duration, and latency distribution. Explain the assumptions behind a complexity statement. A cache hit ratio or a percentage improvement is a measured result, not a property guaranteed by using a tool.

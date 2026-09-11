@@ -106,27 +106,27 @@ graph TD
     Coord -->|Replicate to N=3 nodes| R3["Replica 3"]
 ```
 
-### The Pigeonhole Principle for Strong Consistency
+### The Pigeonhole Principle proves overlap
 $$W + R > N$$
 
 If $N = 3$, and we configure **$W = 2$ and $R = 2$**:
 $$W + R = 4 > 3$$
-By the **Pigeonhole Principle**, the set of nodes written to ($W$) and the set of nodes read from ($R$) **must overlap by at least one node**. The overlapping node is guaranteed to hold the latest version!
+By the **Pigeonhole Principle**, the set of nodes written to ($W$) and the set of nodes read from ($R$) **must overlap by at least one node**. This proves set intersection, assuming fixed membership. It does not resolve concurrent or incomplete writes, prove real-time version ordering, or implement atomic read-modify-write. Read [the quorum assumptions](/system-design/consistency-failures#the-quorum-inequality) before using the formula as a correctness argument.
 
 ### Production Tunable Consistency Topologies
 
 | Configuration | Quorum Math | Read Latency | Write Latency | Consistency Guarantee | Best Use Case |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **High Availability (AP)** | $W=1, R=1, N=3$ | Ultra-Fast ($\le 2\text{ms}$) | Ultra-Fast ($\le 2\text{ms}$) | **Eventual Consistency** (May read stale data) | Analytics counters, telemetry, clickstreams |
-| **Strong Consistency (CP)**| $W=2, R=2, N=3$ | Fast ($\le 8\text{ms}$) | Fast ($\le 8\text{ms}$) | **Strong Consistency** (Overlapping quorum) | User account profiles, order states |
-| **Fast Writes / Heavy Reads**| $W=1, R=3, N=3$ | Slower (Wait for all 3) | Instant (Wait for 1) | **Strong Consistency** ($1 + 3 > 3$) | High-frequency sensor logging |
+| **Overlapping quorums**| $W=2, R=2, N=3$ | Fast ($\le 8\text{ms}$) | Fast ($\le 8\text{ms}$) | **Read/write overlap**; protocol assumptions still apply | User account profiles, order states |
+| **Fast Writes / Heavy Reads**| $W=1, R=3, N=3$ | Slower (Wait for all 3) | Instant (Wait for 1) | **Read/write overlap**; writes do not intersect each other | High-frequency sensor logging |
 
 ---
 
 ## 5. High-Availability Writes: Sloppy Quorums & Hinted Handoff
 
 In a strict quorum system, if 2 out of 3 replica nodes are down due to a network partition, all writes fail.
-To achieve **$99.999\%$ Write Availability**, Dynamo implements **Sloppy Quorums with Hinted Handoff**:
+To keep accepting more writes during replica outages, Dynamo uses **sloppy quorums with hinted handoff**. No fixed availability percentage follows from this technique alone. Substitute replicas also break the fixed-membership assumption in the quorum inequality. See [the Dynamo paper](https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf).
 
 ```mermaid
 sequenceDiagram
@@ -320,18 +320,14 @@ Instead of a binary "Node is Alive / Node is Dead" flag (which causes false posi
     **Virtual Nodes (Vnodes)** assign each physical machine 256 tokens uniformly across the ring, preventing non-uniform hot spots and ensuring that rebalancing load is distributed evenly across all peer nodes in parallel.
   </Accordion>
 
-  <Accordion title="2. How does the Pigeonhole Principle guarantee Strong Consistency in Quorum Replication?">
-    If $N$ is the replication factor, $W$ is the write quorum, and $R$ is the read quorum, configuring:
-    $$W + R > N$$
-    guarantees strong consistency.
-    
-    By the **Pigeonhole Principle**, if you write to $W$ nodes and read from $R$ nodes out of a total of $N$ nodes, the write set and read set **must overlap by at least one node**. That overlapping node holds the most recent write version. When the read coordinator evaluates responses, it selects the highest version, guaranteeing that stale data is never returned.
+  <Accordion title="2. Does an overlapping quorum guarantee linearizability?">
+    No. $W + R > N$ proves overlap for a fixed replica set. A complete consistency protocol must also define concurrent-write ordering, incomplete-write recovery, read repair, and membership changes. Timestamp comparison alone does not provide real-time ordering. See [Cassandra's linearizable lightweight transactions](https://cassandra.apache.org/doc/stable/cassandra/architecture/guarantees.html) for the distinction between quorum settings and a coordination protocol.
   </Accordion>
 
   <Accordion title="3. What is a Sloppy Quorum and how does Hinted Handoff maintain write availability during partitions?">
     In a strict quorum, if preferred replica nodes are unreachable, writes fail. In a **Sloppy Quorum**, if preferred replica nodes are down, the coordinator node writes to healthy neighboring nodes outside the preferred list to satisfy the $W$ quorum.
     
-    The neighbor node accepts the write and tags it with a **"Hint"** indicating the intended destination. A background daemon monitors peer health via the Gossip Protocol. Once the primary replica node recovers, the neighbor delivers the hinted handoff write and deletes its local copy, guaranteeing $99.999\%$ write availability during network partitions.
+    The neighbor node accepts the write and tags it with a **"Hint"** indicating the intended destination. A background daemon monitors peer health via the Gossip Protocol. Once the primary replica node recovers, the neighbor delivers the hinted handoff write and deletes its local copy, improving write availability while accepting temporary divergence and the need for reconciliation.
   </Accordion>
 
   <Accordion title="4. Why are Vector Clocks superior to Last-Write-Wins (LWW) using wall-clock timestamps?">

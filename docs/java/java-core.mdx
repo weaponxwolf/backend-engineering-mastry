@@ -4,7 +4,11 @@ sidebarTitle: "Java Core"
 description: "Master foundational Java 21 for high-performance backend engineering. Deep dive into JVM memory layout (Stack vs Heap vs Metaspace), pass-by-value proof, String Pool internals, autoboxing overhead, and records."
 ---
 
-## 1. Mental Model: What Java Actually Does on Hardware
+<Note>
+Start with [Your First Program](/getting-started/first-program) if you have not compiled Java yet. First learn variables, methods, conditions, and loops. Run the checked-in `examples/java-foundations` lab before studying memory layouts. This chapter is a second pass into how Java works.
+</Note>
+
+## 1. Mental Model: How Java Runs Your Program
 
 Java source code does not compile directly to machine assembly. The `javac` compiler compiles `.java` files into platform-independent **Bytecode** stored in `.class` files.
 
@@ -43,7 +47,7 @@ flowchart TD
             OldGen["Old / Tenured Generation<br/>(Long-lived singletons, caches)"]
         end
 
-        subgraph ThreadStacks ["Thread Stacks (-Xss: 1MB default)"]
+        subgraph ThreadStacks ["Platform Thread Stacks (-Xss: platform dependent)"]
             Stack1["Thread 1 Stack: Frame 1 -> Frame 2 -> Frame 3"]
             Stack2["Thread 2 Stack: Frame 1 -> Frame 2"]
         end
@@ -59,16 +63,16 @@ flowchart TD
 ### The Three Memory Regions Deconstructed:
 
 1. **Thread Stacks (Per-Thread Memory)**:
-   - Every OS platform thread has its own private stack (default `-Xss1m`).
+   - Every platform thread has its own stack. The default size depends on the JVM and platform; `-Xss` configures it.
    - Stores **Stack Frames**: local primitive variables (`int`, `long`, `boolean`), object reference pointers, operand stacks, and method return addresses.
    - Stack memory is automatically deallocated in $O(1)$ time when a method returns (zero Garbage Collection overhead).
 2. **Java Heap (Shared Object Space)**:
    - Shared across all threads in the JVM (`-Xmx`).
-   - All instantiated objects (`new User()`, arrays, strings) reside on the heap.
-   - Divided into **Young Generation** (Eden, S0, S1) and **Old Generation** to exploit the **Weak Generational Hypothesis**: *most objects die shortly after allocation*.
+   - The heap is the logical home of objects and arrays. The JIT may remove allocations when doing so preserves the program's behavior.
+   - Many collectors separate young and old objects because most objects die young. The diagram is a simplified model; the actual layout depends on the chosen collector.
 3. **Metaspace (Off-Heap Native Memory)**:
    - Replaced PermGen in Java 8. Resides in native operating system memory (outside the Java heap).
-   - Stores class metadata, static fields, method bytecode, and the runtime constant pool.
+   - Stores class metadata, including method information. A static field that references a large list can retain heap objects; increasing the Metaspace limit does not fix that heap retention.
 
 ---
 
@@ -91,6 +95,13 @@ public class PassByValueProof {
 
         modifyInternalState(user);
         System.out.println(user.getName()); // Prints "Charlie"!
+    }
+
+    static class User {
+        private String name;
+        User(String name) { this.name = name; }
+        String getName() { return name; }
+        void setName(String name) { this.name = name; }
     }
 
     public static void attemptReassignment(User u) {
@@ -153,80 +164,61 @@ flowchart TD
 ```
 
 ### Compact Strings in Modern Java:
-Prior to Java 9, every character in a `String` was stored as a 2-byte `char[]` (UTF-16), wasting 50% of heap memory on standard Latin text. 
+Prior to Java 9, every character in a `String` was stored as a 2-byte `char[]` (UTF-16), using two bytes per UTF-16 code unit even for Latin-1 text. This describes string content, not the entire heap. 
 In modern Java (Java 9 through Java 21), strings use **Compact Strings**: an internal `byte[]` accompanied by a 1-byte `coder` flag:
 - If a string contains only Latin-1 characters (`ISO-8859-1`), it stores 1 byte per character.
-- If it contains non-Latin characters (e.g., Chinese, emoji), it stores 2 bytes per character (UTF-16).
+- If it contains non-Latin characters (e.g., Chinese, emoji), it uses UTF-16: two bytes per code unit. Some characters, including many emoji, require two code units.
 
 ---
 
 ## 5. Primitives vs Object Wrappers: The Autoboxing Tax
 
-Every Java object carries an **Object Header** overhead:
-- **Mark Word (8 bytes)**: Identity hashcode, GC age bits, locking pointers.
-- **Klass Pointer (8 bytes / 4 bytes with Compressed OOPs)**: Pointer to class metadata in Metaspace.
-
-```mermaid
-flowchart LR
-    subgraph Primitive: 4 Bytes Total
-        P["int: 32 bits (4 bytes)"]
-    end
-
-    subgraph Object Wrapper: 24 Bytes Total!
-        O["Header: Mark Word (8B) + Klass (4B) + Padding (4B) + int value (4B) + ref pointer (4B)"]
-    end
-```
+A wrapper such as `Integer` is an object. It has an object header and a value, and a collection also stores a reference to it. Exact sizes depend on the JVM, pointer compression, and alignment. An `int` value uses 32 bits; do not treat a diagram of one object layout as a portable memory guarantee.
 
 ### The Performance Penalty of Autoboxing in Loops:
 ```java
-// CATASTROPHIC PERFORMANCE ANTI-PATTERN:
+// Unnecessary boxing in a numeric loop:
 Long sum = 0L; // Object wrapper!
 for (long i = 0; i < 10_000_000; i++) {
-    sum += i; // Unboxes to long, adds, and boxes back to NEW Long object!
+    sum += i; // Unboxes, adds, and boxes the result again.
 }
 ```
-**Impact**: The loop above instantiates **10,000,000 temporary `Long` objects on the heap**, triggering continuous Young Generation garbage collection pauses. Changing `Long sum` to primitive `long sum` accelerates execution by **10x** with zero heap allocations!
+This can create avoidable allocations. Use primitive `long` for this accumulator. The number of allocations and the speed difference depend on caching and JIT optimization; a fixed 10× claim needs a reproducible benchmark. Measure with [OpenJDK JMH](https://github.com/openjdk/jmh), including warmup, multiple runs, and allocation data.
 
 ---
 
 ## 6. Modern Java 21 Records, Pattern Matching & Sealed Classes
 
-Modern backend development in Java 21 abandons verbose boilerplate (getters, setters, manual `toString`) in favor of **Records**, **Sealed Classes**, and **Pattern Matching**:
+Records group data with generated accessors and equality methods. A sealed interface limits its permitted implementations. Pattern matching lets a `switch` handle each type.
+
+Save this complete type as `PaymentProcessor.java`. It describes a payment request; it does not contact a provider or charge money.
 
 ```java
-package com.backend.mastery.domain;
+import java.util.Objects;
 
-import java.time.Instant;
-
-// 1. Sealed Interface: Restricts implementations to a closed set
-public sealed interface PaymentMethod 
-    permits CreditCard, BankTransfer, CryptoWallet {
-
-    record CreditCard(String cardNumber, String cvv, Instant expiryDate) implements PaymentMethod {}
-    record BankTransfer(String iban, String swiftCode) implements PaymentMethod {}
-    record CryptoWallet(String walletAddress, String network) implements PaymentMethod {}
-}
-
-// 2. Exhaustive Switch Pattern Matching (No default branch required!)
 public class PaymentProcessor {
+    public sealed interface PaymentMethod permits CardToken, BankTransfer {}
+    public record CardToken(String providerToken) implements PaymentMethod {}
+    public record BankTransfer(String transferReference) implements PaymentMethod {}
 
-    public String processPayment(PaymentMethod method, long amountCents) {
+    public String describe(PaymentMethod method, long amountCents) {
+        Objects.requireNonNull(method, "Payment method is required");
+        if (amountCents <= 0) {
+            throw new IllegalArgumentException("Amount must be positive");
+        }
         return switch (method) {
-            case PaymentMethod.CreditCard cc -> 
-                "Charging card ending in " + cc.cardNumber().substring(12) + " for " + amountCents;
-            case PaymentMethod.BankTransfer bt -> 
-                "Initiating wire to IBAN " + bt.iban() + " for " + amountCents;
-            case PaymentMethod.CryptoWallet cw -> 
-                "Broadcasting " + amountCents + " to wallet " + cw.walletAddress();
+            case CardToken card -> "Card payment: " + amountCents + " cents";
+            case BankTransfer bank -> "Bank transfer: " + amountCents + " cents";
         };
     }
 }
 ```
 
-### Why Records are Superior to Lombok `@Value`:
-1. **True Immutability**: Record fields are `final` and private by definition.
-2. **Built-in Canonical Constructors**: Enables concise validation guards without reflection.
-3. **Serialization Safety**: Java deserialization reconstructs records exclusively through their canonical constructor, preventing bypass of validation invariants.
+Compile it with `javac --release 21 PaymentProcessor.java`. These features do not need preview flags in Java 21. Add a third permitted type and compile again: this switch needs another case.
+
+### Records are shallowly immutable
+
+A record's fields are final, but an object referenced by a field can still change. For a record with a list field, use a defensive copy such as `List.copyOf(items)` in its compact constructor when you need a stable list. This still does not make mutable list elements immutable. Generated `toString()` includes component values, so do not put secrets into logs just because their container is a record.
 
 ---
 

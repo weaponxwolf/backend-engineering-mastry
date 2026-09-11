@@ -213,7 +213,7 @@ In distributed microservices, a single user click triggers a cascading tree of n
 
 ### The W3C `traceparent` Header Format
 
-```text
+```http
 traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
              │  └───────────────┬──────────────┘ └───────┬───────┘ └─┬┘
              │             Trace ID (32 hex)        Parent Span ID   Flags
@@ -348,7 +348,7 @@ flowchart LR
 
 Notice the `# {trace_id="..."}` annotation at the end of the histogram bucket:
 
-```text
+```prometheus
 # HELP http_server_requests_seconds Duration of HTTP server requests
 # TYPE http_server_requests_seconds histogram
 http_server_requests_seconds_bucket{exception="none",method="POST",outcome="SUCCESS",status="200",uri="/api/v1/orders",le="2.0"} 12410
@@ -476,7 +476,7 @@ Through **OpenMetrics Exemplars**. When an observation completes, the Micrometer
 ### Q2: What is the difference between Head-Based Sampling and Tail-Based Sampling in distributed tracing?
 **Answer**:
 - **Head-Based Sampling**: The sampling decision is made at the ingress root span (e.g., API Gateway) before the request begins execution. It is lightweight and requires minimal memory, but risks discarding the traces of rare downstream failures or unexpected latency spikes.
-- **Tail-Based Sampling**: All spans are collected and temporarily buffered in memory by an OpenTelemetry Collector until the entire trace completes. The collector evaluates the trace: if any span contains an error status code (`status >= 500`) or duration exceeds a threshold (e.g., `duration > 1s`), the trace is retained; otherwise, it is dropped. Tail sampling guarantees 100% capture of production incidents while conserving long-term storage.
+- **Tail-Based Sampling**: A collector buffers received spans and applies a policy after a decision window. Policies can retain traces with an error span status or high latency. HTTP status codes are attributes; OpenTelemetry span status is a separate field. Missing spans, upstream head sampling, late arrivals, memory pressure, or collector failure can still lose relevant traces. Route spans from the same trace to the same sampling instance and monitor dropped spans. Tail sampling cannot guarantee capture of every incident. See [OpenTelemetry sampling trade-offs](https://opentelemetry.io/docs/concepts/sampling/).
 
 ### Q3: Why is HikariCP active connection saturation more dangerous than high CPU utilization?
 **Answer**:

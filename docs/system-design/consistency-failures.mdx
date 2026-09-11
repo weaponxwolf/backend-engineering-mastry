@@ -70,28 +70,14 @@ In 2012, Daniel Abadi recognized that CAP only describes system behavior **durin
 PACELC states:
 $$\text{If } \mathbf{P} \text{ (Partition): Choose } \mathbf{A} \text{ or } \mathbf{C}; \quad \mathbf{E} \text{ (Else / Normal): Choose } \mathbf{L} \text{ or } \mathbf{C}$$
 
-```text
-+---------------------+-----------------------+-------------------------+
-| System              | Partition Behavior    | Normal Behavior         |
-|                     | (P/A or P/C)          | (E/L or E/C)            |
-+---------------------+-----------------------+-------------------------+
-| PostgreSQL / MySQL  | PC                    | EC                      |
-| (Sync Replication)  | Block writes if sync  | Waits for replica ACK   |
-|                     | replica is isolated   | before returning        |
-+---------------------+-----------------------+-------------------------+
-| Apache Cassandra /  | PA                    | EL                      |
-| AWS DynamoDB        | Accept writes locally | Returns local replica   |
-| (Default Config)    | to preserve uptime    | data immediately        |
-+---------------------+-----------------------+-------------------------+
-| MongoDB (Primary +  | PC                    | EC                      |
-| Majority WriteConcern)| Rejects writes if   | Replicates to majority  |
-|                     | primary isolated      | before returning ACK    |
-+---------------------+-----------------------+-------------------------+
-| Yahoo PNUTS /       | PC                    | EL                      |
-| Couchbase           | Blocks writes on      | Serves reads locally    |
-|                     | partition split       | with minimal latency    |
-+---------------------+-----------------------+-------------------------+
-```
+| System | Partition Behavior (P/A or P/C) | Normal Behavior (E/L or E/C) |
+| :--- | :--- | :--- |
+| **PostgreSQL / MySQL** (Sync Replication) | **PC**: Blocks writes if sync replica is isolated | **EC**: Waits for replica ACK before returning |
+| **PostgreSQL / MySQL** (Async Replication) | **PA**: Primary accepts writes even if replicas unreachable | **EL**: Returns immediately after local WAL commit |
+| **Apache Cassandra / DynamoDB** | **PA**: All nodes accept writes (hinted handoff) | **EL**: Reads/writes complete at $W=1, R=1$ |
+| **MongoDB** (Majority Write Concern) | **PC**: Rejects writes if primary cannot reach majority | **EC**: Waits for majority acknowledgment |
+| **Google Spanner / CockroachDB** | **PC**: Enforces Raft/Paxos consensus; halts partitions | **EC**: TrueTime / Raft consensus before returning |
+| **Yahoo PNUTS / Couchbase** | **PC**: Blocks writes on partition split | **EL**: Serves reads locally with minimal latency |
 
 ---
 
@@ -161,7 +147,7 @@ flowchart TD
 
 ### The Quorum Inequality
 
-To guarantee that a read operation always encounters the latest committed write, the read set and write set must overlap by at least one node:
+For a fixed set of $N$ replicas, the following inequality makes every read set intersect every acknowledged write set:
 
 $$R + W > N$$
 
@@ -170,47 +156,47 @@ Where:
 - $W$ = Write quorum (number of nodes that must acknowledge a write before success is returned to the client).
 - $R$ = Read quorum (number of nodes that must respond to a read before returning data to the client).
 
-```text
-Example: N = 5 nodes, W = 3, R = 3
-R + W = 3 + 3 = 6
-Since 6 > 5, by the Pigeonhole Principle:
-Any set of 3 read nodes MUST contain at least one node from the 3 write nodes!
-The reader compares version timestamps and returns the freshest record.
-```
+> [!NOTE]
+> **Pigeonhole Intersection Proof**:
+> For $N = 5$ nodes with $W = 3$ and $R = 3$:
+> $$R + W = 3 + 3 = 6 > 5$$
+> By the Pigeonhole Principle, any subset of 3 read replicas must contain at least one replica from the 3 write nodes that acknowledged the write. Version resolution is a separate protocol.
+
+<Warning>
+**Overlap is not a complete proof of linearizability.** The replicas must belong to the same set and retain the acknowledged value. Concurrent writes, incomplete writes, clock skew, and membership changes need defined behavior. Comparing wall-clock timestamps does not establish real-time order. Sloppy quorums can use substitute nodes and lose the intersection assumed by the formula.
+
+For example, a partial write can reach one replica and time out. One read may see it; a later read from a different pair may miss it. A protocol needs additional steps to prevent that result. Cassandra uses Paxos-based lightweight transactions for linearizable conditional operations. See [Cassandra's guarantees](https://cassandra.apache.org/doc/stable/cassandra/architecture/guarantees.html) and [Dynamo's sloppy quorum design](https://www.allthingsdistributed.com/2007/10/amazons_dynamo.html).
+</Warning>
 
 ### Tunable Consistency Topologies
 
 <Tabs>
-  <Tab title="Balanced Strong Quorum (W=Quorum, R=Quorum)">
-    ```text
-    Formula: N = 3, W = 2, R = 2  (R + W = 4 > 3)
-    ```
-    - **Pros**: Tolerates the failure of 1 node without losing availability or strong consistency.
+  <Tab title="Balanced overlap (W=Quorum, R=Quorum)">
+    **Topology Formula**: $N = 3, W = 2, R = 2 \implies R + W = 4 > 3$
+
+    - **Pros**: Both reads and writes can complete if any two of the fixed three replicas are reachable.
     - **Performance**: Balanced read and write latencies.
-    - **Use Case**: Default configuration for mission-critical e-commerce and banking datastores.
+    - **Use Case**: Data requiring visibility of acknowledged writes under the store’s documented resolution rules. Financial invariants need an appropriate transaction or conditional-write protocol.
   </Tab>
   <Tab title="Fast Writes, Heavy Reads (W=1, R=N)">
-    ```text
-    Formula: N = 3, W = 1, R = 3  (R + W = 4 > 3)
-    ```
+    **Topology Formula**: $N = 3, W = 1, R = 3 \implies R + W = 4 > 3$
+
     - **Pros**: Writes return with ultra-low latency as soon as a single node responds.
     - **Cons**: Reads are slow because every replica must respond; if even 1 node is down, reads fail.
     - **Use Case**: High-throughput telemetry ingestion where writes dominate and reads are infrequent audits.
   </Tab>
   <Tab title="Fast Reads, Heavy Writes (W=N, R=1)">
-    ```text
-    Formula: N = 3, W = 3, R = 1  (R + W = 4 > 3)
-    ```
+    **Topology Formula**: $N = 3, W = 3, R = 1 \implies R + W = 4 > 3$
+
     - **Pros**: Reads return instantaneously from any single healthy node.
     - **Cons**: Writes fail if a single node is undergoing maintenance or network degradation.
     - **Use Case**: Content delivery, static metadata catalogs, feature flag systems.
   </Tab>
   <Tab title="Stale Reads / High Availability (R + W <= N)">
-    ```text
-    Formula: N = 3, W = 1, R = 1  (R + W = 2 <= 3)
-    ```
+    **Topology Formula**: $N = 3, W = 1, R = 1 \implies R + W = 2 \le 3$
+
     - **Pros**: Maximum possible availability and lowest latency. Both reads and writes survive multiple node failures.
-    - **Cons**: Vulnerable to dirty reads, phantom reads, and lost updates.
+    - **Cons**: A read can miss an acknowledged write. Concurrent read-modify-write operations can lose updates; SQL isolation anomaly names do not directly describe every key-value store.
     - **Use Case**: Social media feeds, video view counters, logging pipelines.
   </Tab>
 </Tabs>
@@ -276,7 +262,7 @@ sequenceDiagram
 ## Distributed Resiliency Primitives
 
 ### 1. The Idempotency Key Pattern
-In distributed systems, the network guarantees **at-least-once** delivery at best. Therefore, any mutating endpoint (charges, orders, balance transfers) must enforce idempotency using unique request tokens.
+Networks can lose messages. Applications and brokers can provide at-least-once processing through retained data and retries, under stated availability and retention assumptions. Therefore, any mutating endpoint (charges, orders, balance transfers) must enforce idempotency using unique request tokens.
 
 ```mermaid
 sequenceDiagram
@@ -409,12 +395,11 @@ $$\text{Sleep} = \text{random}(0, \min(\text{MaxSleep}, \text{BaseSleep} \times 
 ### The Scenario: Distributed Flash Sale Checkout
 You are designing the checkout flow for a flash sale selling 10,000 gaming consoles. At 12:00:00 PM, 500,000 users click "Purchase".
 
-```text
-Requirements:
-1. Inventory MUST NEVER oversell (exactly 10,000 units).
-2. Payment provider has a hard limit of 500 requests/second and a 2% failure rate.
-3. System must survive the loss of any single database node or message broker.
-```
+> [!IMPORTANT]
+> **Scenario Requirements**:
+> 1. **Zero Overselling**: Inventory MUST NEVER oversell (exactly 10,000 units allocated).
+> 2. **Downstream Throttling**: Payment provider has a hard ceiling of 500 requests/second and a 2% failure rate.
+> 3. **High Availability**: The system must survive the loss of any single database node or message broker.
 
 ### Complete the Design Checklist:
 - [ ] Choose CAP/PACELC configuration for inventory vs order confirmation email.
@@ -436,8 +421,8 @@ Requirements:
     CAP only describes system behavior during an active network partition (which represents under 0.1% of operating time). PACELC extends CAP by describing the trade-off during the remaining 99.9% of normal operations: **Else (E)**, the system must choose between **Latency (L)** and **Consistency (C)**. For example, to provide strong consistency normally, a system must wait for round-trip network acknowledgments from replicas, increasing latency.
   </Accordion>
 
-  <Accordion title="3. Explain Quorum replication math and why R + W > N guarantees consistency.">
-    In a cluster of $N$ replicas, writes are acknowledged by $W$ nodes and reads require responses from $R$ nodes. If $R + W > N$, the Pigeonhole Principle dictates that the set of nodes read from and the set of nodes written to must share at least one node in common. By attaching version numbers or timestamps to records, the coordinator can always identify the most recent write from that overlapping node.
+  <Accordion title="3. What does R + W > N prove, and what does it leave unproven?">
+    It proves that read and write sets overlap when they are subsets of the same fixed $N$ replicas. It does not by itself prove linearizability, atomic read-modify-write, or multi-key transactions. A complete protocol must handle concurrent and incomplete writes, replica failures, version ordering, and reconfiguration. A sloppy quorum may use nodes outside the original set, so the simple intersection argument no longer applies.
   </Accordion>
 
   <Accordion title="4. How do Fencing Tokens solve the GC pause / split-brain zombie leader problem?">
