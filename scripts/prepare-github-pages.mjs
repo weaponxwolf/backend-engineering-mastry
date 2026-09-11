@@ -43,12 +43,27 @@ function getAllFiles(dir) {
 const allFiles = getAllFiles(outDir);
 let modifiedCount = 0;
 
+const envInjection = `<script>
+window.__NEXT_DATA__ = window.__NEXT_DATA__ || {};
+window.__NEXT_DATA__.basePath = "${basePath}";
+window.process = window.process || { env: {} };
+window.process.env = window.process.env || {};
+window.process.env.NEXT_PUBLIC_BASE_PATH = "${basePath}";
+window.process.env.NEXT_PUBLIC_ASSET_PREFIX = "${basePath}";
+window.process.env.BASE_PATH = "${basePath}";
+</script>`;
+
 for (const filePath of allFiles) {
   const ext = path.extname(filePath);
 
   if (ext === '.html') {
     let content = fs.readFileSync(filePath, 'utf8');
     const original = content;
+
+    // Inject runtime env if not present
+    if (!content.includes('window.__NEXT_DATA__.basePath =')) {
+      content = content.replace('<head>', `<head>${envInjection}`);
+    }
 
     // 1. Replace assets starting with /_next/
     content = content.replaceAll('"/_next/', `"${basePath}/_next/`);
@@ -91,11 +106,18 @@ for (const filePath of allFiles) {
       while (content.includes(doubleBase)) {
         content = content.replaceAll(doubleBase, `${basePath}/_next/`);
       }
+    }
 
-      if (content !== original) {
-        fs.writeFileSync(filePath, content, 'utf8');
-        modifiedCount++;
-      }
+    // Replace Next.js environment fallbacks inside JS bundles
+    if (content.includes('NEXT_PUBLIC_BASE_PATH')) {
+      content = content.replaceAll('.NEXT_PUBLIC_BASE_PATH??""', `"${basePath}"`);
+      content = content.replaceAll('.NEXT_PUBLIC_BASE_PATH?? ""', `"${basePath}"`);
+      content = content.replaceAll('.NEXT_PUBLIC_ASSET_PREFIX??""', `"${basePath}"`);
+    }
+
+    if (content !== original) {
+      fs.writeFileSync(filePath, content, 'utf8');
+      modifiedCount++;
     }
   } else if (ext === '.css') {
     let content = fs.readFileSync(filePath, 'utf8');
@@ -119,7 +141,7 @@ for (const filePath of allFiles) {
 // 404 fallback: ensure 404.html exists for client-side routing on GitHub Pages
 const notFoundPath = path.join(outDir, '404.html');
 const indexPath = path.join(outDir, 'index.html');
-if (!fs.existsSync(notFoundPath) && fs.existsSync(indexPath)) {
+if (fs.existsSync(indexPath)) {
   fs.copyFileSync(indexPath, notFoundPath);
   console.log('[prepare-github-pages] Created 404.html fallback from index.html');
 }
