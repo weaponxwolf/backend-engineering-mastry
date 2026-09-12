@@ -55,6 +55,22 @@ npx vercel --prod
 
 ---
 
+## Mintlify Search Architecture & Local Dev Mechanics
+- **Cloud-Powered Search Engine**:
+  - Mintlify does **not** generate an in-browser client-side full-text search index (e.g. Lunr/FlexSearch).
+  - Search queries are handled by Mintlify's cloud AI & semantic search backend (`https://api.mintlify.com`).
+- **Why Search Fails Locally in `npm run dev`**:
+  - When typing in the search bar on `http://localhost:3000`, the browser posts to `/_mintlify/api-public/search/:subdomain`.
+  - The local Express dev server attempts to proxy this request upstream to `https://api.mintlify.com/api/cli/${subdomain}/search`.
+  - **Authentication Requirement**: Upstream proxying requires a valid Mintlify account access token. Without logging in, the upstream API returns `{"error":"session_invalid"}`.
+  - **To Activate Search Locally**:
+    Run `npx mintlify login` in your terminal to authenticate with your Mintlify account. Once authenticated, `mintlify dev` includes the `Authorization: Bearer <token>` header, enabling local search.
+- **Production Search (Vercel / Cloud)**:
+  - In static export builds on Vercel, the frontend issues search requests directly to `https://api.mintlify.com/api/search/<subdomain>`.
+  - For results to return in production, the repository must be connected to a registered Mintlify project dashboard so Mintlify's cloud crawler has indexed the MDX pages.
+
+---
+
 ## Content Standards & Editorial Rules
 - **The "Zero Assumptions, Infinite Depth" Rule (`docs/getting-started/simple-english-rule.mdx`)**:
   - **Zero Assumptions**: Assume the learner is a beginner Java developer with basic syntax knowledge, but zero production experience. Never assume prior familiarity with architectural jargon.
