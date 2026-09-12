@@ -138,31 +138,41 @@
         "icon": "leaf",
         "groups": [
           {
-            "group": "Architecture & Core IoC",
-            "icon": "cubes",
+            "group": "Getting Started & Core IoC",
+            "icon": "seedling",
             "pages": [
-              "spring-boot/project-structure",
+              "spring-boot/spring-boot-basics",
               "spring-boot/dependency-injection",
-              "spring-boot/aop-events-async",
-              "spring-boot/config-profiles",
-              "spring-boot/autoconfiguration-starters"
+              "spring-boot/config-profiles"
             ]
           },
           {
-            "group": "Web APIs & Reactive Systems",
+            "group": "Web APIs & HTTP Clients",
             "icon": "globe",
             "pages": [
               "spring-boot/rest-api",
               "spring-boot/validation-errors",
+              "spring-boot/restclient-http-interfaces",
               "spring-boot/webflux-reactive"
             ]
           },
           {
-            "group": "Data JPA & Transactions",
+            "group": "Data Access, Transactions & Caching",
             "icon": "database",
             "pages": [
               "spring-boot/jpa-hibernate",
-              "spring-boot/transactions"
+              "spring-boot/transactions",
+              "spring-boot/cache-redis"
+            ]
+          },
+          {
+            "group": "Architecture & Event-Driven Systems",
+            "icon": "cubes",
+            "pages": [
+              "spring-boot/project-structure",
+              "spring-boot/aop-events-async",
+              "spring-boot/kafka-messaging",
+              "spring-boot/autoconfiguration-starters"
             ]
           },
           {
