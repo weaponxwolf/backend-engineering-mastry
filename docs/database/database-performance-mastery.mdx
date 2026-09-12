@@ -288,6 +288,369 @@ spring:
 
 ---
 
+## 6. Linux Kernel I/O, Page Cache Flush & Transparent Huge Pages (THP)
+
+High-performance databases do not run in an abstract cloud sandbox; they execute directly on top of the Linux kernel virtual memory and block I/O subsystems. Two classic Linux kernel settings cause catastrophic p99 database latency spikes if left at default operating system values.
+
+### The Page Cache Flush Spike: `vm.dirty_background_ratio` vs. `vm.dirty_ratio`
+
+When PostgreSQL writes dirty 8KB pages out of its `shared_buffers`, it calls the OS `write()` system call. In Linux, writes do not write directly to NVMe flash storage immediately; they are placed in the **Linux Page Cache** as dirty kernel pages.
+
+```mermaid
+flowchart TD
+    PG["PostgreSQL Backend Process"] -->|"write() 8KB Page"| PageCache["Linux OS Page Cache (Dirty Pages in RAM)"]
+    PageCache -->|"Async Background Flush (kworker)"| Disk["NVMe SSD Disk Storage"]
+    PageCache -.->|"Dirty Threshold Exceeded: SYNC FREEZE!"| PG
+```
+
+Linux manages page cache flushing with two kernel parameters:
+1. **`vm.dirty_background_ratio`** (Default: $\sim 10\%$ of system RAM): When dirty pages reach this threshold, the kernel wakes up background flusher threads (`kworker/flush`) to flush pages to disk asynchronously without blocking application processes.
+2. **`vm.dirty_ratio`** (Default: $\sim 20-30\%$ of system RAM): When dirty pages reach this hard ceiling, the Linux kernel **freezes all writing processes** and forces the application backend processes to perform synchronous I/O writes themselves!
+
+#### The 128 GB RAM Latency Trap:
+Consider a production database server with 128 GB of RAM:
+- At default `vm.dirty_ratio = 20%`, dirty pages can accumulate up to **25.6 Gigabytes** in memory before synchronous throttling activates.
+- During heavy batch writes or checkpoints, dirty memory breaches 25.6 GB.
+- **The Disaster**: The Linux kernel suspends all PostgreSQL backend worker processes. Application queries attempting to commit transactions suddenly freeze for 5 to 20 seconds while the kernel saturates the disk controller writing 25 GB of data. HikariCP connection pools instantly exhaust, and the application suffers an outage.
+
+#### The Production Kernel Fix:
+On database hosts, configure dirty writeback to start almost immediately in tiny increments, preventing large dirty page queues from ever accumulating:
+
+```bash
+# /etc/sysctl.d/99-postgresql.conf
+
+# Start background flushing as soon as dirty pages reach 3% of memory (or 256MB)
+vm.dirty_background_ratio = 3
+# vm.dirty_background_bytes = 268435456
+
+# Hard ceiling: Force synchronous flushes at 5% of memory (never allow 25GB buffers!)
+vm.dirty_ratio = 5
+# vm.dirty_bytes = 536870912
+
+# Prevent Linux Out-Of-Memory (OOM) killer from terminating PostgreSQL Postmaster
+# 2 = Strict no-overcommit (commit limit = swap + RAM * overcommit_ratio)
+vm.overcommit_memory = 2
+vm.overcommit_ratio = 80
+```
+
+---
+
+### The Transparent Huge Pages (THP) Latency Hazard
+
+Modern x86 CPUs use 4,096-byte (4KB) physical memory pages. Transparent Huge Pages (THP) allows the Linux kernel to dynamically group memory into 2,097,152-byte (2MB) pages to reduce Translation Lookaside Buffer (TLB) cache misses.
+
+While beneficial for sequential compute-heavy workloads, THP is **disastrous for relational databases like PostgreSQL**:
+1. **Page Size Mismatch**: PostgreSQL allocates and accesses data in **8KB blocks**. When PostgreSQL modifies an 8KB block, THP must copy and manage a massive 2MB allocation.
+2. **Memory Compaction Stalls**: When physical RAM becomes fragmented, the kernel thread `khugepaged` attempts to defragment memory on the fly to assemble contiguous 2MB chunks. This process triggers CPU lockups and multi-second query stalls during normal database operations.
+
+#### Staff Rule: Disable THP Permanently
+Verify and disable THP on all PostgreSQL database nodes:
+
+```bash
+# Verify current THP status (if [always] is selected, THP is active and hazardous)
+cat /sys/kernel/mm/transparent_hugepage/enabled
+# Output: [always] madvise never
+
+# Disable dynamically on running host:
+echo never | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
+echo never | sudo tee /sys/kernel/mm/transparent_hugepage/defrag
+```
+
+To make the change survive server reboots, add the kernel boot parameter `transparent_hugepage=never` to `/etc/default/grub` and update GRUB.
+
+---
+
+## 7. The Transaction ID ($XID$) Wraparound Catastrophe & Autovacuum Architecture
+
+One of the most dangerous, database-halting events in PostgreSQL is the **Transaction ID Wraparound Failure**. Understanding this failure mode is mandatory for staff backend engineers.
+
+### The 32-Bit Limit and Modular Arithmetic
+
+Every transaction that modifies data in PostgreSQL is assigned an incrementing 32-bit integer Transaction ID ($XID$). A 32-bit unsigned integer can represent:
+
+$$2^{32} \approx 4,294,967,296 \text{ transactions (4.29 billion)}$$
+
+Because Transaction IDs are finite, PostgreSQL treats $XID$s as a circular clock using modular arithmetic:
+- Any transaction within the **2.1 billion transactions "behind"** the current $XID$ is considered in the **past** (visible to current transactions if committed).
+- Any transaction within the **2.1 billion transactions "ahead"** is considered in the **future** (invisible).
+
+```mermaid
+flowchart TD
+    subgraph Clock ["32-Bit XID Circular Ring"]
+        Past["Past 2.14 Billion XIDs<br/>(Visible committed rows)"]
+        Future["Future 2.14 Billion XIDs<br/>(Invisible / uncommitted)"]
+        Current["Current XID Counter"]
+    end
+    Current -->|"Increments past 2.14B without freeze"| Future
+    Note["If current XID laps an old row without FREEZE,<br/>that historical row suddenly appears in the FUTURE<br/>and SILENTLY DISAPPEARS from queries!"]
+```
+
+#### What Happens Without Freezing:
+If the database processes 2.14 billion transactions without freezing old rows, the current transaction counter wraps around. An old transaction that committed three years ago will suddenly appear to be in the **future**! The database's MVCC visibility engine will conclude the row has not yet committed, causing historical data to **silently disappear from all queries**.
+
+---
+
+### The Freeze Mechanism: `FrozenTransactionId`
+
+To prevent data invisibility, PostgreSQL uses a special reserved identifier called `FrozenTransactionId` (value = `2`):
+- When `VACUUM` runs with the freeze option, it inspects table tuple headers (`HeapTupleHeaderData`).
+- Any tuple whose creating transaction `xmin` is older than `vacuum_freeze_min_age` (default: 50 million transactions) has its `xmin` replaced with `FrozenTransactionId`.
+- PostgreSQL interprets `FrozenTransactionId` as: *"This row committed infinitely far in the past. It is permanently visible to every future transaction forever."*
+
+### The Catastrophic Production Shutdown
+
+If a database processes massive write volumes while autovacuum is improperly tuned, disabled, or blocked by long-running transactions, the $XID$ age of the oldest unfrozen table grows dangerously:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as Client Applications
+    participant PG as PostgreSQL Cluster
+    participant Auto as Autovacuum Engine
+
+    Note over PG: Oldest table reaches autovacuum_freeze_max_age (200M XIDs)
+    PG->>Auto: Triggers aggressive emergency autovacuum workers
+    Note over Auto: Worker is blocked by a developer running a long-running analytical query or idle transaction!
+    Note over PG: Oldest table reaches (2^31 - 10,000,000 XIDs)
+    PG-->>App: Logs URGENT WARNING: database must be vacuumed within 10M transactions!
+    Note over PG: Oldest table reaches (2^31 - 3,000,000 XIDs)
+    PG->>PG: EMERGENCY SHUTDOWN ACTIVATED!
+    Note over PG: PostgreSQL terminates all client connections.<br/>Refuses any new writes (PANIC: database is not accepting commands).<br/>FORCES READ-ONLY SINGLE-USER MODE!
+    PG--xApp: Database rejects all application traffic! Total service outage!
+```
+
+#### Monitoring the Approaching Cliff:
+Run this query in your monitoring alerts to warn long before wraparound danger approaches:
+
+```sql
+SELECT 
+    datname,
+    age(datfrozenxid) AS xid_age,
+    2147483648 - age(datfrozenxid) AS tx_remaining_until_shutdown,
+    round(100.0 * age(datfrozenxid) / 2147483648, 2) AS percent_towards_emergency
+FROM pg_database
+ORDER BY xid_age DESC;
+```
+
+#### Emergency Recovery: Single-User Mode
+If the database hits the emergency ceiling, PostgreSQL shuts down and refuses connection sockets. The only recovery path is manual command-line intervention in single-user mode:
+
+```bash
+# 1. Stop the PostgreSQL systemd service
+sudo systemctl stop postgresql
+
+# 2. Launch PostgreSQL in single-user mode directly against the data directory
+sudo -u postgres postgres --single -D /var/lib/postgresql/data -O template1
+
+# 3. Inside the single-user prompt, execute a cluster-wide freeze vacuum:
+backend> VACUUM FREEZE ANALYZE;
+backend> \q
+
+# 4. Restart the normal systemd service
+sudo systemctl start postgresql
+```
+
+---
+
+## 8. MVCC Table & Index Bloat Physics: `VACUUM`, `VACUUM FULL`, and Zero-Downtime `pg_repack`
+
+PostgreSQL implements Multi-Version Concurrency Control (MVCC) through **tuple duplication** rather than undo logs:
+- When you `UPDATE` a row, PostgreSQL does **not** modify the existing 8KB disk block in place.
+- It writes an entirely new row version (tuple) into the page and marks the old tuple header's `xmax` with the current transaction ID.
+- When you `DELETE` a row, the physical row is not erased; it is simply marked dead.
+
+### The Storage Anatomy of Dead Tuples
+
+```mermaid
+flowchart TD
+    subgraph Page ["8KB Physical Disk Block (Page)"]
+        H["Page Header"]
+        T1["Tuple 1: Active Row (xmin: 100, xmax: 0)"]
+        T2["Tuple 2: DEAD TUPLE (xmin: 95, xmax: 102)"]
+        T3["Tuple 3: DEAD TUPLE (xmin: 80, xmax: 98)"]
+        T4["Tuple 4: Active Row (xmin: 105, xmax: 0)"]
+        F["Free Space Hole"]
+    end
+```
+
+### Why Standard `VACUUM` Cannot Shrink Your Database Files
+
+When developers run `VACUUM users;`, they are often shocked to discover that the physical disk file (`base/16384/24589`) **did not decrease by a single byte** even after deleting 50 million rows.
+
+#### The Physical Explanation:
+1. Standard `VACUUM` scans the 8KB pages, identifies tuples whose `xmax` is older than the oldest running transaction, and marks their space as reusable in the table's **Free Space Map (FSM)**.
+2. Future `INSERT` and `UPDATE` statements will reuse these empty slots.
+3. **The Operating System Boundary**: The Linux kernel file system cannot truncate or shrink a physical file unless all the empty blocks reside **at the very physical end of the file**.
+4. If an 80 GB table has even a single active tuple in the final 8KB page at the end of the file, Linux cannot shrink the file, leaving the entire 80 GB allocated on disk!
+
+---
+
+### The `VACUUM FULL` Disaster
+
+To return that unused disk space to the operating system, developers often run:
+
+```sql
+-- FATAL PRODUCTION TRAP: TAKES AN ACCESS EXCLUSIVE LOCK!
+VACUUM FULL orders;
+```
+
+#### What Physically Happens:
+1. `VACUUM FULL` creates an entirely new table file on disk and copies only active rows into it, packing them tightly.
+2. **The Outage**: To perform this rewrite, `VACUUM FULL` acquires an **`ACCESS EXCLUSIVE` table lock**.
+3. While `VACUUM FULL` runs (which can take 4 hours on a 200 GB table), **no user can read, write, or query the `orders` table**. All application threads hang, connection pools exhaust, and web traffic crashes.
+4. **Disk Space Hazard**: It requires enough free disk space to hold **both the old bloated table and the new table simultaneously**. If your disk is at 85% capacity, `VACUUM FULL` will crash the server by filling 100% of the disk!
+
+---
+
+### The Production Solution: Zero-Downtime Compaction with `pg_repack`
+
+To reclaim tens of gigabytes of disk space and rebuild bloated B-Tree indexes without taking downtime, production engineering uses the `pg_repack` extension.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as Active Application Traffic
+    participant Repack as pg_repack Process
+    participant DB as PostgreSQL Engine
+
+    Repack->>DB: 1. Creates shadow table (orders_new) with identical schema
+    Repack->>DB: 2. Creates log table (orders_log) and change capture trigger
+    Note over App,DB: Users continue normal SELECT, INSERT, UPDATE, DELETE!
+    DB->>DB: Trigger writes all concurrent DML changes to orders_log
+    Repack->>DB: 3. Copies live rows from orders to orders_new in chunks
+    Repack->>DB: 4. Builds all indexes concurrently on orders_new
+    Repack->>DB: 5. Replays changes from orders_log into orders_new
+    Repack->>DB: 6. Takes brief (sub-second) ACCESS EXCLUSIVE lock to swap catalog names in pg_class!
+    Repack->>DB: 7. Drops original bloated table and log table
+    Note over Repack: Disk space returned to OS with ZERO query interruption!
+```
+
+#### Executing `pg_repack` on a Live Table:
+
+```bash
+# Run pg_repack from a management host against a live 100GB bloated table
+pg_repack --dbname=production_db \
+          --table=orders \
+          --no-order \
+          --jobs=4 \
+          --wait-timeout=5
+```
+
+---
+
+## 9. Real-Time Performance Triage with `pg_stat_activity` & `pg_stat_statements`
+
+When production latency spikes and the database CPU hits 100%, staff backend engineers immediately execute diagnostic SQL to isolate the root cause.
+
+### Diagnostic 1: Detecting Long-Running Queries and Lock Wait Chains
+
+The first step during an active incident is inspecting `pg_stat_activity` to find queries running longer than expected and identifying which process is blocking others:
+
+```sql
+SELECT 
+    blocked_locks.pid     AS blocked_pid,
+    blocked_activity.usename  AS blocked_user,
+    blocking_locks.pid    AS blocking_pid,
+    blocking_activity.usename AS blocking_user,
+    blocked_activity.query    AS blocked_statement,
+    blocking_activity.query   AS blocking_statement,
+    now() - blocked_activity.query_start AS waiting_duration
+FROM  pg_catalog.pg_locks         blocked_locks
+JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
+JOIN pg_catalog.pg_locks         blocking_locks 
+    ON blocking_locks.locktype = blocked_locks.locktype
+    AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database
+    AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
+    AND blocking_locks.page IS NOT DISTINCT FROM blocked_locks.page
+    AND blocking_locks.tuple IS NOT DISTINCT FROM blocked_locks.tuple
+    AND blocking_locks.virtualxid IS NOT DISTINCT FROM blocked_locks.virtualxid
+    AND blocking_locks.transactionid IS NOT DISTINCT FROM blocked_locks.transactionid
+    AND blocking_locks.classid IS NOT DISTINCT FROM blocked_locks.classid
+    AND blocking_locks.objid IS NOT DISTINCT FROM blocked_locks.objid
+    AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid
+    AND blocking_locks.pid != blocked_locks.pid
+JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
+WHERE NOT blocked_locks.granted;
+```
+
+#### Terminating a Rogue Blocking Process:
+To safely terminate the blocking process without restarting the database:
+
+```sql
+-- 1. Graceful cancel (sends SIGINT to interrupt current query):
+SELECT pg_cancel_backend(blocking_pid);
+
+-- 2. Forceful termination (sends SIGTERM to drop TCP connection if cancel fails):
+SELECT pg_terminate_backend(blocking_pid);
+```
+
+---
+
+### Diagnostic 2: Querying `pg_stat_statements` for Top Latency Killers
+
+The `pg_stat_statements` extension tracks execution statistics across all normalized queries. Use this query to locate queries consuming the most total cluster CPU time:
+
+```sql
+SELECT 
+    queryid,
+    calls,
+    round(total_exec_time::numeric, 2) AS total_ms,
+    round(mean_exec_time::numeric, 2)  AS mean_ms,
+    round(stddev_exec_time::numeric, 2) AS stddev_ms,
+    round((100.0 * shared_blks_hit / nullif(shared_blks_hit + shared_blks_read, 0))::numeric, 2) AS hit_ratio_pct,
+    shared_blks_read AS disk_reads,
+    substr(query, 1, 80) AS query_preview
+FROM pg_stat_statements
+ORDER BY total_exec_time DESC
+LIMIT 10;
+```
+
+#### Interpreting the Diagnostic Columns:
+1. **`mean_exec_time` vs. `stddev_exec_time`**: If `mean_exec_time` is 5ms but `stddev_exec_time` is 2,400ms, the query is suffering from severe **lock contention, checkpoint stall, or intermittent bad plan selection**.
+2. **`hit_ratio_pct`**: If this falls below 95% for a hot OLTP query, it indicates missing indexes forcing large disk reads.
+3. **`shared_blks_read`**: Queries with millions of disk reads are destroying the shared buffer pool by evicting cached pages for other queries.
+
+---
+
+### Diagnostic 3: Safe `work_mem` Sizing Math
+
+`work_mem` dictates how much RAM can be used for in-memory sorting (`ORDER BY`), hash tables (`JOIN`), and grouping (`DISTINCT`) before spilling to temporary disk files.
+
+#### The Fatal Misunderstanding:
+Developers frequently believe `work_mem` is allocated once per connection. **In reality, PostgreSQL allocates `work_mem` per sort or hash operation inside a single query!**
+
+If a complex query executes 3 Hash Joins and 2 Sorts, it can allocate $5 \times \text{work\_mem}$ simultaneously!
+
+$$\text{Max Theoretical RAM} = \text{max\_connections} \times \text{Operations Per Query} \times \text{work\_mem}$$
+
+```console
+Example Disaster Calculation:
+100 connections * 4 sort/join operations * 256MB work_mem = 102.4 GB of RAM!
+If your server only has 32 GB of RAM, the Linux OOM Killer will immediately 
+kill PostgreSQL with Exit Code 137!
+```
+
+#### Safe Production Practice:
+1. Keep the global `work_mem` conservative (e.g. `16MB` to `32MB`):
+   ```bash
+   # postgresql.conf
+   work_mem = 32MB
+   ```
+2. For specific analytical jobs or bulk index creations, increase `work_mem` dynamically **within that specific transaction or session only**:
+   ```sql
+   BEGIN;
+   -- Temporarily allocate 512MB of RAM for this complex report only:
+   SET LOCAL work_mem = '512MB';
+
+   SELECT department, sum(salary), percentile_cont(0.5) WITHIN GROUP (ORDER BY salary)
+   FROM employee_salaries
+   GROUP BY department;
+
+   COMMIT; -- Automatically resets back to 32MB!
+   ```
+
+---
+
 # Phase 4: Senior Interview Ace (Junior vs. Staff Phrasing)
 
 Senior interviewers ask database performance questions to separate engineers who run blind queries from those who understand hardware execution.
@@ -352,6 +715,57 @@ Senior interviewers ask database performance questions to separate engineers who
    keys (e.g. WHERE (created_at, id) < (:lastCreatedAt, :lastId) ORDER BY created_at DESC, id DESC LIMIT 20), 
    the B-Tree index performs a constant-time O(log N) seek directly to the next record, making page 1,000,000 
    just as fast as page 1."
+```
+
+---
+
+### Q4: "What is the Transaction ID (XID) Wraparound failure mode, and why does PostgreSQL shut itself down?"
+
+```diff
+- JUNIOR ANSWER:
+  "The database runs out of primary key numbers so it stops allowing new inserts until you change to BIGINT."
+```
+
+```diff
++ SENIOR / STAFF ANSWER:
+  "PostgreSQL tracks row visibility using 32-bit transaction IDs (xmin/xmax), providing ~4.29 billion IDs 
+   treated as a circular modulo space (2.14B in the past, 2.14B in the future).
+   
+   If a table exceeds 2.14 billion transactions without freezing old rows, the transaction clock laps the 
+   historical data. The MVCC engine would interpret those ancient rows as belonging to future, uncommitted 
+   transactions, causing data to silently disappear from queries.
+   
+   To prevent catastrophic silent data loss, PostgreSQL issues urgent warnings as the margin closes, and at 
+   3 million transactions remaining, it shuts down all write traffic and enters read-only single-user mode. 
+   
+   Recovery requires stopping the cluster, launching 'postgres --single', and executing 'VACUUM FREEZE ANALYZE' 
+   to mark historical row headers with FrozenTransactionId (2)."
+```
+
+---
+
+### Q5: "Why does standard VACUUM fail to return disk space to the OS after a massive DELETE, and why is VACUUM FULL avoided in production?"
+
+```diff
+- JUNIOR ANSWER:
+  "VACUUM is buggy, so you have to run VACUUM FULL to clean up the hard drive."
+```
+
+```diff
++ SENIOR / STAFF ANSWER:
+  "PostgreSQL implements MVCC by creating new tuple versions and marking deleted tuples as dead. Standard 
+   VACUUM sweeps the 8KB pages and records dead space in the Free Space Map (FSM) so future INSERTs can 
+   reuse those slots. 
+   
+   However, the OS file system can only truncate a physical file if all free pages are clustered at the 
+   very end of the physical file. If even a single live row sits on the final 8KB page, the file cannot shrink.
+   
+   VACUUM FULL does rewrite the table into a compact file, but it demands an ACCESS EXCLUSIVE lock for the 
+   entire duration, freezing all reads and writes and causing total application downtime. Furthermore, it 
+   requires 2x disk space during execution. 
+   
+   In production, we use 'pg_repack', which copies live rows into a shadow table, mirrors concurrent writes 
+   via trigger logs, builds indexes concurrently, and swaps catalog pointers in milliseconds."
 ```
 
 ---
@@ -516,6 +930,10 @@ LIMIT 20;
 | **Deep Offset Thrashing** | Client requests page 50,000 using `OFFSET` | Database scans 1,000,000 rows to return 20 | Use keyset pagination with a matching composite index. |
 | **Index Bloat** | Frequent updates on tables with default `fillfactor=100` | Leaf page splits increase index size by 2-3x | Set `WITH (fillfactor = 90)` on update-heavy tables. |
 | **Memory Sort Spill** | `work_mem` too small for large sorts | PostgreSQL spills sort to temporary disk files | Increase `work_mem` (e.g. 16MB - 64MB) per connection. |
+| **XID Wraparound Lockout** | Unfrozen tables reach 2.14B transactions | Database refuses writes and halts into single-user mode | Monitor `age(datfrozenxid)`; tune `autovacuum_freeze_max_age`. |
+| **Kernel I/O Write Stall** | `vm.dirty_ratio` default allows 25GB dirty pages | OS freezes all PostgreSQL backends during disk flushes | Tune `vm.dirty_background_ratio = 3` and `vm.dirty_ratio = 5`. |
+| **Transparent Huge Page Stalls** | Linux THP enabled on database nodes | Multi-second compaction stalls during 8KB page allocations | Set `/sys/kernel/mm/transparent_hugepage/enabled = never`. |
+| **`VACUUM FULL` Outage** | Running `VACUUM FULL` to reclaim disk space | Acquires `ACCESS EXCLUSIVE` lock for hours, halting all app queries | Use `pg_repack` for online zero-downtime table and index compaction. |
 
 ---
 
@@ -529,4 +947,8 @@ LIMIT 20;
 - [ ] Implement indexed keyset pagination to replace slow `OFFSET` queries with $O(\log N)$ seeks.
 - [ ] Create Covering Indexes with `INCLUDE` clauses to achieve zero-heap Index Only Scans.
 - [ ] Deploy BRIN indexes for multi-million row append-only time-series tables to save 99% RAM.
+- [ ] Configure Linux kernel memory writeback parameters (`vm.dirty_ratio`, `vm.dirty_background_ratio`) and disable THP.
+- [ ] Monitor table Transaction ID age to prevent the 2.14-billion $XID$ wraparound emergency shutdown.
+- [ ] Reclaim disk space and eliminate B-Tree index bloat using `pg_repack` without taking table locks.
+- [ ] Diagnose active lock wait chains using `pg_stat_activity` and identify slow queries using `pg_stat_statements`.
 </Check>

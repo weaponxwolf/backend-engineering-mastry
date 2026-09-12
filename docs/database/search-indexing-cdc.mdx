@@ -212,6 +212,133 @@ If an out-of-order event arrives with a `version` (timestamp) lower than the ver
 
 ---
 
+### 3. The Transactional Outbox Pattern with Debezium SMT
+
+Capturing changes directly from primary entity tables (e.g. streaming raw rows from the `orders` table) creates severe architectural coupling:
+- **Internal Schema Leakage**: Any internal table restructuring immediately breaks external downstream consumers.
+- **Intermediate State Pollution**: Rapid multi-step transactions emit noisy intermediate states instead of clean domain events.
+
+#### The Transactional Outbox Solution:
+The application writes its business state to the primary table and simultaneously writes a curated domain event into an **Outbox Table** in the exact same atomic local ACID transaction:
+
+```sql
+CREATE TABLE outbox_events (
+    id UUID PRIMARY KEY,
+    aggregate_type VARCHAR(64) NOT NULL,   -- e.g. "Order", "Product"
+    aggregate_id VARCHAR(64) NOT NULL,     -- e.g. "order_1001" (Kafka Partition Key)
+    event_type VARCHAR(64) NOT NULL,       -- e.g. "OrderCreated", "ProductUpdated"
+    payload JSONB NOT NULL,                -- Curated domain payload for Elasticsearch
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+```
+
+```java
+// Spring Boot Service: Atomic write of business entity and outbox event
+@Transactional
+public Order createOrder(OrderRequest request) {
+    Order order = orderRepository.save(new Order(request));
+
+    OutboxEvent event = new OutboxEvent(
+        UUID.randomUUID(),
+        "Order",
+        String.valueOf(order.getId()),
+        "OrderCreated",
+        objectMapper.writeValueAsString(new OrderSearchDTO(order))
+    );
+    outboxRepository.save(event);
+
+    return order; // Commits atomically! Zero dual-write risk!
+}
+```
+
+#### Debezium Outbox Event Router SMT:
+Configure Debezium in Kafka Connect with the **Outbox Event Router** Single Message Transformation (SMT). It reads the `outbox_events` table from the WAL, routes each event to a topic named after `aggregate_type` (`orders.events`), partitions by `aggregate_id`, unwraps the `payload` JSON, and automatically discards internal CDC metadata:
+
+```json
+{
+  "name": "debezium-outbox-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "plugin.name": "pgoutput",
+    "database.hostname": "postgres.internal",
+    "database.port": "5432",
+    "database.user": "debezium_cdc",
+    "database.password": "${file:/secrets/db:cdc_password}",
+    "database.dbname": "production_db",
+    "database.server.name": "pg_core",
+    "table.include.list": "public.outbox_events",
+    "tombstones.on.delete": "false",
+    "transforms": "outbox",
+    "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+    "transforms.outbox.route.by.field": "aggregate_type",
+    "transforms.outbox.route.topic.replacement": "${routedByValue}.events"
+  }
+}
+```
+
+---
+
+### 4. The Catastrophic Unconsumed Replication Slot Disk Outage
+
+The single most dangerous operational hazard of PostgreSQL Change Data Capture is **Replication Slot Abandonment**.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant PG as PostgreSQL Primary (NVMe SSD)
+    participant Slot as Logical Replication Slot (pgoutput)
+    participant Deb as Debezium Worker (Kafka Connect)
+    
+    Note over PG,Slot: Debezium runs normally. Slot restart_lsn advances with WAL flushes.
+    Note over Deb: KAFKA CONNECT POD CRASHES OR NETWORK PARTITION OCCURS!
+    Note over Deb: Debezium goes offline for 18 hours over the weekend!
+    
+    loop Incoming Customer Transactions
+        PG->>PG: Continuous INSERT, UPDATE, DELETE generate 200 GB of WAL!
+    end
+    
+    Note over PG: PostgreSQL checkpointer attempts to delete recycled WAL segments...
+    Slot-->>PG: STOP! Slot holds restart_lsn from 18 hours ago!
+    Note over PG: PostgreSQL CANNOT delete any WAL segments newer than restart_lsn!
+    Note over PG: WAL directory (/var/lib/postgresql/data/pg_wal) swells from 2GB to 500GB!
+    Note over PG: Physical NVMe SSD reaches 100% capacity!
+    Note over PG: POSTGRESQL PANICS AND SHUTS DOWN! Total database blackout!
+```
+
+#### Why Production Crashed:
+When a logical replication slot is registered, PostgreSQL makes an absolute durability promise: *"I will never delete any Write-Ahead Log segment that this slot has not yet confirmed receiving."* 
+
+If Debezium crashes or Kafka rejects writes, the slot's `restart_lsn` stops moving. As application transactions proceed, PostgreSQL retains **every single 16MB WAL file on disk indefinitely**. Within hours or days, the server's physical storage hits $100\%$, and PostgreSQL terminates immediately (`PANIC: could not write to file ... No space left on device`).
+
+#### Staff Defense 1: Set `max_slot_wal_keep_size`
+PostgreSQL provides a circuit breaker to sacrifice the CDC replication slot to save the database server from a fatal disk outage:
+
+```ini
+# postgresql.conf
+
+# Cap the maximum WAL retained for all replication slots to 64 GB
+max_slot_wal_keep_size = 64GB
+```
+
+If Debezium remains offline long enough for accumulated WAL to reach 64 GB, PostgreSQL **invalidates the replication slot** (`wal_status = 'lost'`) and deletes the old WAL segments, keeping the database online. Debezium will fail when restarted and require a fresh snapshot, but live customer checkout traffic never drops!
+
+#### Staff Defense 2: Automated Replication Slot Monitoring:
+```sql
+SELECT 
+    slot_name,
+    plugin,
+    active,
+    wal_status,
+    pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS retained_wal_size,
+    round(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) / (1024.0 * 1024.0 * 1024.0), 2) AS retained_wal_gb
+FROM pg_replication_slots;
+```
+
+Configure Prometheus alerts to page on-call engineers if any slot's `retained_wal_gb` exceeds **10 GB**.
+
+---
+
 ## 5. Mitigating "Search After Write" Eventual Consistency
 
 Because CDC pipelines are asynchronous, there is a replication lag (typically 50ms - 500ms) between committing to PostgreSQL and appearing in Elasticsearch. Additionally, Elasticsearch has a default **Refresh Interval** of 1 second (`index.refresh_interval: 1s`) before newly indexed documents become visible to queries.
@@ -297,6 +424,56 @@ FROM product_embeddings
 ORDER BY embedding <=> :queryEmbedding
 LIMIT 5;
 ```
+
+---
+
+### HNSW Graph Physics & Memory Sizing Mathematics
+
+Hierarchical Navigable Small World (HNSW) graphs are the state-of-the-art data structure for vector similarity search:
+
+```mermaid
+flowchart TD
+    subgraph HNSWLayers ["Multi-Layer HNSW Graph (Probabilistic Skip-List)"]
+        L2["Layer 2 (Sparse): Long-range hops across vector space"]
+        L1["Layer 1 (Medium): Medium-range navigation"]
+        L0["Layer 0 (Dense): Contains ALL 1,000,000 vectors with local neighbor links"]
+    end
+    
+    Query["Search Vector"] --> L2
+    L2 -->|Greedy routing to closest local node| L1
+    L1 -->|Greedy routing to closest local node| L0
+    L0 -->|Refines nearest neighbors| Result["Top K Matches (Cosine Distance)"]
+```
+
+#### Tuning the Parameter Trinity:
+1. **`m` (Max Outgoing Links per Node, default: 16)**:
+   - Dictates how many bidirectional connections each vector maintains to its neighbors.
+   - Increasing `m` (e.g., to `32` or `64`) improves recall accuracy and provides faster searches, but proportionally increases RAM consumption and index build time.
+2. **`ef_construction` (Build-Time Candidate Queue, default: 64)**:
+   - Dictates the depth of exploration during `CREATE INDEX`. Higher values (e.g., `128` or `256`) produce a higher quality graph topology with fewer disjoint clusters, without increasing index RAM size after the build completes!
+3. **`hnsw.ef_search` (Query-Time Beam Size, default: 40)**:
+   - Dynamic session-level parameter governing search accuracy vs. latency:
+   ```sql
+   -- Dynamically boost recall to 99.5% for high-accuracy financial/legal queries:
+   SET LOCAL hnsw.ef_search = 100;
+   ```
+
+#### The HNSW RAM-Resident Requirement:
+Unlike relational B-Trees, which scan contiguous 8KB disk pages sequentially, **HNSW graph traversal performs non-contiguous random memory hops across thousands of nodes in high-dimensional space**.
+
+If an HNSW index exceeds PostgreSQL `shared_buffers` and spills to NVMe disk, query latency collapses from **$3\text{ ms}$ to over $600\text{ ms}$**, degrading search performance below that of a simple flat scan!
+
+#### Exact Memory Footprint Formula:
+Calculate your server's RAM budget before deploying `pgvector` to production:
+
+$$\text{Bytes Per Vector} \approx (D \times 4) + (2 \times m \times 8) + 32 \text{ bytes overhead}$$
+
+For **1,000,000 OpenAI embeddings** ($D = 1536$ dimensions) with $m = 16$:
+$$\text{Bytes Per Vector} = (1536 \times 4) + (32 \times 8) + 32 = 6,144 + 256 + 32 = \mathbf{6,432 \text{ bytes}}$$
+
+$$\text{Total HNSW Index Size} = 1,000,000 \times 6,432 \text{ bytes} \approx \mathbf{6.43 \text{ GB of RAM}}$$
+
+Ensure that `shared_buffers` plus Linux Page Cache can keep the entire 6.43 GB index **permanently pinned in physical RAM**.
 
 ---
 
@@ -450,7 +627,8 @@ Vector search is approximate when using HNSW/IVFFlat indexes. You trade recall, 
 | **Silent Data Drift** | App Dual-Write | Network drop between DB commit and ES write | Search results out of sync with DB | Eliminate app dual-writes; use Debezium CDC from PostgreSQL WAL. |
 | **Out-of-Order Overwrite** | Kafka Ingestion | Parallel consumer threads commit updates out of order | Stale record overwrites fresh record | Enforce external versioning in OpenSearch (`version_type=external_gte`). |
 | **Search-After-Write Blindness** | OpenSearch Index | User queries before Lucene 1s refresh interval | User cannot find item just created | Return optimistic client state; pass `?refresh=wait_for` on critical admin writes. |
-| **HNSW OOM Eviction** | pgvector | Vector index outgrows PostgreSQL `shared_buffers` | Vector queries drop from 4ms to 800ms disk swapping | Size `shared_buffers` and `work_mem` to keep HNSW graph memory-resident. |
+| **Replication Slot Disk Full** | PostgreSQL WAL | Debezium offline while primary continues writing | PG retains all WAL files; 100% disk full triggers database PANIC | Set `max_slot_wal_keep_size = 64GB` and alert when retained WAL > 10GB. |
+| **HNSW OOM Eviction** | pgvector | Vector index outgrows PostgreSQL `shared_buffers` | Vector queries drop from 4ms to 600ms due to random flash thrashing | Calculate RAM using $(D \times 4 + 2m \times 8 + 32) \times N$ and keep graph pinned in memory. |
 
 ---
 
@@ -462,6 +640,14 @@ Vector search is approximate when using HNSW/IVFFlat indexes. You trade recall, 
   </Accordion>
   <Accordion title="How does Debezium CDC solve the dual-write problem?">
     Debezium attaches as a logical replication client to the PostgreSQL Write-Ahead Log (WAL). Because the WAL is the single, immutable, sequentially ordered source of truth for all committed transactions, Debezium extracts change events without application code intervention. It streams these events into Kafka with guaranteed ordering per partition key, enabling idempotent consumers to update Elasticsearch reliably.
+  </Accordion>
+  <Accordion title="What happens if a Debezium Kafka Connect worker crashes and stays offline for 48 hours?">
+    PostgreSQL logical replication slots hold onto the `restart_lsn`. As long as the slot remains unconsumed, the PostgreSQL checkpointer is strictly forbidden from recycling or deleting WAL segments newer than `restart_lsn`. If write volume is high, the `pg_wal` directory will fill 100% of the physical disk, forcing PostgreSQL into an emergency panic shutdown. In production, we set `max_slot_wal_keep_size = 64GB` to automatically invalidate stale slots before disk exhaustion occurs, and monitor `pg_replication_slots` with alerts.
+  </Accordion>
+  <Accordion title="Why does an HNSW vector index require vastly more RAM than an IVFFlat index, and how do you calculate its memory footprint?">
+    IVFFlat partitions vectors into inverted lists, needing only vector storage plus centroid pointers. In contrast, HNSW builds a multi-layer proximity graph where every vector maintains $m$ bidirectional pointers across multiple layers. Because graph traversal requires non-contiguous random memory hops, spilling from RAM to disk causes extreme $200\times$ latency degradation. Memory footprint is calculated as:
+    $$\text{RAM} \approx (D \times 4 + 2m \times 8 + 32) \times N \text{ bytes}$$
+    For 1M vectors at 1536 dimensions with $m=16$, the HNSW index requires ~6.43 GB of dedicated physical memory.
   </Accordion>
   <Accordion title="When should you use pgvector over a dedicated Elasticsearch cluster?">
     Use **`pgvector`** when you want semantic AI search tightly integrated with your relational queries (e.g., filtering products by tenant ID, price range, and user permissions in a single atomic SQL query) without the operational burden of managing a separate Elasticsearch cluster. Use **Elasticsearch** when you require high-throughput lexical full-text search, complex fuzzy matching, custom tokenizers, aggregations, and multi-terabyte search log scaling.
@@ -477,7 +663,9 @@ Vector search is approximate when using HNSW/IVFFlat indexes. You trade recall, 
 - [ ] Diagram the Apache Lucene Inverted Index: Term Dictionary (FST in RAM), Postings Lists (Roaring Bitmaps on disk), and Doc Values.
 - [ ] Explain BM25 scoring: Term Frequency (TF), Inverse Document Frequency (IDF), and document length normalization.
 - [ ] Articulate the 3 fatal flaws of application dual-writes (partial failures, rollback desynchronization, out-of-order updates).
-- [ ] Architect a production CDC pipeline using PostgreSQL WAL $\rightarrow$ Debezium $\rightarrow$ Kafka $\rightarrow$ OpenSearch.
+- [ ] Architect a production CDC pipeline using the Transactional Outbox pattern and Debezium Event Router SMT.
+- [ ] Protect PostgreSQL storage against unconsumed replication slot disk exhaustion using `max_slot_wal_keep_size`.
 - [ ] Mitigate search-after-write eventual consistency using external versioning and optimistic UI state.
+- [ ] Calculate HNSW vector index memory requirements using $(D \times 4 + 2m \times 8 + 32) \times N$ to prevent buffer cache thrashing.
 - [ ] Implement semantic search in PostgreSQL using `pgvector` with HNSW cosine distance indexes.
 </Check>

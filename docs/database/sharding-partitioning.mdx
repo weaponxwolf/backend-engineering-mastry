@@ -469,6 +469,172 @@ flowchart TD
 
 ---
 
+### 5. Citus & Distributed PostgreSQL Query Planning (Reference vs. Distributed Tables)
+
+When scaling beyond a single PostgreSQL node to a distributed cluster using **Citus** (or native distributed engines), query execution transforms from local pointer traversals to distributed network coordination.
+
+```mermaid
+flowchart TD
+    App["Java App (Spring Boot)"] -->|SQL Query| Coord["Citus Coordinator Node<br/>Distributed Query Planner"]
+    
+    subgraph Workers["Distributed PostgreSQL Worker Nodes"]
+        W1["Worker 1 (Shard 102008)<br/>Local Table Heap & Indexes"]
+        W2["Worker 2 (Shard 102009)<br/>Local Table Heap & Indexes"]
+        W3["Worker 3 (Reference Tables)<br/>Full copy of countries, currencies"]
+    end
+
+    Coord -->|"Pushdown Query Plan (Local Join)"| W1
+    Coord -->|"Pushdown Query Plan (Local Join)"| W2
+```
+
+#### The Three Table Archetypes:
+1. **Distributed Tables**: Sharded by hash on a distribution column (e.g. `tenant_id`). The table is sliced into dozens of physical standard PostgreSQL tables (shards) scattered across worker nodes:
+   ```sql
+   SELECT create_distributed_table('orders', 'tenant_id');
+   ```
+2. **Reference Tables**: Small, slow-changing dimension tables replicated in full to **every single worker node** in the cluster (e.g. `currencies`, `countries`, `product_tax_categories`):
+   ```sql
+   SELECT create_reference_table('tax_rates');
+   ```
+   **Why this matters**: Any query joining a distributed table (`orders`) with a reference table (`tax_rates`) can be pushed down and executed **100% locally on the worker node**, with zero network data transfer!
+3. **Local Coordinator Tables**: Tables that reside purely on the coordinator node (e.g. metadata tables or admin auth tables).
+
+---
+
+#### Distributed Join Physics:
+- **Co-Located Join ($O(1)$ Network)**: When two distributed tables share the same distribution key (`tenant_id`) and are co-located in the same shard group:
+  ```sql
+  -- FAST: Executed 100% locally inside each worker's local storage engine!
+  SELECT u.name, o.total_amount 
+  FROM users u 
+  JOIN orders o ON u.tenant_id = o.tenant_id AND u.id = o.user_id
+  WHERE u.tenant_id = 'tenant_994';
+  ```
+- **Repartition Join ($O(N)$ Network Saturation)**: Occurs when joining two distributed tables on a column **other than the distribution key**:
+  ```sql
+  -- DANGEROUS: High network traffic between worker nodes!
+  SELECT * FROM orders o JOIN payments p ON o.order_id = p.order_id;
+  ```
+  The distributed query planner must dynamically read millions of tuples from Worker 1, hash them by `order_id`, and transmit them over the network to Worker 2. Network switches become congested, and query latency degrades from 5ms to 8,000ms.
+
+---
+
+### 6. Distributed Two-Phase Commit (2PC) Mechanics & The Orphaned `pg_prepared_xacts` Outage
+
+When a business transaction spans multiple database shards (e.g., deducting balance on Shard 1 and creating an invoice on Shard 2), single-node ACID transactions cannot guarantee consistency. The distributed coordinator must use **Two-Phase Commit (2PC)**.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Coord as Coordinator Node (App / Citus)
+    participant S1 as Shard Node 1 (Account Balance)
+    participant S2 as Shard Node 2 (Order Invoice)
+
+    Note over Coord: Phase 1: PREPARE
+    Coord->>S1: PREPARE TRANSACTION 'tx_transfer_901_s1'
+    Note over S1: Flush WAL to disk, hold row locks, reserve resources
+    S1-->>Coord: PREPARED (Voted Yes)
+    
+    Coord->>S2: PREPARE TRANSACTION 'tx_transfer_901_s2'
+    Note over S2: Flush WAL to disk, hold row locks, reserve resources
+    S2-->>Coord: PREPARED (Voted Yes)
+
+    Note over Coord: Coordinator commits decision to local WAL log!
+    
+    Note over Coord: Phase 2: COMMIT
+    Coord->>S1: COMMIT PREPARED 'tx_transfer_901_s1'
+    S1-->>Coord: Committed & Released Locks
+    Coord->>S2: COMMIT PREPARED 'tx_transfer_901_s2'
+    S2-->>Coord: Committed & Released Locks
+```
+
+---
+
+#### The Catastrophe: In-Doubt Orphaned Transactions
+What happens if the coordinator node experiences a network partition or power failure immediately after sending Phase 1 (`PREPARE TRANSACTION`)?
+
+1. **The Distributed Deadlock**: Shard 1 and Shard 2 have both executed `PREPARE TRANSACTION`. They have promised to commit and have flushed this state to persistent disk. **Neither shard can unilaterally decide to abort or commit without the coordinator's order!**
+2. **Perpetual Lock Grabbing**: The row locks acquired by the prepared transaction remain held in shared memory and on disk. Any live application query attempting to touch those rows will **block indefinitely**.
+3. **Autovacuum Freezing Blockade**: Every prepared transaction has an active `xmin`. If an orphaned prepared transaction remains unresolved for days, it prevents PostgreSQL's autovacuum engine from advancing the table's freeze horizon, leading directly to the **Transaction ID ($XID$) Wraparound Emergency Shutdown**!
+
+#### Diagnosing and Purging Orphaned Prepared Transactions:
+Production monitoring must continuously inspect the `pg_prepared_xacts` system view:
+
+```sql
+-- 1. Identify transactions stuck in PREPARED state longer than 5 minutes:
+SELECT 
+    gid, 
+    prepared, 
+    owner, 
+    database, 
+    age(transaction) AS xid_age
+FROM pg_prepared_xacts
+WHERE prepared < now() - INTERVAL '5 minutes';
+
+-- 2. Manually resolve the in-doubt transaction:
+-- If the transaction committed upstream:
+COMMIT PREPARED 'tx_transfer_901_s1';
+
+-- If the transaction failed upstream:
+ROLLBACK PREPARED 'tx_transfer_901_s1';
+```
+
+---
+
+### 7. Consistent Hashing Virtual Node Math & Zero-Downtime Shard Rebalancing Lifecycle
+
+The primary operational challenge in distributed database architecture is **resharding**: expanding a cluster from $N$ shards to $N+M$ shards as data grows.
+
+#### The Modulo Hashing Rebalancing Catastrophe:
+If an application routes data using naive modulo hashing:
+$$\text{Shard Index} = \text{hash}(\text{key}) \pmod N$$
+
+When expanding from $N = 4$ to $N = 5$ shards:
+$$\text{Keys Moved} = \frac{N}{N + 1} = \frac{4}{5} = \mathbf{80\% \text{ of all database data!}}$$
+
+An 80% data relocation requires streaming tens of terabytes across internal networks, causing massive replication lag, storage thrashing, and prolonged site outages.
+
+---
+
+#### The Consistent Hash Ring with Virtual Nodes:
+Consistent hashing places shards and keys onto a circular 32-bit integer ring ($[0, 2^{32}-1]$).
+- Each physical shard server is mapped to **$K$ virtual nodes ($V$-nodes)** (typically $K = 256$) distributed across the ring using multiple hashes of its identifier:
+  $$\text{hash}(\text{"shard-1\#1"}), \quad \text{hash}(\text{"shard-1\#2"}), \quad \dots \quad \text{hash}(\text{"shard-1\#256"})$$
+- A data key is hashed onto the ring and stored on the first virtual node encountered moving clockwise.
+
+```mermaid
+flowchart TD
+    subgraph Ring ["32-Bit Consistent Hash Ring [0 to 2^32-1]"]
+        V1["Shard 1 (V-Node 1)"] --> K1["Key: tenant_42"]
+        K1 --> V2["Shard 2 (V-Node 88)"]
+        V2 --> K2["Key: tenant_891"]
+        K2 --> V3["Shard 3 (V-Node 14)"]
+        V3 --> V1
+    end
+```
+
+#### The Scaling Math Advantage:
+When adding a 5th physical server to an existing 4-server cluster with $V$-nodes:
+$$\text{Fraction of Keys Relocated} = \frac{1}{N + 1} = \frac{1}{5} = \mathbf{20\% \text{ of keys only!}}$$
+
+Furthermore, because the 256 virtual nodes are interleaved uniformly around the ring, the relocated 20% of data is drawn **evenly from all 4 existing shards** (5% from each), avoiding localized hot-spot migrations!
+
+---
+
+#### The 4-Phase Online Rebalancing Lifecycle:
+To migrate the 20% of keys without dropping customer transactions:
+
+1. **Phase 1: Shadow Shard Allocation**:
+   The new shard instance boots up and registers its virtual nodes with the cluster routing metadata service.
+2. **Phase 2: Historical Bulk Streaming**:
+   The orchestrator streams historical records for the migrated keys from source shards to the new shard using bulk `COPY` streams.
+3. **Phase 3: CDC Catch-Up Replay**:
+   The new shard connects to PostgreSQL logical replication slots (`pgoutput`) on the source shards, replaying concurrent writes in real time until replication lag drops below $50\text{ ms}$.
+4. **Phase 4: Atomic Route Cutover**:
+   The routing metadata service (e.g. Consul, Zookeeper, or Spring Cache) updates routing tables in an atomic operation. Application traffic switches to the new shard, and background cleaners asynchronously drop the old keys from source shards.
+
+---
+
 ## Partitioning & Sharding Fundamentals Interview Map
 
 Partitioning and sharding both split data. The difference is whether one database node still owns the whole system.
@@ -558,6 +724,8 @@ Options:
 | **How does an LSM-Tree achieve an order of magnitude higher write throughput than a B-Tree?** | "LSM-Trees are built for NoSQL and use faster memory algorithms." | "B-Trees update data in-place on fixed-size pages (8KB in PostgreSQL, 16KB in InnoDB). Modifying a 30-byte record dirtying an entire 8KB page creates **high Write Amplification** and forces **random disk I/O**, saturating storage controller queues. An LSM-Tree accepts all writes into an in-memory MemTable and appends them sequentially to a Commit Log. When the MemTable fills, it flushes to disk as an **immutable, sequentially written SSTable**. Converting random disk writes into high-speed sequential appends allows LSM-Trees to fully utilize physical NVMe flash bandwidth." |
 | **Why does PostgreSQL Declarative Partitioning require the partition key to be part of the Primary Key?** | "Because Postgres needs to know where to find the row." | "PostgreSQL does **not support global unique indexes across partitions**; each child partition maintains its own local B-Tree indexes. If a primary key constraint did not include the partition key, PostgreSQL would have to check every child partition's index on every single `INSERT` to verify uniqueness, destroying write performance. Requiring the partition key in the composite primary key guarantees that uniqueness can be verified **locally within the target child partition's index alone**." |
 | **How do you safely purge 100 million historical records without locking live production traffic?** | "Run `DELETE FROM table WHERE created_at < '2024-01-01'` during off-peak hours." | "Running a massive `DELETE` query on a standard table writes 100 million dead tuples, generates massive WAL bloat, and triggers aggressive autovacuum operations that thrash the buffer pool and cause high replication lag. In a partitioned table, historical data is partitioned by range (e.g., monthly). We purge an entire month in **$O(1)$ time** with zero locks by running: `ALTER TABLE table DETACH PARTITION part_2024_01 CONCURRENTLY;` followed by `DROP TABLE part_2024_01;`. This frees disk space immediately and generates negligible WAL records." |
+| **What is an in-doubt prepared transaction in distributed 2PC, why is it dangerous, and how do you recover?** | "It is a transaction that is waiting for the user to confirm." | "In Two-Phase Commit, if the coordinator crashes after sending Phase 1 (`PREPARE TRANSACTION`), the participant shards remain in a prepared state. The shards cannot unilaterally commit or abort. The prepared transaction remains alive in memory and disk (`pg_prepared_xacts`), holding row and table locks perpetually, which halts concurrent application queries. Furthermore, its active `xmin` prevents autovacuum from freezing dead tuples, accelerating towards transaction ID wraparound shutdown. We monitor `pg_prepared_xacts` and resolve in-doubt transactions using manual `COMMIT PREPARED` or `ROLLBACK PREPARED` commands." |
+| **Why does modulo sharding cause catastrophic rebalancing during cluster expansion, and how do virtual nodes solve it?** | "Modulo hashing is bad because prime numbers don't divide evenly." | "In modulo sharding ($H(k) \pmod N$), expanding from $N$ to $N+1$ shards reshuffles $N/(N+1)$ of all existing data (e.g., expanding from 4 to 5 shards moves 80% of all data across the network). Consistent hashing places shards onto a 32-bit circular ring where adding a server only moves $1/(N+1)$ of keys (20%). By assigning each physical server $K$ virtual nodes (e.g., 256 $V$-nodes) distributed around the ring, the relocated 20% of keys is drawn uniformly from across all existing shards, eliminating migration hot spots." |
 
 ---
 
@@ -581,6 +749,13 @@ Options:
     - [ ] Always ensure a `DEFAULT` partition exists for all range and list partitioned tables.
     - [ ] Deploy an automated cron job or pg_partman extension to pre-create future partitions at least 3 months in advance.
     - [ ] Configure Prometheus alerts for row insertions hitting the `_default` partition.
+  </Accordion>
+
+  <Accordion title="4. Detecting and Purging Orphaned 2PC Transactions (pg_prepared_xacts)">
+    - [ ] Query `SELECT gid, prepared, age(transaction) FROM pg_prepared_xacts WHERE prepared < now() - INTERVAL '5 minutes';`.
+    - [ ] Check `pg_locks` for locks held by virtual transactions corresponding to orphaned prepared transactions.
+    - [ ] Check Prometheus metrics for transaction age towards `autovacuum_freeze_max_age`.
+    - [ ] Resolve orphaned transactions manually using `ROLLBACK PREPARED 'gid'` or `COMMIT PREPARED 'gid'`.
   </Accordion>
 </AccordionGroup>
 
@@ -608,4 +783,13 @@ Spring Boot multi-shard dynamic routing is implemented using `AbstractRoutingDat
 </Check>
 <Check>
 The architectural trade-offs between B-Trees and LSM-Trees (Write Amplification, MemTable, SSTables, Compaction) are mastered.
+</Check>
+<Check>
+Citus distributed query planning archetypes (Reference Tables vs Distributed Tables, Co-located vs Repartition Joins) are mastered.
+</Check>
+<Check>
+Distributed Two-Phase Commit failure modes, orphaned `pg_prepared_xacts`, and autovacuum freeze blockades are diagnosed and remediated.
+</Check>
+<Check>
+Consistent hashing virtual node math and 4-phase zero-downtime online shard rebalancing are mastered.
 </Check>

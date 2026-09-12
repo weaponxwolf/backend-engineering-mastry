@@ -359,6 +359,169 @@ DROP INDEX CONCURRENTLY idx_orders_customer_date;
 
 ---
 
+### Practice 5: Table Rewrites Deep Dive: Volatile vs. Non-Volatile Defaults & Shadow Type Migrations
+
+When altering tables, you must know whether PostgreSQL will complete in milliseconds via catalog modification ($O(1)$) or execute a full table rewrite ($O(N)$) that locks the table and churns disk I/O.
+
+#### The Catalog Magic: `attmissingval` in PostgreSQL 11+
+In PostgreSQL 10 and older, running `ALTER TABLE t ADD COLUMN status VARCHAR(20) DEFAULT 'ACTIVE';` required rewriting every single 8KB disk page to physically insert `'ACTIVE'` into existing row tuples.
+
+PostgreSQL 11 eliminated this rewrite for **non-volatile (constant) defaults**:
+1. It updates `pg_attribute` in the system catalogs, setting `atthasmissing = true` and storing `'ACTIVE'` in the `attmissingval` column.
+2. The physical table heap is completely untouched ($O(1)$ execution).
+3. When subsequent queries read older tuples from disk, the PostgreSQL executor sees that the tuple header is missing the column, inspects `pg_attribute.attmissingval`, and substitutes `'ACTIVE'` in memory!
+
+#### The Volatile Default Trap:
+A default expression is **volatile** if it returns different values across invocations (e.g., `random()`, `clock_timestamp()`, or `gen_random_uuid()`):
+
+```sql
+-- DANGEROUS IN PRODUCTION: FULL TABLE REWRITE UNDER ACCESS EXCLUSIVE!
+ALTER TABLE orders ADD COLUMN idempotency_key UUID DEFAULT gen_random_uuid();
+```
+
+Because every single existing row requires a unique UUID, PostgreSQL **cannot** use `attmissingval`. It immediately triggers an $O(N)$ physical table rewrite, locking customer traffic out for minutes!
+
+##### The Production Safe Alternative:
+```sql
+-- Step 1: Add the column as nullable with NO default (Instantaneous O(1) metadata update)
+SET lock_timeout = '2s';
+ALTER TABLE orders ADD COLUMN idempotency_key UUID;
+
+-- Step 2: Set the default for future inserts (Instantaneous metadata update)
+ALTER TABLE orders ALTER COLUMN idempotency_key SET DEFAULT gen_random_uuid();
+
+-- Step 3: Backfill historical rows in small keyset cursor batches
+-- (Run via background worker, updating 2,000 rows per transaction with 50ms pauses)
+```
+
+---
+
+#### Zero-Downtime Type Migrations: Upgrading `INT` to `BIGINT` Primary Keys
+Changing a column data type (e.g. `ALTER TABLE orders ALTER COLUMN id TYPE BIGINT;`) physically rewrites every single tuple and rebuilds all dependent foreign keys and indexes under an `ACCESS EXCLUSIVE` lock. On high-volume tables reaching the 2.14-billion integer ceiling, this causes catastrophic downtime.
+
+##### The 5-Step Shadow Column Technique:
+```sql
+-- Step 1: Add shadow column
+SET lock_timeout = '2s';
+ALTER TABLE orders ADD COLUMN id_new BIGINT;
+
+-- Step 2: Create a trigger function to synchronize concurrent inserts and updates
+CREATE OR REPLACE FUNCTION sync_orders_id_new()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.id_new := NEW.id;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_sync_orders_id_new
+BEFORE INSERT OR UPDATE ON orders
+FOR EACH ROW EXECUTE FUNCTION sync_orders_id_new();
+
+-- Step 3: Backfill historical rows in throttled keyset chunks
+-- UPDATE orders SET id_new = id WHERE id > :cursor AND id <= :cursor + 5000;
+
+-- Step 4: Build primary key index concurrently on the shadow column
+CREATE UNIQUE INDEX CONCURRENTLY idx_orders_id_new ON orders (id_new);
+
+-- Step 5: Atomic metadata swap in a lock-timed transaction
+BEGIN;
+SET LOCAL lock_timeout = '2s';
+ALTER TABLE orders ALTER COLUMN id DROP DEFAULT;
+-- Swap sequence ownership if applicable
+ALTER SEQUENCE orders_id_seq OWNED BY orders.id_new;
+ALTER TABLE orders ALTER COLUMN id_new SET DEFAULT nextval('orders_id_seq');
+-- Promote shadow column and drop trigger
+DROP TRIGGER trg_sync_orders_id_new ON orders;
+ALTER TABLE orders DROP CONSTRAINT orders_pkey CASCADE;
+ALTER TABLE orders ADD CONSTRAINT orders_pkey PRIMARY KEY USING INDEX idx_orders_id_new;
+ALTER TABLE orders DROP COLUMN id;
+ALTER TABLE orders RENAME COLUMN id_new TO id;
+COMMIT;
+```
+
+---
+
+### Practice 6: PostgreSQL `ENUM` Traps vs. Validated Check Constraints
+
+PostgreSQL native `ENUM` types provide compile-time safety inside SQL, but introduce severe operational hazards in zero-downtime continuous deployment environments:
+
+1. **Transaction Block Incompatibility**: Prior to PostgreSQL 12, `ALTER TYPE ... ADD VALUE` could **not** be executed inside a multi-statement transaction (`BEGIN ... COMMIT`).
+2. **Same-Transaction Usage Trap**: Even in modern PostgreSQL, a newly added enum value **cannot be referenced in queries within the exact same transaction block** that added it:
+   ```sql
+   BEGIN;
+   ALTER TYPE order_status ADD VALUE 'REFUNDED';
+   -- ERROR: unsafe use of new value "REFUNDED" of enum type order_status
+   INSERT INTO orders (status) VALUES ('REFUNDED');
+   COMMIT;
+   ```
+3. **Irreversibility**: PostgreSQL does **not** support removing values from an enum (`ALTER TYPE status DROP VALUE` does not exist). Renaming values requires complex catalog hacking.
+
+#### The Staff Production Standard: `VARCHAR` with Validated Check Constraints
+Senior database architects prefer `VARCHAR` bounded by validated check constraints over native enums. They offer identical data integrity without the operational lockouts:
+
+```sql
+-- Step 1: Add new status value by updating the check constraint with NOT VALID
+SET lock_timeout = '2s';
+ALTER TABLE orders DROP CONSTRAINT chk_orders_status;
+ALTER TABLE orders ADD CONSTRAINT chk_orders_status 
+    CHECK (status IN ('PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'REFUNDED')) 
+    NOT VALID;
+
+-- Step 2: Validate concurrently without blocking writes
+ALTER TABLE orders VALIDATE CONSTRAINT chk_orders_status;
+```
+
+---
+
+### Practice 7: Automated Lock-Timeout Retry Loops with Exponential Backoff & Jitter
+
+Setting `SET lock_timeout = '2s'` guarantees that a migration will not freeze incoming web requests. However, on a high-throughput database, a single 2-second attempt might fail if a transaction happened to touch the table during that window.
+
+If your migration tool fails and crashes the deployment container, engineers are woken up. The production solution is an **automated lock acquisition retry loop with exponential backoff and randomized jitter**.
+
+```mermaid
+flowchart TD
+    Start["Start Migration Step"] --> Attempt["Set lock_timeout = '2s';<br/>Attempt ALTER TABLE"]
+    Attempt -->|Lock Acquired!| Success["Commit Migration<br/>Proceed to next step"]
+    Attempt -->|Error 55P03: lock_not_available| CheckAttempts{"Attempt < Max Retries (e.g. 10)?"}
+    CheckAttempts -->|No| Fail["Abort Migration & Alert On-Call<br/>(Zero impact on web traffic!)"]
+    CheckAttempts -->|Yes| Backoff["Calculate Sleep Duration:<br/>sleep = base * 2^attempt + rand(jitter)"]
+    Backoff --> Sleep["Sleep (e.g. 1.2s ... 4.5s)"]
+    Sleep --> Attempt
+```
+
+#### Production Python / Bash Retry Driver Pattern:
+
+```python
+import time
+import random
+import psycopg2
+
+def execute_safe_ddl(conn, ddl_statement, max_retries=10, base_backoff_sec=1.0):
+    for attempt in range(1, max_retries + 1):
+        try:
+            with conn.cursor() as cur:
+                # 1. Protect customer traffic: Abort if lock cannot be acquired within 2 seconds
+                cur.execute("SET lock_timeout = '2s';")
+                cur.execute(ddl_statement)
+                conn.commit()
+                print(f"Migration succeeded on attempt {attempt}")
+                return True
+        except psycopg2.errors.LockNotAvailable:
+            conn.rollback()
+            if attempt == max_retries:
+                print(f"FATAL: Could not acquire lock after {max_retries} attempts.")
+                raise
+            
+            # Full jitter exponential backoff: sleep between 0 and base * 2^attempt
+            sleep_duration = random.uniform(0.5, base_backoff_sec * (2 ** attempt))
+            print(f"Lock contended on attempt {attempt}. Retrying in {sleep_duration:.2f}s...")
+            time.sleep(sleep_duration)
+```
+
+---
+
 ## Schema Migration Fundamentals Interview Map
 
 Schema changes are production deployments. Treat them like code releases with compatibility windows.
@@ -449,6 +612,8 @@ When interviewing for Senior or Staff Database Architect roles, interviewers eva
 | **"What is the PostgreSQL Lock Queue Trap?"** | *"It is when two queries deadlock each other in PostgreSQL."* | *"It is not a deadlock; it is an artifact of PostgreSQL's FIFO lock manager. An `ALTER TABLE` requires an `ACCESS EXCLUSIVE` lock. If an analytical read or slow transaction is currently holding an `ACCESS SHARE` lock, the migration queues up in the FIFO lock queue. Because `ACCESS EXCLUSIVE` conflicts with all lock modes, all subsequent incoming web traffic (`SELECT`, `INSERT`, `UPDATE`) queues up behind the migration. Within seconds, connection pools saturate across all web pods, causing a site-wide blackout. We defend against this by setting `SET lock_timeout = '2s'` on all migration scripts."* |
 | **"How do you safely add a Foreign Key constraint without downtime?"** | *"I write an `ALTER TABLE orders ADD FOREIGN KEY ...` statement in Flyway."* | *"Standard foreign key creation scans the entire table under a `SHARE ROW EXCLUSIVE` lock, freezing concurrent writes. We use the two-step technique: (1) Add the constraint with `NOT VALID`, which requires only a brief metadata update under an exclusive lock with a 2-second timeout, then (2) Run `ALTER TABLE orders VALIDATE CONSTRAINT fk_name`, which validates historical rows under a weak `SHARE UPDATE EXCLUSIVE` lock that allows live reads and writes to proceed."* |
 | **"Why must CREATE INDEX CONCURRENTLY run outside a transaction block?"** | *"Because Flyway requires it."* | *"PostgreSQL's engine forbids running concurrent indexing inside a user transaction (`BEGIN ... COMMIT`) because `CREATE INDEX CONCURRENTLY` coordinates across multiple independent transaction states: it registers the index, performs an initial table scan, waits for active transactions to complete, and executes a second scan to catch modifications. In Flyway, we configure a sibling `.sql.conf` with `executeInTransaction=false`."* |
+| **"Why does adding a column with DEFAULT gen_random_uuid() rewrite the table, while DEFAULT 'ACTIVE' is instant in PostgreSQL 11+?"** | *"Both add a default, so they take the same time."* | *"PostgreSQL 11 optimizes constant (non-volatile) defaults to $O(1)$ by updating `pg_attribute.attmissingval` in catalog RAM without touching heap blocks. However, `gen_random_uuid()` is volatile; every row requires a distinct value generated at runtime. PostgreSQL cannot use `attmissingval` and must physically rewrite every 8KB disk page under an `ACCESS EXCLUSIVE` lock. In production, we add the column as nullable without a default, set the default for future rows, and backfill historical rows via throttled keyset batches."* |
+| **"Why do staff engineers avoid native PostgreSQL ENUM types in continuous deployment architectures?"** | *"Because ENUMs take more storage than integers."* | *"Native enums create severe operational deployment hazards: (1) Added enum values cannot be referenced in queries within the same transaction block, (2) PostgreSQL does not support dropping enum values without table rewrites, and (3) Altering enums historically required transactional bypasses. We instead use `VARCHAR` backed by validated `CHECK (status IN (...))` constraints using the two-step `NOT VALID` / `VALIDATE CONSTRAINT` pattern, enabling zero-downtime additions and removals without locking."* |
 
 ---
 
@@ -475,6 +640,15 @@ When interviewing for Senior or Staff Database Architect roles, interviewers eva
   <Accordion title="4. What causes an INVALID index in PostgreSQL and how do you resolve it?">
     An `INVALID` index occurs when a `CREATE INDEX CONCURRENTLY` command fails midway (e.g., due to a lock timeout, unique constraint violation, or cancellation). PostgreSQL leaves the index marked as `indisvalid = false`. The engine continues updating this index on every `INSERT` and `UPDATE` (consuming write CPU and I/O), but the query planner never uses it for `SELECT` queries. It must be detected via `pg_index` and dropped concurrently using `DROP INDEX CONCURRENTLY`.
   </Accordion>
+
+  <Accordion title="5. How do you upgrade an INT column to BIGINT without downtime on a 100M-row table?">
+    Directly altering the type rewrites the entire table under `ACCESS EXCLUSIVE`. We use the shadow column pattern:
+    1. Add a shadow column `id_new BIGINT`.
+    2. Attach a database trigger to replicate all incoming inserts and updates into `id_new`.
+    3. Backfill existing records in throttled keyset batches.
+    4. Build the unique index/primary key concurrently on `id_new`.
+    5. In a brief lock-timed transaction, drop the trigger, drop the legacy column, and rename `id_new` to `id`.
+  </Accordion>
 </AccordionGroup>
 
 ---
@@ -485,6 +659,10 @@ When interviewing for Senior or Staff Database Architect roles, interviewers eva
 - [ ] Understand the PostgreSQL Shared Memory Lock Manager and the FIFO Lock Queue Trap.
 - [ ] Prepend all production DDL scripts with `SET lock_timeout = '2s'` and `SET statement_timeout = '5s'`.
 - [ ] Execute breaking column renames and splits using the 4-phase Expand and Contract pattern.
+- [ ] Distinguish between $O(1)$ non-volatile defaults (`attmissingval`) and $O(N)$ volatile default table rewrites.
+- [ ] Migrate `INT` to `BIGINT` primary keys using shadow columns, triggers, and keyset backfills.
+- [ ] Replace native PostgreSQL `ENUM` types with `VARCHAR` and two-step validated `CHECK` constraints.
+- [ ] Implement automated lock acquisition retry loops with exponential backoff and randomized full jitter.
 - [ ] Add foreign keys safely using the two-step `NOT VALID` and `VALIDATE CONSTRAINT` workflow.
 - [ ] Add `NOT NULL` constraints safely using check constraints in PostgreSQL 12+.
 - [ ] Build indexes non-blockingly using `CREATE INDEX CONCURRENTLY` and sibling `.conf` files in Flyway.

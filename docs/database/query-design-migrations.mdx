@@ -493,6 +493,96 @@ public class ProductionDataBackfillService {
 
 ---
 
+### Pillar 5: Non-Transactional DDL Failure Recovery & The `flyway repair` Lifecycle
+
+When Flyway executes migrations inside a transaction (`executeInTransaction=true`), any error (syntax error, lock timeout) triggers an automatic rollback of the transaction block. The database schema remains clean, and the failed migration entry is not written to `flyway_schema_history`.
+
+However, for **non-transactional migrations** (`executeInTransaction=false`, required for `CREATE INDEX CONCURRENTLY` and `DROP INDEX CONCURRENTLY`), partial failure creates a critical operational hazard.
+
+```mermaid
+flowchart TD
+    Start["Run Non-Transactional Migration:<br/>CREATE INDEX CONCURRENTLY idx_orders_date ..."] --> Exec["PostgreSQL begins multi-phase index build (Scan 1)"]
+    Exec -->|Statement Timeout or Lock Contention| Fail["PostgreSQL Aborts Command!"]
+    Fail --> DBState["1. Database State: INVALID index created in catalog<br/>2. Flyway State: Records migration with success = FALSE"]
+    DBState --> NextRun["Next App Boot / CI/CD Run:<br/>FlywayValidateException: Migration failed! Refusing to start!"]
+    NextRun --> Recovery["Manual Staff Recovery Runbook Required"]
+```
+
+#### The 3-Step Non-Transactional Recovery Runbook:
+When a concurrent index migration fails, subsequent deployments will refuse to run until you execute this repair sequence:
+
+1. **Step 1: Clean Up the Broken Database Catalog Object**:
+   Drop the invalid index concurrently so writes to the table are not blocked:
+   ```sql
+   DROP INDEX CONCURRENTLY IF EXISTS idx_orders_date;
+   ```
+2. **Step 2: Run `flyway repair`**:
+   The `repair` command performs two actions:
+   - It deletes any failed migration entries (`success = false`) from `flyway_schema_history`.
+   - It recalculates the CRC32 checksums of applied migrations against current disk files.
+   ```bash
+   flyway -url="jdbc:postgresql://..." -user="..." -password="..." repair
+   ```
+3. **Step 3: Make the Migration Script Idempotent & Re-run**:
+   Always write non-transactional DDL using defensive clauses so retries succeed even if partially executed:
+   ```sql
+   -- src/main/resources/db/migration/V5__add_orders_date_idx.sql
+   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_orders_date ON orders (created_at);
+   ```
+
+---
+
+### Pillar 6: Large-Scale Keyset Deletion Physics: CTEs, Deadlock Prevention & WAL Throttling Math
+
+In enterprise backends, data retention policies require purging hundreds of millions of historical logs, expired sessions, or soft-deleted records.
+
+#### The Naive Mass Delete Catastrophe:
+```sql
+-- DANGEROUS IN PRODUCTION: LOCKS TABLE, FLOODS WAL, FREEZES REPLICAS!
+DELETE FROM audit_logs WHERE created_at < '2024-01-01';
+```
+
+Executing this on a 50-million-row table triggers four simultaneous production failures:
+1. **Millions of Exclusive Row Locks**: Blocks all active application transactions touching any of those rows.
+2. **Gigabytes of WAL Records**: Generates 20+ GB of Write-Ahead Logs in seconds, saturating disk write IOPS and overwhelming read replica streaming replication links.
+3. **Severe Dead Tuple Bloat**: Creates 50 million dead tuples instantly, starving the autovacuum engine.
+4. **Out-of-Memory Risk**: PostgreSQL must track all deleted row identifiers in memory during the transaction.
+
+---
+
+#### The Staff Deletion Architecture: Monotonic CTEs with Deadlock Prevention
+To purge massive datasets safely on a live OLTP database, use a **chunked Common Table Expression (CTE)** that deletes rows in strict monotonic primary key order:
+
+```sql
+WITH doomed_rows AS (
+    SELECT id FROM audit_logs
+    WHERE created_at < '2024-01-01'
+    ORDER BY id ASC
+    LIMIT 5000
+)
+DELETE FROM audit_logs
+WHERE id IN (SELECT id FROM doomed_rows);
+```
+
+Line by line:
+- `WITH doomed_rows AS (...)`: Isolates the candidate selection in a separate query stage. Keyset scanning stops reading disk pages as soon as 5,000 matching rows are found.
+- `ORDER BY id ASC`: **Crucial for Deadlock Prevention**. If multiple cleanup jobs or live customer transactions update `audit_logs` concurrently, deleting rows in arbitrary disk order causes circular lock dependencies (Transaction A locks row 50 then wants row 10; Transaction B locks row 10 then wants row 50 $\rightarrow$ Deadlock!). Enforcing strict ascending primary key order guarantees all processes request row locks in the exact same direction, eliminating deadlocks!
+- `LIMIT 5000`: Caps the transaction size to a deterministic, bounded memory footprint.
+- `DELETE ... WHERE id IN (...)`: Deletes exactly 5,000 tuples, generating only $\sim 500\text{ KB}$ of WAL records before committing.
+
+#### WAL Sizing & Throttle Pause Mathematics:
+To prevent read replica lag during continuous purging, calculate the maximum allowable deletion throughput based on your read replica's network streaming budget:
+
+$$\text{WAL Per Delete} \approx \text{Tuple Header (23 bytes)} + \text{Item Pointer (4 bytes)} + \text{WAL Record Header (24 bytes)} \approx 80\text{ bytes}$$
+
+$$\text{Batch WAL Volume} = 5,000 \text{ rows} \times 80\text{ bytes} \approx 400\text{ KB}$$
+
+$$\text{Throughput at 100ms Pause} = \frac{400\text{ KB}}{0.1\text{ s}} = 4.0\text{ MB/second of WAL}$$
+
+Because a modern 1Gbps network connection can stream up to $125\text{ MB/second}$, a $4.0\text{ MB/second}$ deletion rate guarantees **zero read replica lag** and leaves 96% of network and disk I/O available for live customer checkout traffic!
+
+---
+
 ## Query Design Fundamentals Interview Map
 
 Query design is choosing the cheapest correct path through data.
@@ -592,6 +682,8 @@ When interviewing for Senior or Staff Backend Engineer roles, interviewers evalu
 | **"How do you index a 50-million row table without downtime?"** | *"I write a migration script with `CREATE INDEX idx_created_at ON orders(created_at);` and run it during low traffic hours."* | *"Standard `CREATE INDEX` takes a `SHARE` lock that blocks all concurrent writes. We use `CREATE INDEX CONCURRENTLY` configured in Flyway with a sibling `.conf` file setting `executeInTransaction=false`. Because concurrent indexing performs two full table scans to coordinate with active transactions, it cannot execute inside a transaction block. If an index build fails, we inspect `pg_index` for `indisvalid = false` and clean it up before recreating."* |
 | **"How do you update a column value on 20 million rows?"** | *"I write an `UPDATE orders SET status = 'NEW'` script. It runs once in SQL."* | *"A single massive `UPDATE` acquires 20 million exclusive row locks, floods the Write-Ahead Log (WAL) with gigabytes of diffs, causes massive read replica lag, and creates 20 million MVCC dead tuples. We execute chunked keyset cursor backfills in batches of 1,000 rows ordered by primary key (`WHERE id > :lastId LIMIT 1000`), committing each batch independently with a 50ms sleep. This keeps transactions microsecond-short, allows autovacuum to recycle dead tuple space, and maintains zero replica lag."* |
 | **"What is a covering index and how does it optimize queries?"** | *"It is an index that has multiple columns so the database finds rows faster."* | *"A covering index uses the `INCLUDE` clause to store auxiliary payload columns directly in the B-Tree leaf pages without indexing them in the search tree. When paired with a clean Visibility Map where the page's all-visible bit is `1`, PostgreSQL executes an Index-Only Scan (`Heap Fetches: 0`), retrieving all requested data directly from the index in memory without performing random disk I/O against the table heap."* |
+| **"What happens when a non-transactional Flyway migration fails, and how do you recover?"** | *"Flyway rolls it back automatically."* | *"Non-transactional migrations (like `CREATE INDEX CONCURRENTLY` run with `executeInTransaction=false`) cannot roll back. The database is left with an `INVALID` index consuming write IOPS, and `flyway_schema_history` marks `success = false`, blocking all future deployments. Recovery requires a 3-step runbook: (1) Concurrently drop the invalid index object via manual DDL, (2) Run `flyway repair` to purge the failed record from schema history, and (3) Re-run the migration with `IF NOT EXISTS` guards."* |
+| **"Why should large-scale batch DELETE operations enforce strict primary key sorting inside a CTE?"** | *"Sorting ensures that the oldest records are deleted first."* | *"Beyond business retention ordering, sorting candidate rows via `ORDER BY id ASC` inside the deletion CTE is a critical defense against database deadlocks. When multiple cleanup workers or live application transactions delete or update records concurrently, arbitrary row locking order causes circular lock dependencies. Forcing all operations to acquire row-level exclusive locks in identical ascending primary key order makes deadlocks mathematically impossible."* |
 
 ---
 
@@ -616,6 +708,12 @@ When interviewing for Senior or Staff Backend Engineer roles, interviewers evalu
   <Accordion title="4. How does pg_advisory_lock differ from table-level locks?">
     Standard table locks (like `ACCESS EXCLUSIVE` or `ROW EXCLUSIVE`) are tied directly to relational database objects (`tables`, `indexes`) and are automatically acquired and released by SQL queries within transaction boundaries. **Advisory locks** (`pg_advisory_lock`) are purely application-controlled locks operating on arbitrary 64-bit integers in PostgreSQL's shared memory hash table. They have zero relationship to table schemas or rows, can be held across transactions (session-level) or within transactions, and allow distributed microservices to coordinate cluster-wide operations using the database as a consensus engine.
   </Accordion>
+
+  <Accordion title="5. What does the flyway repair command actually do under the hood?">
+    The `flyway repair` command is an administrative maintenance tool that:
+    1. **Removes Failed Migration Records**: Deletes any rows in `flyway_schema_history` marked with `success = false` (typically resulting from failed non-transactional migrations or syntax errors), unblocking the deployment pipeline.
+    2. **Re-aligns Checksums**: Recalculates the CRC32 checksums of applied migrations against current migration files on disk, fixing false-alarm validation errors caused by modified whitespace, line endings, or comments.
+  </Accordion>
 </AccordionGroup>
 
 ---
@@ -630,6 +728,9 @@ When interviewing for Senior or Staff Backend Engineer roles, interviewers evalu
 - [ ] Separate database DDL execution from web application startup using dedicated Kubernetes Pre-Install Jobs.
 - [ ] Enforce `spring.jpa.hibernate.ddl-auto: validate` in all production profiles.
 - [ ] Configure Flyway with sibling `.conf` files (`executeInTransaction=false`) for `CREATE INDEX CONCURRENTLY`.
+- [ ] Recover from failed non-transactional migrations using the 3-step catalog cleanup and `flyway repair` workflow.
+- [ ] Execute large-scale batch purges using CTEs with ascending primary key ordering to mathematically prevent deadlocks.
+- [ ] Size WAL throttle pauses to guarantee zero read replica lag during bulk backfills and purges.
 - [ ] Detect and clean up failed `indisvalid = false` indexes from the database catalog.
 - [ ] Implement production-grade Chunked Keyset Cursor Backfills in Java 21 with rate-limiting pauses.
 </Check>
