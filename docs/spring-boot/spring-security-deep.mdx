@@ -18,11 +18,48 @@ This masterclass builds Spring Security from raw physical HTTP network packets u
 
 ---
 
-## Phase 1: Ground Floor (Physical First Principles)
+## Phase 1: Ground Floor (Everyday Mental Model)
 
-To master Spring Security, you must first understand the hostile physical environment of network programming.
+### 1.1 The Everyday Analogy: The Corporate Office Turnstile & Keycard
 
-### 1.1 The Hostile Physical Network
+To understand Spring Security without getting overwhelmed by filters and tokens, imagine entering a high-security corporate headquarters:
+
+```mermaid
+flowchart TD
+    subgraph BuildingSecurity["Corporate Office Security Gate"]
+        Visitor["Visitor arrives at revolving doors<br/>(Untrusted HTTP Request)"] --> Turnstile["Turnstile & Metal Detector<br/>(Spring Security Filter Chain)"]
+        Turnstile -->|"Step 1: Scan Keycard<br/>'Who are you?'"| Auth["Authentication<br/>(JWT / Session / Password)"]
+        Auth -->|"Step 2: Check Floor Access<br/>'Can you visit Floor 4?'"| Authz["Authorization<br/>(Role: ADMIN vs USER)"]
+        Authz -->|"Step 3: Wear Badge on Lanyard"| Badge["SecurityContextHolder<br/>(ThreadLocal in RAM)"]
+        Badge --> Elev["Take Elevator to Office<br/>(@RestController Method)"]
+        Elev --> Leave["Visitor Leaves Building<br/>(Return HTTP Response)"]
+        Leave --> Clean["Guard Revokes Pass!<br/>(ThreadLocal.clear())"]
+    end
+
+    style Turnstile fill:#ffebee,stroke:#c62828,stroke-width:2px;
+    style Elev fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;
+```
+
+### The Two Questions Every Security System Asks:
+1. **Authentication ("Who are you?")**:
+   - You show your passport, driver's license, or scan your employee badge.
+   - In Spring Security, this is validating your username/password or verifying the digital cryptographic signature on a **JWT (JSON Web Token)**.
+2. **Authorization ("What are you allowed to do?")**:
+   - Just because you work at the company does not mean you can walk into the CEO's office or open the money vault!
+   - In Spring Security, this is checking roles and permissions: `@PreAuthorize("hasRole('ADMIN')")` or checking if User #42 is allowed to view Invoice #108.
+
+### The Fatal Identity Bleed: The Forgotten Visitor Badge
+- When a Tomcat worker thread finishes serving your request, it returns to the thread pool to serve another customer 5 milliseconds later.
+- If Spring Security forgets to wipe your badge from memory (`ThreadLocal.clear()`), the next visitor who steps into the elevator **inherits your CEO badge**!
+- This is the #1 vulnerability in custom Spring Security filters: the **ThreadLocal Identity Bleed**.
+
+---
+
+## Phase 2: Physical First Principles
+
+To master Spring Security, you must understand the hostile physical environment of network programming.
+
+### 2.1 The Hostile Physical Network
 An HTTP request is simply an incoming array of ASCII/binary bytes transmitted over a TCP socket from an untrusted remote machine. 
 
 ```http

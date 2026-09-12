@@ -13,9 +13,56 @@ Before studying enterprise architecture and package design, ensure you understan
 
 ---
 
-# Phase 1: Ground Floor (Physical First Principles)
+# Phase 1: Ground Floor (Everyday Mental Model)
 
-## 1. The Package-by-Layer Anti-Pattern (The "Big Ball of Mud")
+## 1. The Everyday Analogy: The Kitchen Drawers vs. The Coffee Station
+
+To understand why folder organization makes or breaks a software project, look at two ways to organize a kitchen:
+
+```mermaid
+flowchart TD
+    subgraph ByMaterial["1. Organized by Technical Material (Package-by-Layer)"]
+        direction TB
+        D1["Drawer 1: All Metal Items (Spoons, Knives, Screwdrivers)"]
+        D2["Drawer 2: All Ceramic Items (Mugs, Plates, Bowls)"]
+        D3["Drawer 3: All Food Items (Coffee, Salt, Flour)"]
+        D1 -.->|"Want coffee? Run to 3 different rooms!"| Action1["Make Morning Coffee"]
+        D2 -.-> Action1
+        D3 -.-> Action1
+        Note1["High mental friction: 1 simple task touches every drawer in the house!"]
+    end
+
+    subgraph ByFeature["2. Organized by Workstation (Package-by-Feature)"]
+        direction TB
+        Station1["Coffee Station (Mug, Spoon, Coffee Beans, Grinder)"]
+        Station2["Baking Station (Flour, Mixer, Pan, Sugar)"]
+        Station1 -->|"Everything within arm's reach!"| Action2["Make Morning Coffee"]
+        Note2["Low friction: Everything related to Coffee is in ONE place.<br/>Baking logic never leaks into Coffee!"]
+    end
+
+    style ByMaterial fill:#ffebee,stroke:#c62828,stroke-width:2px;
+    style ByFeature fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;
+```
+
+### The "Organized by Material" Trap (Package-by-Layer)
+- Imagine putting **all metal items** in one drawer, **all ceramic items** in a second drawer, and **all powders** in a third drawer.
+- If you want to make a cup of coffee:
+  1. You open the metal drawer to find a spoon.
+  2. You open the ceramic drawer to find a mug.
+  3. You open the powder drawer to find coffee grounds.
+- To do one single task, you opened three separate drawers across the room.
+- In software, this is **Package-by-Layer**: all controllers in one folder, all services in another folder, and all repositories in a third folder. To add a simple field to `Order`, you must open 5 folders and edit 5 distant files.
+
+### The "Cooking Station" Solution (Package-by-Feature)
+- Instead, you create a dedicated **Coffee Station**: the coffee machine, the coffee beans, the mugs, and the spoons are all clustered on the same countertop.
+- When you want coffee, you stand at the Coffee Station and everything you need is right in front of you.
+- In software, this is **Package-by-Feature**: `OrderController`, `OrderService`, `OrderRepository`, and `OrderDto` all live inside `package com.example.store.order`. Everything related to Orders is within arm's reach!
+
+---
+
+# Phase 2: The Physical Problems of Package-by-Layer
+
+## 2. The Package-by-Layer Anti-Pattern (The "Big Ball of Mud")
 
 When starting a new Spring Boot application, most beginners arrange code into technical folders: `controller`, `service`, `repository`, and `entity`.
 

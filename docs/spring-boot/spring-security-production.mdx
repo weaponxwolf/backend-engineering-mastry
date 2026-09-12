@@ -5,24 +5,70 @@ description: "Master production Spring Security 6 architecture, method-level aut
 
 # Spring Security Production Guide
 
-Spring Security protects backend applications at the outer perimeter before any controller logic executes.
+## Prerequisites: Before You Begin
 
-In production systems, security is not just checking whether a user has logged in. A robust backend architecture enforces authentication, role-based authorization, granular resource ownership, strict CORS policies, and RFC 9457 error standardization.
+Before exploring production Spring Security configuration, ensure you understand:
+- **Cookies vs Authorization Headers**: How browsers store cookies and attach them to every HTTP request, while custom headers (`Authorization: Bearer ...`) must be attached explicitly by JavaScript.
+- **HTTP Methods**: Safe read-only methods (`GET`, `HEAD`) vs state-mutating methods (`POST`, `PUT`, `DELETE`, `PATCH`).
+- **Spring Security Basics**: What a `SecurityFilterChain` bean is and how filters intercept HTTP requests.
 
 ---
 
-## 1. Choose Security Rules by Credential Transport
+# Phase 1: Ground Floor (Everyday Mental Model)
 
-**CSRF** means a malicious site causes a browser to send an unwanted authenticated request. Browsers attach cookies automatically. Calling an application stateless does not remove this risk.
+## 1. The Everyday Analogy: CSRF vs. Bearer Tokens
 
-This example serves two kinds of endpoints:
+To understand why security configuration splits into different rules, understand how browsers handle credentials:
+
+```mermaid
+flowchart TD
+    subgraph CSRFTrap["1. The Cookie Trap (Vulnerable to CSRF)"]
+        direction TB
+        User1["User logs into Bank (Session Cookie stored in Browser)"]
+        User1 --> Evil["Visits malicious website 'free-money.com'"]
+        Evil -->|"Hidden form submits POST to bank.com/transfer"| Bank["Bank Server"]
+        BrowserAuto["Browser AUTOMATICALLY attaches bank.com cookie!"] -.-> Bank
+        Bank -->|"Sees valid cookie: Transfer APPROVED! 💸"| Stolen["Attacker steals $1,000!"]
+        Note1["Browsers always attach cookies automatically to target domains!"]
+    end
+
+    subgraph HeaderDefense["2. The Bearer Token Model (Stateless & Safe from CSRF)"]
+        direction TB
+        User2["Client App holds JWT in JavaScript memory"]
+        User2 -->|"Explicit header: 'Authorization: Bearer eyJ...'"| API["Spring Boot REST API"]
+        Evil2["Malicious website triggers background request"] -.->|"Browser CANNOT attach Authorization header!"| API
+        API -->|"Missing Bearer token: 401 Unauthorized! 🛡️"| Safe["Attack Blocked Cleanly"]
+    end
+
+    style CSRFTrap fill:#ffebee,stroke:#c62828,stroke-width:2px;
+    style HeaderDefense fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;
+```
+
+### What is Cross-Site Request Forgery (CSRF)?
+- Imagine your bank honors any paper check that has your pre-signed company seal.
+- If a scammer sneaks a pre-signed check into your folder and tricks your courier into delivering it to the bank, the bank cashes it because the courier carried the authentic seal!
+- In web browsers, **Cookies are automatic couriers**. If you are logged into your bank in Tab 1, and open a malicious website in Tab 2, that evil website can send a hidden HTTP `POST` request to `bank.com/transfer`. The browser automatically attaches your active session cookie to that request!
+- **Result**: The bank executes the transfer because the session cookie was valid.
+
+### Why Mobile and Single-Page Apps (SPAs) With Bearer Headers Are Immune:
+- If your frontend sends tokens inside the `Authorization: Bearer <jwt>` HTTP header, browsers **never attach that header automatically** to cross-site requests.
+- Only your trusted JavaScript code can read the token and explicitly attach the `Authorization` header.
+- **Production Rule**: If an endpoint ONLY accepts `Authorization: Bearer` headers (no cookies, no HTTP Basic), **CSRF protection can be safely disabled**. If an endpoint accepts session cookies (like a browser login page), **CSRF protection is mandatory**!
+
+---
+
+# Phase 2: Production Multi-Chain Architecture
+
+## 2. Choose Security Rules by Credential Transport
+
+This architecture serves two kinds of endpoints:
 
 | Routes | Credentials | CSRF rule |
 | :--- | :--- | :--- |
 | `/api/auth/**` | Login request or refresh cookie | Keep CSRF protection. Fetch a token before POST requests. |
 | Other API routes | Access token in the `Authorization` header only | CSRF can be disabled if these routes never accept cookies, HTTP Basic, or session authentication. |
 
-Add `spring-boot-starter-oauth2-resource-server`. Configure its JWT decoder using [issuer, audience, and algorithm validation](/production/security-jwt#4-2-spring-boot-3-resource-server-configuration). This uses Spring Security's bearer filter instead of an undefined custom JWT filter.
+Add `spring-boot-starter-oauth2-resource-server`. Configure its JWT decoder using issuer, audience, and algorithm validation. This uses Spring Security's bearer filter instead of a fragile undefined custom JWT filter.
 
 ### Two Filter Chains
 
