@@ -144,15 +144,17 @@
               "spring-boot/project-structure",
               "spring-boot/dependency-injection",
               "spring-boot/aop-events-async",
-              "spring-boot/config-profiles"
+              "spring-boot/config-profiles",
+              "spring-boot/autoconfiguration-starters"
             ]
           },
           {
-            "group": "Web APIs & Validation",
+            "group": "Web APIs & Reactive Systems",
             "icon": "globe",
             "pages": [
               "spring-boot/rest-api",
-              "spring-boot/validation-errors"
+              "spring-boot/validation-errors",
+              "spring-boot/webflux-reactive"
             ]
           },
           {
@@ -169,6 +171,14 @@
             "pages": [
               "spring-boot/spring-security-deep",
               "spring-boot/spring-security-production"
+            ]
+          },
+          {
+            "group": "Testing & Observability",
+            "icon": "heart-pulse",
+            "pages": [
+              "spring-boot/testing-slices",
+              "spring-boot/actuator-observability"
             ]
           }
         ]
