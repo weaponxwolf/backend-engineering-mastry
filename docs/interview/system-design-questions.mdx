@@ -11,6 +11,20 @@ Senior (L5) and Staff (L6) system design interviews do not evaluate whether you 
 Looking for complete, staff-level architectures, Mermaid sequence diagrams, concrete capacity estimation math, Redis Lua scripts, and database models for every question below? Review [System Design Interview Answers](/interview/system-design-answers).
 </Tip>
 
+## How To Attack Every System Design Question
+
+Do not start with boxes. Start with constraints:
+
+1. Functional scope: what must the system do now?
+2. Non-functional scope: latency, availability, consistency, durability, privacy, cost.
+3. Capacity numbers: reads/sec, writes/sec, storage, bandwidth, working set, fan-out.
+4. Invariants: what must never be wrong?
+5. Data model and APIs.
+6. Bottleneck deep dive.
+7. Failure modes and rollback.
+
+Example: for a rate limiter, the invariant is not "use Redis." The invariant is "no user exceeds the allowed quota under concurrent requests from many gateway pods." That pushes you toward an atomic Redis Lua script or a strongly consistent database row, plus a concurrency test.
+
 ---
 
 ## 1. System Design Foundations & Capacity Estimation

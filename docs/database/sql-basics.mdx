@@ -68,6 +68,52 @@ WHERE (price_cents - discount_cents) > 5000;
 ```
 </Tip>
 
+### Query Walkthrough: Every Clause Has A Moment In Time
+
+```sql
+SELECT customer_id,
+       COUNT(*) AS order_count,
+       SUM(total_cents) AS total_spent_cents
+FROM orders
+WHERE status = 'PAID'
+GROUP BY customer_id
+HAVING SUM(total_cents) > 100000
+ORDER BY total_spent_cents DESC
+LIMIT 10;
+```
+
+Line by line:
+
+- `SELECT customer_id, ...` describes the final columns returned to the client, but it is not logically evaluated first.
+- `COUNT(*) AS order_count` counts rows inside each group after `GROUP BY`.
+- `SUM(total_cents) AS total_spent_cents` adds paid order totals per customer.
+- `FROM orders` selects the base table. PostgreSQL decides whether to read it through a sequential scan, index scan, or another plan.
+- `WHERE status = 'PAID'` removes unpaid rows before grouping. This is the right place for row-level filters.
+- `GROUP BY customer_id` turns many order rows into one group per customer.
+- `HAVING SUM(total_cents) > 100000` filters grouped customers after aggregation. `WHERE SUM(...)` would be invalid because `WHERE` runs before aggregation exists.
+- `ORDER BY total_spent_cents DESC` sorts the final grouped result. This can use the alias because `SELECT` has already created it.
+- `LIMIT 10` returns only the first ten sorted groups. It does not make the earlier grouping free.
+
+What breaks:
+
+```sql
+SELECT customer_id, SUM(total_cents) AS total_spent_cents
+FROM orders
+WHERE total_spent_cents > 100000
+GROUP BY customer_id;
+```
+
+`WHERE total_spent_cents > 100000` fails because `total_spent_cents` does not exist yet at the `WHERE` step.
+
+Proof task:
+
+```console
+Run both queries against a small orders table.
+Observe the alias failure.
+Move the aggregate filter to HAVING.
+Explain why WHERE filters rows and HAVING filters groups.
+```
+
 ---
 
 ## PostgreSQL Physical Storage Anatomy: The 8 KB Database Page

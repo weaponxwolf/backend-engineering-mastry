@@ -150,6 +150,51 @@ public class OrderService {
 2. **Hidden Bloat (SRP Violation)**: With field injection, adding 15 dependencies looks like 15 short lines. With constructor injection, a constructor with 15 parameters immediately triggers code smell alarms that the class violates the Single Responsibility Principle.
 3. **Broken Immutability**: Field injection cannot be declared `final`. Dependencies can be mutated or reassigned at runtime.
 
+#### Production Fix: Constructor Injection With Final Dependencies
+
+```java
+@Service
+public class OrderService {
+
+    private final OrderRepository orderRepository;
+    private final PaymentClient paymentClient;
+
+    public OrderService(OrderRepository orderRepository, PaymentClient paymentClient) {
+        this.orderRepository = orderRepository;
+        this.paymentClient = paymentClient;
+    }
+
+    public void processOrder(Order order) {
+        orderRepository.save(order);
+        paymentClient.authorize(order.paymentRequest());
+    }
+}
+```
+
+Line by line:
+
+- `@Service` makes the class a Spring bean candidate during component scanning.
+- `private final OrderRepository orderRepository` makes the dependency mandatory and impossible to replace after construction.
+- `private final PaymentClient paymentClient` declares the external collaborator explicitly.
+- The constructor is the only way to create a valid `OrderService`.
+- Spring sees one constructor and automatically resolves both parameters from the application context.
+- `processOrder(...)` uses dependencies that are guaranteed non-null after startup.
+
+Test proof:
+
+```java
+OrderRepository repository = mock(OrderRepository.class);
+PaymentClient paymentClient = mock(PaymentClient.class);
+OrderService service = new OrderService(repository, paymentClient);
+
+service.processOrder(order);
+
+verify(repository).save(order);
+verify(paymentClient).authorize(order.paymentRequest());
+```
+
+This test uses plain Java construction. No Spring container, reflection, or database socket is required.
+
 ---
 
 # Phase 3: Under the Hood (Mechanics & Bytecode)

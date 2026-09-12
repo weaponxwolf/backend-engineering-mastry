@@ -249,6 +249,53 @@ public record ApplicationProperties(
 }
 ```
 
+Line by line:
+
+- `@ConfigurationProperties(prefix = "app")` tells Spring to bind properties under `app.*` into this record.
+- `@Validated` activates Jakarta Bean Validation during startup, before Tomcat accepts traffic.
+- `public record ApplicationProperties(...)` makes the configuration immutable after binding.
+- `@NotNull @Valid SecurityProperties security` requires `app.security` to exist and validates its nested fields.
+- `@NotNull @Valid PaymentProperties payment` does the same for payment configuration.
+- `List<String> allowedOrigins` binds YAML arrays or indexed environment variables into a Java list.
+- `Map<String, FeatureFlag> features` supports named feature toggles such as `features.checkout-v2.enabled`.
+- `@NotBlank String jwtSecret` rejects missing and blank JWT secrets.
+- `@DurationMin(minutes = 5) Duration tokenExpiry` prevents accidentally deploying 5-second tokens when the product expects minutes.
+- `@NotNull URI gatewayUrl` verifies the payment gateway URL can be parsed as a URI.
+- `@Positive int maxRetries` rejects zero and negative retry counts at startup.
+- `Duration connectionTimeout` and `Duration readTimeout` make timeouts explicit typed values instead of loose strings.
+
+Matching YAML:
+
+```yaml
+app:
+  security:
+    jwt-secret: "${JWT_SECRET}"
+    token-expiry: 15m
+    issuer: "https://auth.example.com"
+  payment:
+    gateway-url: "https://payments.example.com"
+    max-retries: 3
+    connection-timeout: 500ms
+    read-timeout: 2s
+  allowed-origins:
+    - "https://app.example.com"
+  features:
+    checkout-v2:
+      enabled: true
+      rollout-percentage: 10.0
+```
+
+Proof task:
+
+```console
+Set app.payment.max-retries=-1.
+Start the application.
+Expected: startup fails before opening port 8080.
+Fix max-retries=3.
+Start again.
+Expected: application boots and configuration bean is available.
+```
+
 #### Automatic Type Coercion
 Spring Boot automatically parses human-readable duration strings directly into `java.time.Duration`:
 - `token-expiry: 15m` $\rightarrow$ `Duration.ofMinutes(15)`

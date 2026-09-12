@@ -226,11 +226,19 @@ To eliminate dropped requests, combine Spring Boot graceful shutdown with a Kube
 spec:
   containers:
     - name: notes-api
-      lifecycle:
-        preStop:
-          exec:
-            command: ["/bin/sh", "-c", "sleep 15"]
+lifecycle:
+  preStop:
+    exec:
+      command: ["/bin/sh", "-c", "sleep 15"]
 ```
+
+Line-by-line reading:
+
+- `lifecycle` attaches hooks to the container lifecycle managed by the kubelet.
+- `preStop` runs before Kubernetes sends `SIGTERM` to the container process.
+- `exec` means the hook runs inside the container namespace, so `/bin/sh` must exist in the image.
+- `command: ["/bin/sh", "-c", "sleep 15"]` spends 15 seconds still alive while endpoint removal and load-balancer propagation catch up.
+- This line does not drain traffic by itself. It only creates time for the control plane and ingress to stop sending new requests.
 
 ```yaml
 # application.yml
@@ -240,6 +248,12 @@ spring:
   lifecycle:
     timeout-per-shutdown-phase: 30s
 ```
+
+Application config reading:
+
+- `server.shutdown: graceful` tells Spring Boot to stop accepting new web requests after `SIGTERM` while allowing in-flight requests to finish.
+- `spring.lifecycle.timeout-per-shutdown-phase: 30s` caps each graceful shutdown phase. Without a cap, shutdown can hang; with a tiny cap, slow but valid requests get cut off.
+- The total pod budget must include `preStop` plus Spring shutdown plus a buffer. Here that means at least `15s + 30s + buffer`.
 
 ### How this reduces dropped requests
 1. Kubernetes starts the termination grace period, then runs `preStop` before sending `SIGTERM`.
@@ -328,6 +342,19 @@ spec:
               exec:
                 command: ["/bin/sh", "-c", "sleep 15"]
 ```
+
+#### Manifest line-by-line proof points
+
+- `replicas: 3` gives rolling updates room to lose one pod without total outage. A single replica cannot prove zero downtime.
+- `maxUnavailable: 0` tells Kubernetes not to reduce ready capacity during rollout.
+- `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, and `capabilities.drop: ["ALL"]` reduce the blast radius if the JVM process is compromised.
+- `requests` are scheduler promises; `limits` are enforcement boundaries. A memory limit crossing becomes an OOM kill, often seen as exit code 137.
+- `startupProbe` protects slow JVM startup from premature liveness restarts.
+- `livenessProbe` should answer "is the process wedged?" not "is the database healthy?"
+- `readinessProbe` answers "should this pod receive traffic right now?"
+- `terminationGracePeriodSeconds: 60` is the outer clock. If `preStop` plus graceful shutdown exceeds 60 seconds, Kubernetes can still kill the process.
+
+Proof drill: run `kubectl rollout restart deployment/notes-api` while sending slow requests. Watch `kubectl get endpoints`, ingress 5xx metrics, and application logs. The rollout is only proven when ready endpoints change without user-visible failures.
 
 ---
 

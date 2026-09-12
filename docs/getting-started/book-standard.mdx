@@ -35,6 +35,41 @@ Every major chapter should include:
 
 If a page only defines words, it is not a mastery chapter.
 
+## Explanation Density Standard
+
+Every page must assume the learner is reading slowly and wants to understand the machinery behind each line.
+
+Do not write:
+
+```console
+@Transactional starts a transaction.
+```
+
+Write the full chain:
+
+```console
+@Transactional tells Spring to call this method through a proxy.
+The proxy asks PlatformTransactionManager for a database connection.
+That connection is bound to the current thread while the method runs.
+Hibernate uses the same connection when repositories execute SQL.
+If an unchecked exception escapes the method, Spring rolls the transaction back.
+If the method calls a slow payment API before returning, the connection stays occupied and the pool can run out.
+```
+
+The required depth is:
+
+- **Definition**: What the term means in simple English.
+- **Reason**: Why the term or tool exists.
+- **Mechanism**: What happens in memory, on the network, inside Spring, inside PostgreSQL, or inside the JVM.
+- **Example**: A realistic Java, SQL, HTTP, YAML, Docker, or Kubernetes example.
+- **Line-by-line explanation**: Explain every important annotation, method call, clause, property, header, and field.
+- **Failure mode**: Show the beginner mistake and the production symptom.
+- **Fix**: Show the corrected code or architecture.
+- **Proof**: Show how to test, log, query, or observe that the fix works.
+- **Interview phrasing**: Show how to explain it clearly under pressure.
+
+Short definitions are allowed only as labels inside a larger explanation. They are never enough by themselves.
+
 ## Knowledge Levels
 
 Use four levels for every topic.

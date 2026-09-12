@@ -139,6 +139,41 @@ sequenceDiagram
 - Under moderate traffic, 8 concurrent requests executing blocking JDBC calls freeze **100% of all EventLoops**.
 - Health check endpoints (`/actuator/health`) timeout, Kubernetes concludes the pod is dead, and the cluster enters an unrecoverable restart death spiral.
 
+#### Production Fix: Move Blocking Work Off The EventLoop
+
+```java
+@PostMapping
+public Mono<OrderResponse> submitOrder(@RequestBody OrderRequest request) {
+    return Mono.fromCallable(() -> legacyDbClient.verifyMerchantBlocked(request.merchantId()))
+            .subscribeOn(Schedulers.boundedElastic())
+            .flatMap(isBlocked -> {
+                if (isBlocked) {
+                    return Mono.error(new MerchantBlockedException());
+                }
+                return processOrderReactive(request);
+            });
+}
+```
+
+Line by line:
+
+- `Mono.fromCallable(...)` wraps the blocking JDBC call so it runs when subscribed, not during pipeline assembly.
+- `legacyDbClient.verifyMerchantBlocked(...)` is still blocking; the code does not pretend otherwise.
+- `subscribeOn(Schedulers.boundedElastic())` moves that blocking call onto Reactor's bounded elastic worker pool instead of Netty EventLoop threads.
+- `flatMap(...)` continues the reactive chain after the blocking result is available.
+- `Mono.error(...)` represents failure inside the stream instead of throwing directly on an EventLoop.
+- `processOrderReactive(request)` should remain non-blocking if this endpoint stays WebFlux.
+
+Proof task:
+
+```console
+Log Thread.currentThread().getName() inside the blocking call.
+It should show boundedElastic, not reactor-http-nio.
+Run a load test with one slow legacy DB call and verify /actuator/health still responds.
+```
+
+Senior caveat: this is a containment fix, not a reason to mix blocking calls everywhere in WebFlux. If most of the application is blocking JDBC and imperative service logic, Spring MVC with virtual threads may be simpler and safer.
+
 ---
 
 ### Crash Scenario 2: The Carrier Thread Pinning Lockup (Virtual Thread Disaster)
@@ -167,6 +202,49 @@ public class LegacyDistributedCache {
 - Under high concurrency, all 8 `ForkJoinPool` carrier threads become pinned and frozen in network I/O.
 - Even though millions of virtual threads can exist, **there are zero carrier threads available to execute them**.
 - Application throughput collapses from 15,000 req/sec to 12 req/sec, and p99 latency explodes to 30 seconds.
+
+#### Production Fix: Avoid Blocking I/O Inside `synchronized`
+
+```java
+public class LegacyDistributedCache {
+
+    private final ReentrantLock lock = new ReentrantLock();
+
+    public byte[] fetchCachedData(String key) {
+        lock.lock();
+        try {
+            return socketChannel.readBytes(key);
+        } finally {
+            lock.unlock();
+        }
+    }
+}
+```
+
+Line by line:
+
+- `ReentrantLock` allows virtual threads to park without the same carrier pinning hazard as blocking inside `synchronized`.
+- `lock.lock()` protects the critical section.
+- The `try` block keeps the protected code visually small.
+- `finally` guarantees unlock even when the socket call throws.
+
+Better design:
+
+```console
+Do not hold any lock while doing network I/O.
+Read or compute the local state needed for the call.
+Release the lock.
+Perform the socket call.
+Reacquire a lock only if shared in-memory state must be updated.
+```
+
+Proof task:
+
+```console
+Run with -Djdk.tracePinnedThreads=full.
+Exercise the cache path under load.
+Pinned-thread stack traces should disappear after removing synchronized blocking I/O.
+```
 
 ---
 

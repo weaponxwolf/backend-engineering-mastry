@@ -161,6 +161,25 @@ erDiagram
     }
 ```
 
+### Line-by-Line Ledger Entry Reading
+
+```sql
+INSERT INTO ledger_entries (transaction_id, account_id, direction, amount_cents, currency)
+VALUES
+  (:tx, :buyer_cash, 'CREDIT', 12900, 'USD'),
+  (:tx, :merchant_payable, 'DEBIT', 11900, 'USD'),
+  (:tx, :platform_revenue, 'DEBIT', 1000, 'USD');
+```
+
+- `transaction_id` groups all legs of one money movement. A ledger transaction is not complete until every leg is present.
+- `account_id` identifies the account affected by that leg.
+- `direction` must be interpreted through your chart of accounts. Do not let application teams invent meanings per endpoint.
+- `amount_cents` uses integers, not floating point, so `129.00` never becomes `128.999999`.
+- `currency` is part of the invariant. Do not sum USD and EUR in the same zero-sum check.
+- The three rows must balance under the ledger's debit/credit rules. If one row is missing, the transaction must fail.
+
+Proof drill: attempt to insert only the buyer and merchant rows. The deferred constraint trigger should reject commit because the platform fee leg is missing.
+
 ### PostgreSQL Flyway DDL (`V1__init_financial_ledger.sql`)
 
 ```sql

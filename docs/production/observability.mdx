@@ -112,6 +112,18 @@ management:
       endpoint: http://tempo:4318/v1/traces # OTLP HTTP receiver endpoint
 ```
 
+Configuration line by line:
+
+- `management.endpoints.web.exposure.include` controls which Actuator endpoints are reachable over HTTP.
+- `health.probes.enabled: true` creates Kubernetes-friendly liveness/readiness probe groups.
+- `prometheus.access: unrestricted` exposes scrape data; protect it at the network or gateway layer in production.
+- `metrics.tags.application` adds a stable service label to every metric.
+- `metrics.tags.environment` separates production, staging, and local telemetry.
+- `percentiles-histogram.http.server.requests: true` enables histogram buckets required for Prometheus p95/p99 calculations.
+- `slo.http.server.requests` defines latency buckets aligned with service objectives.
+- `tracing.sampling.probability` controls how many traces are recorded. High-scale production usually samples below 100%.
+- `otlp.tracing.endpoint` points to the trace collector, such as Tempo or Jaeger.
+
 ---
 
 ## Instrumenting Code with `ObservationRegistry`
@@ -138,6 +150,23 @@ public class ObservationConfig {
         return new ObservedAspect(observationRegistry);
     }
 }
+```
+
+Observation line by line:
+
+- `Observation.createNotStarted(...)` defines the operation name before starting measurement.
+- `lowCardinalityKeyValue("customer.tier", "vip")` is safe for metrics because the value set is small.
+- `lowCardinalityKeyValue("currency", "USD")` is another bounded label.
+- `highCardinalityKeyValue("customer.id", customerId)` belongs in traces, not metric labels, because it may be unique per user.
+- `.observe(() -> { ... })` starts timing, records errors, closes the span, and returns the callback result.
+
+Proof task:
+
+```console
+Call processPayment.
+Check Prometheus for payment_gateway_charge metrics with currency/customer.tier labels.
+Open a trace and verify customer.id appears there.
+Confirm customer.id is not a Prometheus label.
 ```
 
 Annotate any service method. Spring automatically creates a tracing span and records execution duration in Prometheus:

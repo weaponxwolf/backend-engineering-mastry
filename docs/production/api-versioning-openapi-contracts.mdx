@@ -143,6 +143,32 @@ components:
           type: string
 ```
 
+OpenAPI line by line:
+
+- `openapi: 3.1.0` declares the specification version tooling should use.
+- `info.version: 1.4.0` is the contract version, not necessarily the deployed Git tag.
+- `/api/notes/{id}` names a resource path with one path variable.
+- `get` defines the HTTP method.
+- `operationId: getNote` gives generators a stable client method name.
+- `security: bearerAuth` says the endpoint requires bearer authentication.
+- `parameters.name: id` and `in: path` document where the ID comes from.
+- `required: true` is mandatory for path parameters.
+- `format: uuid` gives clients and validators a stronger shape than plain string.
+- Response `"200"` documents the success payload.
+- Response `"404"` documents absent or hidden resources.
+- `application/problem+json` standardizes error bodies.
+- `required: [id, title, content, updatedAt]` means removing any of those fields is a breaking change.
+- `maxLength: 120` is part of the public contract; tightening it later can break clients.
+
+Proof task:
+
+```console
+Generate a client from the OpenAPI file.
+Rename title to name in the backend response.
+Run the generated-client contract test.
+It should fail before a mobile user discovers the break.
+```
+
 ## Compatibility Rules
 
 | Change | Compatible? | Why |

@@ -43,6 +43,16 @@ kubectl top pods -n prod
 kubectl rollout history deployment/orders-api -n prod
 ```
 
+Command meaning:
+
+- `kubectl get pods -n prod` shows pod readiness, restarts, and age.
+- `kubectl get events ...` surfaces scheduling failures, probe failures, image pull errors, and OOM kills in time order.
+- `kubectl logs ... --since=15m` narrows logs to the incident window.
+- `kubectl top pods` shows CPU and memory saturation if metrics-server is available.
+- `kubectl rollout history` tells you whether a deployment recently changed.
+
+First-five-minute rule: run commands that reduce uncertainty. Do not run commands that mutate production until impact and rollback/mitigation choices are clear.
+
 Database snapshot:
 
 ```sql
@@ -51,6 +61,15 @@ FROM pg_stat_activity
 GROUP BY state, wait_event_type, wait_event
 ORDER BY count(*) DESC;
 ```
+
+SQL meaning:
+
+- `state` groups sessions into active, idle, and idle-in-transaction.
+- `wait_event_type` tells you the broad wait class: Lock, IO, Client, LWLock, and so on.
+- `wait_event` gives the specific wait reason.
+- `count(*)` shows which wait class dominates.
+- If `Lock` dominates, investigate blockers before adding capacity.
+- If many sessions are `idle in transaction`, find code paths that open transactions and stop.
 
 ---
 

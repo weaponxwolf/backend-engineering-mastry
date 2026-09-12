@@ -57,3 +57,37 @@ Arm the learner with the exact vocabulary and trade-offs required to ace senior/
 3. **No Magical Jargon**: If you write "AOP Proxy," "Virtual Threads," or "Write-Ahead Log," explain the physical concept in the very next sentence.
 4. **Concrete Over Abstract**: Replace abstract diagrams with concrete numbers (e.g., *1,000 requests/sec with 50ms database latency = 50 concurrent connections*).
 5. **Interview-Ready Mental Models**: Every topic must equip the learner to explain trade-offs, limitations, and failure recovery in an interview room without hesitation.
+
+## Every Line Must Teach
+
+This guide must never throw a one-line definition at the learner and move on. A sentence like "JPA maps Java objects to database tables" is only the opening door, not the lesson.
+
+For every important concept, code block, SQL query, configuration file, command, or architecture diagram, explain:
+
+- **What each important line does**: If a Java annotation, SQL clause, YAML property, Docker instruction, HTTP header, or Kubernetes field matters, explain it in plain English near the example.
+- **Why that line exists**: Connect the line to the production problem it solves, such as connection reuse, rollback safety, validation, serialization, locking, observability, or deployment stability.
+- **What breaks without it**: Show the likely failure: wrong status code, missing rollback, connection leak, N+1 query, race condition, table lock, stale cache, retry storm, or insecure endpoint.
+- **How to verify it**: Give the learner a small test, command, log line, request/response example, database query, or debugging step that proves the concept works.
+- **How it connects to the stack**: Tie the explanation to the surrounding runtime path: client, HTTP, controller, service, transaction, ORM, SQL, database, message broker, container, or Kubernetes pod.
+
+### Required Example Pattern
+
+When teaching with code, prefer this shape:
+
+```java
+@Transactional
+public OrderResponse placeOrder(PlaceOrderRequest request) {
+    Order order = orderRepository.save(Order.create(request.customerId()));
+    paymentClient.charge(request.paymentMethodId(), order.total());
+    return OrderResponse.from(order);
+}
+```
+
+Then explain the important lines immediately:
+
+- `@Transactional` opens one database transaction around the method through a Spring proxy. It protects the database writes, but it also means the database connection is held until the method returns.
+- `orderRepository.save(...)` inserts or updates an `orders` row through JPA. The SQL may not hit the database immediately because Hibernate can delay it until flush time.
+- `paymentClient.charge(...)` is dangerous inside the transaction because a slow network call keeps the database connection busy. Under load, this can exhaust HikariCP and block unrelated requests.
+- `OrderResponse.from(order)` converts the entity into a DTO so the API does not leak internal database shape to clients.
+
+The page must then show the safer production shape, the failure symptoms, and the proof test. Do not leave the learner with a half-understood snippet.

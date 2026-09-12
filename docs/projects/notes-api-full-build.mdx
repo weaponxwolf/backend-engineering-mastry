@@ -872,6 +872,28 @@ For a serious app, keep related feature code together.
   </Step>
 </Steps>
 
+## Line-by-Line Tenant Isolation Proof
+
+The key repository shape is:
+
+```java
+Optional<Note> findByIdAndOwnerId(Long noteId, Long ownerId);
+```
+
+- `Optional<Note>` forces the service to handle "not found or not yours" without returning `null`.
+- `findByIdAndOwnerId` encodes the security rule in the database query, not only in controller code.
+- `noteId` is the untrusted path variable from `/notes/{id}`.
+- `ownerId` comes from the authenticated principal, never from the request body.
+- Returning empty for another user's note lets the API answer `404` without exposing whether the note exists.
+
+Proof test reading:
+
+- Create User A and User B.
+- Save one note for each user.
+- Query User A's note with User A's ID and expect present.
+- Query User A's note with User B's ID and expect empty.
+- Repeat the same rule for update, delete, search, and pagination.
+
 ---
 
 ## Project Proof Drill

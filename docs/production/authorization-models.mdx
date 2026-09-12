@@ -73,6 +73,24 @@ public NoteResponse read(@AuthenticationPrincipal AppUser user,
 }
 ```
 
+Line by line:
+
+- `@AuthenticationPrincipal AppUser user` uses the authenticated identity produced by the security filter chain, not a caller-supplied user ID.
+- `@PathVariable UUID id` is untrusted client input. The caller can change it.
+- `findByIdAndOwnerId(id, user.id())` binds the requested resource to the authenticated owner in one repository query.
+- `orElseThrow(NotFoundException::new)` intentionally hides whether the note exists for somebody else.
+- `NoteResponse.from(note)` returns a DTO instead of leaking the entity.
+
+Proof tests:
+
+```console
+Alice creates note A.
+Alice reads note A -> 200.
+Bob reads note A by ID -> 404 or 403 according to policy.
+Verify Bob's request does not return note data.
+Verify repository method scopes by both id and ownerId.
+```
+
 Better service boundary:
 
 ```java

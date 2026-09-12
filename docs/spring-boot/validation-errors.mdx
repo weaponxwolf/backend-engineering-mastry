@@ -98,6 +98,34 @@ If validation fails, controller method does not run.
 
 Spring throws `MethodArgumentNotValidException`.
 
+Line by line:
+
+- `@PostMapping` maps this method to an HTTP `POST` route supplied by the class-level `@RequestMapping`.
+- `@ResponseStatus(HttpStatus.CREATED)` returns `201 Created` when the method completes successfully.
+- `@Valid` asks Jakarta Validation to evaluate annotations on `CreateUserRequest`.
+- `@RequestBody` tells Spring to deserialize the HTTP JSON body into the request record.
+- `CreateUserRequest request` is trusted only after deserialization and validation succeed.
+- `userService.createUser(request)` should enforce business rules that annotations cannot know, such as email uniqueness.
+
+What breaks without `@Valid`:
+
+```console
+Client sends {"name":"","email":"not-email","password":"x"}.
+Spring still builds CreateUserRequest.
+Controller calls userService.
+Invalid data reaches business logic or database constraints.
+The client may receive a generic 500 instead of a clear 400.
+```
+
+Proof test:
+
+```console
+Send blank name.
+Assert HTTP 400.
+Assert service mock was never called.
+Assert response body contains field-level message for name.
+```
+
 ## Nested Validation
 
 Use `@Valid` inside DTO when validating nested objects.
@@ -114,6 +142,22 @@ public record OrderItemRequest(
     @NotNull Long productId,
     @Positive int quantity
 ) {}
+```
+
+Line by line:
+
+- `@NotEmpty` rejects `null` and empty item lists.
+- `List<@Valid OrderItemRequest>` tells validation to descend into each list element.
+- `@NotNull Long productId` rejects missing product identity before the service tries to query the database.
+- `@Positive int quantity` rejects `0` and negative quantities.
+
+Proof test:
+
+```console
+items = [] -> 400
+items = [{"productId":null,"quantity":1}] -> 400
+items = [{"productId":42,"quantity":0}] -> 400
+items = [{"productId":42,"quantity":2}] -> controller may call service
 ```
 
 ## Business Validation

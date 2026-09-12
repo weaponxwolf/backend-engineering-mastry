@@ -430,6 +430,22 @@ public class KafkaConsumerConfig {
 }
 ```
 
+#### Line-by-line production reading
+
+- `@EnableKafka` tells Spring to create listener container infrastructure; without it, `@KafkaListener` methods can sit in code but never receive records.
+- `DeadLetterPublishingRecoverer` is the final escape hatch. It publishes the failed record to `original-topic.DLT` so the consumer can move the offset forward without deleting evidence.
+- `new TopicPartition(record.topic() + ".DLT", record.partition())` keeps the same partition number. That matters when operators debug one bad partition and want the poisoned record beside its original ordering lane.
+- `setFailIfSendResultIsError(true)` prevents a dangerous lie: the record is not recovered if the DLT publish failed. Without this, a broker outage during recovery can silently lose the failed event.
+- `new FixedBackOff(1000L, 2L)` means: process once, then retry after 1 second, then retry after another 1 second. This is acceptable only when blocking one partition for roughly 2 seconds is cheaper than creating retry topics.
+- `setCommitRecovered(true)` commits the source offset after successful DLT publication. The application has preserved the bad payload elsewhere, so replaying the same poison pill forever would only create lag.
+- `addNotRetryableExceptions(...)` separates bad data from temporary infrastructure failure. A negative payment amount will not become valid after 3 retries; a database deadlock might.
+- `AckMode.MANUAL_IMMEDIATE` makes the listener responsible for acknowledging after business work commits. If the JVM dies before the ack, Kafka redelivers; that is why the consumer must be idempotent.
+- `factory.setConcurrency(3)` creates up to 3 consumer threads in this application instance. It does not magically exceed the topic partition count; 3 threads on a 2-partition topic leaves one idle.
+
+<Info>
+Proof habit: create a test topic with 3 partitions, publish one valid event and one invalid event with the same key, then assert the invalid payload appears in `topic.DLT` and the valid event after it is processed only when your ordering choice allows it.
+</Info>
+
 ### 5.3 Longer delays with retry topics
 
 For independent events, configure `@RetryableTopic` or `RetryTopicConfiguration` to create retry consumers. Later main-topic events can overtake a failed event. A stable partition key does **not** preserve business ordering after this handoff. See [Spring Kafka's retry-topic ordering warning](https://docs.spring.io/spring-kafka/reference/3.3/retrytopic/how-the-pattern-works.html).

@@ -188,6 +188,49 @@ public class OrderReportingService {
 - The JVM allocated a contiguous array to buffer all 2 million `Order` entities.
 - JVM heap spiked from 1.5GB to 8GB, triggering an unrecoverable `OutOfMemoryError: Java heap space`.
 
+#### Production Fix: Push Sorting And Limiting To The Database
+
+```java
+public interface OrderRepository extends JpaRepository<Order, Long> {
+
+    @Query("""
+        select new com.example.OrderDTO(o.id, o.totalAmountCents, o.createdAt)
+        from Order o
+        where o.status = 'COMPLETED'
+        order by o.totalAmountCents desc, o.id desc
+        limit 10
+        """)
+    List<OrderDTO> findTop10CompletedOrders();
+}
+```
+
+Line by line:
+
+- `select new ... OrderDTO(...)` creates a DTO projection directly from selected columns. Hibernate does not need to materialize full tracked entities.
+- `where o.status = 'COMPLETED'` filters in the database, close to indexes and disk pages.
+- `order by o.totalAmountCents desc, o.id desc` lets PostgreSQL use an index order instead of sorting millions of Java objects in heap memory.
+- `o.id desc` is a deterministic tie-breaker. Without it, equal totals can appear in unstable order across requests.
+- `limit 10` means the database returns only the ten rows the API needs.
+- `List<OrderDTO>` makes the method contract small and read-only.
+
+Matching index:
+
+```sql
+CREATE INDEX idx_orders_completed_total_id
+ON orders (total_amount_cents DESC, id DESC)
+WHERE status = 'COMPLETED';
+```
+
+Proof task:
+
+```console
+Seed 2,000,000 orders.
+Run EXPLAIN (ANALYZE, BUFFERS) for the SQL.
+Verify the plan uses the index and returns 10 rows.
+Run a heap profiler against the old stream version and the SQL version.
+Explain why the SQL version moves memory pressure from JVM heap to database query planning/index access.
+```
+
 ---
 
 ## Phase 3: Under the Hood (Mechanics, Bytecode & Kernel Interfaces)

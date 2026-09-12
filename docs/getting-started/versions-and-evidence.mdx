@@ -34,8 +34,33 @@ The [Mintlify link command](https://www.mintlify.com/docs/cli/commands) checks i
 
 The content inventory reports headings and code blocks for editorial review. It does not grade correctness or comprehension. Read the [curriculum audit](/getting-started/curriculum-audit) for concrete remaining gaps.
 
+## What Each Command Proves And Does Not Prove
+
+| Command | Proves | Does not prove |
+| --- | --- | --- |
+| `npm run check` | MDX parses, structure audit passes, internal links resolve | Java snippets compile, SQL is correct, examples are production-ready |
+| `bash examples/java-foundations/run.sh` | The checked-in Java foundations lab compiles and its tests pass | Spring Boot, HTTP, database, or deployment behavior |
+| `mvn -f examples/todo-api/pom.xml verify` | The Todo starter compiles and tests its current MVC/H2 behavior | PostgreSQL locks, authentication, real JWT validation, Docker runtime behavior |
+| `npm run links:external` | External URLs can be reached during that run | The external page still supports every claim or will remain available later |
+
+This matters because false confidence is dangerous. A page can be beautiful MDX and still contain a Java excerpt that requires missing project setup. A unit test can pass while a real database transaction behaves differently. Strong evidence names its exact boundary.
+
 ## Evidence required for stronger claims
 
 Before labeling a project runnable, include every required source/configuration file, pinned dependencies, a fresh-checkout command, and its observed result. Before claiming production readiness, also test authorization, real database behavior, migrations on existing data, failure recovery, and realistic load.
 
 For performance claims, record workload, hardware, runtime, warmup, concurrency, duration, and latency distribution. Explain the assumptions behind a complexity statement. A cache hit ratio or a percentage improvement is a measured result, not a property guaranteed by using a tool.
+
+Example performance evidence:
+
+```console
+Claim: keyset pagination is faster than offset pagination for deep pages
+Dataset: 1,000,000 orders
+Database: PostgreSQL 16, local Docker, 4 CPU, 8 GB RAM
+Index: (created_at DESC, id DESC)
+Offset query: page 10,000, p95 latency 480 ms
+Keyset query: next page after cursor, p95 latency 7 ms
+Limit: local single-user test; does not prove production latency under concurrent writes
+```
+
+Numbers without assumptions are decoration. Numbers with workload, setup, and limits become learning evidence.

@@ -383,6 +383,20 @@ public class UrlRedirectService {
 }
 ```
 
+Line-by-line redirect proof:
+
+- `cacheKey = "url:" + shortCode` names the Redis lookup. Prefixes prevent collisions with unrelated Redis data.
+- `redisTemplate.opsForValue().get(cacheKey)` is the fast path. A hot redirect should not hit PostgreSQL on every click.
+- `"__DEACTIVATED__"` is a negative-cache sentinel. It prevents repeated database reads for expired or disabled links.
+- `dispatchClickAnalytics(...)` runs even on cache hits, preserving click metrics while keeping redirect latency low.
+- `findByShortCode(shortCode)` is the database fallback when Redis misses.
+- `isActive()` and `isExpired()` enforce business state before returning the long URL.
+- `Duration.ofHours(24).plusMinutes(jitterMinutes)` avoids cache avalanche by spreading expirations across time.
+- `kafkaTemplate.send("click-events", shortCode, event)` keys analytics by short code so per-link events stay ordered in Kafka.
+- The catch block logs analytics failure but does not block redirect. Click analytics is valuable, but user navigation is the primary path.
+
+Proof drill: hit a short URL twice. The first request should query PostgreSQL and populate Redis; the second should return from Redis while still publishing a click event.
+
 ---
 
 ## 6. HTTP REST Controller & Redirection

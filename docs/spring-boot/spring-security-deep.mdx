@@ -477,6 +477,27 @@ public class UserNoteController {
 }
 ```
 
+Line by line:
+
+- `@RequestMapping("/api/v1/users/{userId}/notes")` exposes `userId` in the path, which means it is client-controlled input.
+- `@PreAuthorize("hasRole('ADMIN') or #userId == authentication.principal.id")` checks the path user ID before the controller method runs.
+- `hasRole('ADMIN')` allows administrators through a separate role path.
+- `#userId` refers to the method argument named `userId`.
+- `authentication.principal.id` reads the authenticated user ID from the security context.
+- `noteService.getNote(userId, noteId)` must still scope the database query by both `userId` and `noteId`. Method security is not a replacement for ownership-scoped queries.
+- `@PostAuthorize(...)` checks the returned object after method execution. It is useful when ownership is not known until after loading, but it can still load data before denying access.
+
+Proof tests:
+
+```console
+User 7 requests /api/v1/users/7/notes/10 -> allowed if note belongs to 7.
+User 7 requests /api/v1/users/8/notes/10 -> 403 before service method runs.
+ADMIN requests /api/v1/users/8/notes/10 -> allowed.
+User 7 requests /api/v1/users/7/notes/999 owned by user 8 -> service/repository must still return 404 or 403.
+```
+
+Senior rule: route-level roles answer "is this kind of caller allowed here?" Ownership-scoped queries answer "is this exact caller allowed to touch this exact row?"
+
 ---
 
 ## 7. Failure Modes & Edge Case Matrix

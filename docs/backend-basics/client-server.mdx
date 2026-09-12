@@ -8,6 +8,66 @@ description: "Master networking fundamentals: OSI vs TCP/IP models, TCP 3-way ha
 In distributed computing, no backend exists in isolation.
 Every business interaction begins with an external **client** initiating a communication channel across public internet infrastructure to reach an authoritative **server**.
 
+The simplest version is this:
+
+```console
+Client: "Please create a note."
+Server: "I checked the rules, saved it, and here is the result."
+```
+
+The real version is more mechanical:
+
+```console
+Browser process -> operating system socket -> Wi-Fi/Ethernet frame -> router -> internet routing -> load balancer -> Spring Boot process -> controller -> service -> database
+```
+
+Those arrows matter because each one can fail differently. A broken DNS record is not the same as a rejected JWT. A refused TCP connection is not the same as a slow SQL query. A backend engineer must learn to locate the failure boundary.
+
+## Ground Floor: What "Client" And "Server" Really Mean
+
+A **client** is the side that starts the conversation.
+
+A **server** is the side that waits for conversations on a known address.
+
+That address has two important parts:
+
+```console
+localhost:8080
+```
+
+| Part | Meaning | Example failure |
+| :--- | :--- | :--- |
+| `localhost` | The host name. On your machine, it usually means `127.0.0.1`, which points back to the same computer. | If your backend runs inside Docker, `localhost` inside one container means that same container, not your database container. |
+| `8080` | The TCP port number. A process must bind to this port before it can receive requests there. | If Spring Boot is not running, the OS returns "connection refused" before Java controller code runs. |
+
+Run a Spring Boot app locally and the physical picture looks like this:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Browser as Browser Process
+    participant OS as Client OS
+    participant Kernel as Server Linux Kernel
+    participant Tomcat as Spring Boot/Tomcat
+
+    Browser->>OS: Open TCP connection to localhost:8080
+    OS->>Kernel: SYN packet to 127.0.0.1:8080
+    Kernel->>Tomcat: A process is listening on port 8080
+    Tomcat-->>Kernel: Accept connection
+    Browser->>Tomcat: HTTP request bytes
+    Tomcat-->>Browser: HTTP response bytes
+```
+
+Line by line:
+
+- The browser does not call your controller directly. It asks the operating system to open a network connection.
+- The operating system uses TCP to create a reliable byte stream.
+- The server kernel checks whether any process is listening on port `8080`.
+- Tomcat accepts the socket and reads HTTP bytes from it.
+- Spring MVC later turns those bytes into a controller method call.
+
+That is why "my API is down" is too vague. It could mean DNS failed, the TCP connection failed, TLS failed, the reverse proxy rejected the request, Spring Security returned `401`, the controller threw `500`, or PostgreSQL timed out.
+
 Misunderstanding this fundamental physical boundary causes critical architecture flaws:
 - Hardcoding server IP addresses instead of leveraging DNS routing and Anycast load balancing.
 - Relying on stateful in-memory sessions (`HttpSession`) that break cloud autoscaling and failover.
@@ -47,6 +107,55 @@ graph LR
 2. **Thick Clients vs Thin Clients**:
    - **Thin Clients (Server-Side Rendering - SSR)**: The backend renders complete HTML markup (Thymeleaf, Next.js SSR) and streams it to the browser. The client has minimal compute logic. Ideal for public, content-heavy SEO websites.
    - **Thick Clients (Single Page Applications & Native Mobile)**: The client downloads compiled JavaScript or native Swift/Kotlin binaries and exchanges pure structured data (JSON/Protobuf) with the backend over REST or gRPC APIs. The client handles presentation, local animations, and navigation.
+
+### Request/Response Example With Every Important Piece
+
+```http
+GET /api/notes/42 HTTP/1.1
+Host: api.notes.local
+Authorization: Bearer eyJhbGciOiJSUzI1NiIsIn...
+Accept: application/json
+```
+
+What each line means:
+
+- `GET` says the client wants to read a resource. A correct `GET` should not create a payment, delete a row, or change inventory.
+- `/api/notes/42` is the path. Spring uses it to find a matching route such as `@GetMapping("/api/notes/{id}")`.
+- `HTTP/1.1` is the protocol version. It tells the server how to parse request syntax, headers, and connection behavior.
+- `Host: api.notes.local` tells the server which virtual host the client wants. This matters when one proxy or load balancer serves many domains.
+- `Authorization: Bearer ...` carries the access token. Spring Security reads this before the controller runs.
+- `Accept: application/json` tells the server the client prefers JSON back.
+
+Possible responses:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"id":42,"title":"Client-server notes"}
+```
+
+```http
+HTTP/1.1 401 Unauthorized
+Content-Type: application/problem+json
+
+{"title":"Unauthorized","status":401,"detail":"Missing or invalid token"}
+```
+
+```http
+HTTP/1.1 404 Not Found
+Content-Type: application/problem+json
+
+{"title":"Not Found","status":404,"detail":"Note 42 does not exist for this user"}
+```
+
+These are not cosmetic differences:
+
+- `200 OK` means the request reached the backend, authorization passed, the note existed, and the server returned it.
+- `401 Unauthorized` means identity failed. The backend does not yet know who the caller is.
+- `404 Not Found` can mean the row truly does not exist, or the backend intentionally hides another user's row to avoid leaking resource existence.
+
+That is backend precision: status codes tell the client which boundary failed.
 
 ---
 

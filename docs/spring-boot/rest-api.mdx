@@ -263,6 +263,34 @@ public class UserController {
 }
 ```
 
+### Controller Line-By-Line
+
+- `@RestController` combines `@Controller` and `@ResponseBody`, so return values are written to the HTTP response body instead of resolving a server-rendered view.
+- `@RequestMapping("/api/v1/users")` gives every method a shared URL prefix and version boundary.
+- `private final CreateUserUseCase createUserUseCase` depends on an application use case, not a database repository. The controller should not know persistence details.
+- `private final GetUserQuery getUserQuery` separates read behavior from write behavior.
+- The constructor makes both collaborators required at startup.
+- `@PostMapping` handles `POST /api/v1/users`.
+- `@Valid @RequestBody CreateUserRequest request` reads JSON, builds a DTO, and validates it before the method body continues.
+- `request.toCommand()` converts HTTP input into an application command. That prevents web annotations from leaking into domain code.
+- `ServletUriComponentsBuilder.fromCurrentRequest()` starts with the actual request URI, including scheme/host/path as seen by Spring.
+- `.path("/{id}")` appends the new resource ID placeholder.
+- `.buildAndExpand(response.id())` fills `{id}` with the server-generated ID.
+- `ResponseEntity.created(location).body(response)` returns `201 Created`, sets `Location`, and serializes the response body.
+- `@GetMapping("/{id}")` maps a path variable into `id`.
+- `ResponseEntity.ok(...)` returns `200 OK`.
+- `@DeleteMapping("/{id}")` maps delete intent to the HTTP method designed for deletion.
+- `ResponseEntity.noContent().build()` returns `204 No Content`, which is the clean response when deletion succeeds and there is no body to return.
+
+Proof tests:
+
+```console
+POST valid user -> 201 Created with Location header.
+POST invalid email -> 400 and service is not called.
+GET missing user -> documented 404.
+DELETE existing user -> 204 with empty body.
+```
+
 ### Controller Best Practices Matrix
 - **Never inject Repositories directly into Controllers**: Always route data operations through domain Use Cases or Service beans.
 - **Never return JPA Entities from Controllers**: Always map domain models to decoupled DTO records (`UserResponse`). Exposing entities leaks internal database columns, triggers lazy-loading crashes, and creates security vulnerabilities.

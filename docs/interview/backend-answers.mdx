@@ -14,6 +14,24 @@ Use the **Senior Answer Formula**:
 3. **Production War Story**: A concrete example from real systems (PostgreSQL, Java 21, Linux, or HTTP).
 </Tip>
 
+## Example: Turning A Thin Answer Into A Senior Answer
+
+Thin answer: "Indexes make queries faster."
+
+Senior answer:
+
+- **Definition**: An index is a separate data structure, commonly a B-Tree in PostgreSQL, that lets the database find rows without scanning every heap page.
+- **Mechanism**: PostgreSQL walks index pages from root to leaf, finds tuple pointers, then checks heap visibility under MVCC unless an index-only scan is possible.
+- **Example**:
+
+```sql
+CREATE INDEX idx_orders_user_created ON orders(user_id, created_at DESC);
+```
+
+- **Line reading**: `user_id` supports tenant filtering, `created_at DESC` supports newest-first ordering, and the column order matches `WHERE user_id = ? ORDER BY created_at DESC`.
+- **Trap**: adding an index on `created_at` alone does not help the scoped user query enough.
+- **Proof**: run `EXPLAIN (ANALYZE, BUFFERS)` and check for index scan, low buffers read, and no surprise sort.
+
 ---
 
 ## 0. Non-Negotiable Backend Fundamentals

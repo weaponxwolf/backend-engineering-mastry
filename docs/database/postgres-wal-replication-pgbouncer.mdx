@@ -59,11 +59,39 @@ SELECT slot_name,
 FROM pg_replication_slots;
 ```
 
+Line by line:
+
+- `slot_name` identifies the replica or logical decoder that asked PostgreSQL to retain WAL.
+- `active` tells you whether a client is currently connected to the slot.
+- `pg_current_wal_lsn()` returns the primary's current write position in the WAL stream.
+- `restart_lsn` is the oldest WAL position the slot still needs.
+- `pg_wal_lsn_diff(...)` calculates how many bytes of WAL are retained because of that slot.
+- `pg_size_pretty(...)` formats the byte count into human-readable units.
+
+What breaks:
+
+```console
+active = false
+retained_wal = 180 GB
+pg_wal filesystem = 95% full
+```
+
+That means the primary is keeping WAL for a disconnected replica or connector. If the disk reaches 100%, PostgreSQL may stop accepting writes.
+
 Set a maximum retained WAL policy:
 
 ```sql
 ALTER SYSTEM SET max_slot_wal_keep_size = '20GB';
 SELECT pg_reload_conf();
+```
+
+Proof task:
+
+```console
+Temporarily stop a test replica or logical connector.
+Watch retained_wal grow.
+Restart the replica and confirm retained_wal shrinks after replay catches up.
+Verify alerts trigger before disk usage reaches the danger zone.
 ```
 
 ## Crash 2: Read Replica Used For Fresh Reads
@@ -174,6 +202,15 @@ public final class DataSourceRoleContext {
     }
 }
 ```
+
+Line by line:
+
+- `ThreadLocal.withInitial(() -> PRIMARY)` makes primary the safe default. If routing context is missing, correctness wins over replica load balancing.
+- `useReplica()` marks the current request thread as eligible for stale reads.
+- `current()` is called by the routing datasource to pick primary or replica.
+- `clear()` removes the thread-local value after the request finishes.
+
+Critical failure mode: Tomcat reuses worker threads. If `clear()` is not called in a `finally` block, one user's replica-routing decision can leak into the next request handled by the same thread.
 
 ```java
 public class RoutingDataSource extends AbstractRoutingDataSource {

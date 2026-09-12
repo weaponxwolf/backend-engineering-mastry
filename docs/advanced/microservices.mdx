@@ -271,6 +271,22 @@ CREATE TABLE outbox_events (
 CREATE INDEX idx_outbox_unprocessed ON outbox_events(created_at);
 ```
 
+#### Schema line-by-line meaning
+
+- `id UUID PRIMARY KEY` gives every outbound event a stable identity. Consumers use this ID for deduplication because at-least-once delivery means the same event can arrive twice.
+- `DEFAULT gen_random_uuid()` lets PostgreSQL create the event ID inside the same physical transaction as the order write. The application does not need a second ID service just to publish an event.
+- `aggregate_type` names the domain object family, such as `Order` or `Payment`. It helps Debezium consumers route events without parsing the whole payload first.
+- `aggregate_id` stores the business entity ID. This is the value you usually use as the Kafka message key so all events for one order stay on the same partition.
+- `event_type` is the semantic action: `OrderCreated`, `OrderCancelled`, `PaymentCaptured`. Never force consumers to infer business meaning from table names alone.
+- `payload JSONB NOT NULL` stores the actual event document. `JSONB` lets PostgreSQL validate that the payload is valid JSON and allows emergency inspection with JSON operators.
+- `traceparent` carries the request trace across the async boundary. Without it, the original HTTP request and the later Kafka consumer look like unrelated incidents in tracing tools.
+- `created_at` is operational evidence. It supports lag queries like "how old is the oldest unpublished outbox row?"
+- `CREATE INDEX idx_outbox_unprocessed ON outbox_events(created_at)` makes polling workers read old events in order without scanning the entire table.
+
+<Warning>
+Do not delete outbox rows immediately after publish in high-volume systems. Prefer a `published_at` column plus retention cleanup, or let CDC read immutable append-only rows. Immediate deletes can erase audit evidence and make replay harder.
+</Warning>
+
 ### 3.2 Java Outbox Publisher Service
 
 ```java
@@ -332,6 +348,20 @@ public class OutboxEventPublisher {
     }
 }
 ```
+
+#### Service line-by-line reading
+
+- `@Service` makes the publisher a Spring bean so callers receive the proxied instance with transaction support.
+- `JdbcClient` writes the outbox row directly. That avoids accidentally loading a large entity graph just to insert a small event record.
+- `ObjectMapper` serializes the event using the same JSON rules your API and Kafka consumers expect.
+- `Tracer` extracts trace context so an async consumer can continue the story started by the original HTTP request.
+- `@Transactional` is the entire trick: the order table write and the outbox insert must commit or roll back together.
+- `UUID.randomUUID()` creates an event identity independent of the order ID. Retried publications of the same row keep the same event ID because the row already exists.
+- `objectMapper.writeValueAsString(event)` can fail if the event contains unsupported types. Wrapping the exception forces the transaction to roll back instead of saving the order without its event.
+- `:payload::jsonb` tells PostgreSQL to parse the string as JSONB. Invalid JSON fails at insert time, which is much safer than publishing malformed messages later.
+- `.update()` is the moment the SQL is sent to PostgreSQL. Until the outer transaction commits, Debezium should not publish the event as committed business truth.
+
+Proof test: save an order and deliberately throw an exception after `recordOrderCreated`. The order row and outbox row should both be absent. Then remove the exception and verify both rows commit with the same transaction timestamp window.
 
 ---
 

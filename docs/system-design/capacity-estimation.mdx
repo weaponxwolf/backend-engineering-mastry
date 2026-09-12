@@ -410,6 +410,28 @@ No origin backend cluster should ever attempt to serve 512 Gbps of static media.
   $$\text{With Redis Memory Overhead (1.35x)} = 800 \text{ GB} \times 1.35 \approx \mathbf{1.08\text{ TB RAM}}$$
 - Sizing the cluster: Deploy an AWS ElastiCache Redis cluster of **16 nodes with 68 GB RAM each** (`cache.r6g.2xlarge`).
 
+### Line-by-Line Capacity Reading: One Feature Estimate
+
+Capacity math becomes easier when every line has a unit:
+
+```python
+daily_likes = 50_000_000              # likes/day
+average_qps = daily_likes / 86_400    # 579 writes/sec
+peak_qps = average_qps * 5            # 2,895 writes/sec
+payload_bytes = 120                   # bytes/request
+peak_bandwidth_bits = peak_qps * payload_bytes * 8
+concurrent_requests = peak_qps * 0.080 # p95 latency = 80 ms, result = 232
+```
+
+- `daily_likes` is a product assumption, not an infrastructure fact. Say who gave you the number.
+- Dividing by `86,400` converts day traffic into average seconds. This hides peaks, so it is only the baseline.
+- `* 5` is the peak multiplier. Social apps, flash sales, and notification bursts may need much higher factors.
+- `payload_bytes` must include headers, JSON overhead, and metadata if you are sizing network links seriously.
+- `* 8` converts bytes to bits. Forgetting this creates an 8x bandwidth error.
+- `concurrent_requests = arrival_rate * latency` is Little's Law. This number tells you how many in-flight requests your workers, connection pools, and queues must tolerate.
+
+Proof drill: after launch, compare this estimate with real p95 latency, QPS, payload size, HikariCP active connections, and queue depth. The point of estimation is to create falsifiable starting numbers.
+
 ---
 
 ## Capacity Estimation Fundamentals Drill

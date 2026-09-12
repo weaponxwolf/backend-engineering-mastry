@@ -232,6 +232,17 @@ Execute the check and deduction in a single, atomic SQL statement:
 int deductStockSafely(@Param("productId") Long productId, @Param("quantity") int quantity);
 ```
 
+Line-by-line inventory proof:
+
+- `@Modifying` tells Spring Data this JPQL changes rows. Without it, Spring treats the query like a read query and fails.
+- `UPDATE Inventory i` targets the stock row directly in the database.
+- `SET i.stockQuantity = i.stockQuantity - :quantity` performs the decrement inside PostgreSQL while the row lock is held.
+- `WHERE i.productId = :productId` scopes the mutation to one product.
+- `AND i.stockQuantity >= :quantity` is the invariant. It prevents negative stock even when 500 requests arrive together.
+- The returned `int` is the number of rows changed. `1` means reserved; `0` means out of stock or missing product.
+
+Proof drill: seed stock `1`, fire 100 parallel checkout attempts, then assert exactly one returns success and final stock is `0`.
+
 Because PostgreSQL executes updates under a row-level `EXCLUSIVE` lock, only **one single thread** can successfully decrement the last item ($1 \ge 1 \rightarrow \text{Returns } 1$). The other 499 threads fail the `WHERE i.stockQuantity >= :quantity` condition ($0 \ge 1 \rightarrow \text{Returns } 0$) and receive an immediate `422 Unprocessable Entity ("Out of stock")`.
 
 ---

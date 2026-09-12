@@ -206,6 +206,28 @@ Prior to Spring Boot 3.1, developers had to manually wire dynamic container port
   </Tab>
 </Tabs>
 
+### `@ServiceConnection` Test Line-By-Line
+
+- `@SpringBootTest(webEnvironment = RANDOM_PORT)` boots the real Spring application on a random local port.
+- `@Testcontainers` integrates container lifecycle with JUnit.
+- `@Container` marks the PostgreSQL container as a managed test resource.
+- `static PostgreSQLContainer<?> postgres` starts one shared container for the test class.
+- `new PostgreSQLContainer<>("postgres:16-alpine")` pins the database engine family used by the test.
+- `.withDatabaseName(...)`, `.withUsername(...)`, and `.withPassword(...)` define isolated test credentials.
+- `@ServiceConnection` lets Spring Boot read the dynamic container URL, username, and password and wire the `DataSource`.
+- `@Autowired DataSource` is the same abstraction production code uses.
+- `try (Connection conn = dataSource.getConnection())` proves Spring can connect to the real container.
+- `getDatabaseProductName()` proves this is PostgreSQL, not H2 compatibility mode.
+
+Proof extension:
+
+```console
+Add a Flyway migration that uses a PostgreSQL-only feature.
+Run the test.
+If it passes, you have verified that migration against PostgreSQL syntax.
+Repeat the same migration against H2 and observe why H2 is not production evidence.
+```
+
 ---
 
 ## Multi-Container Shared Network Architecture

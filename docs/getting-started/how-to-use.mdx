@@ -26,6 +26,20 @@ Before using a code example, identify its scope:
 
 A chapter title such as “full build” is not proof that every code block compiles together. Check the [curriculum audit](/getting-started/curriculum-audit) for known limitations and verification status.
 
+## Read Every Example Like A Debugger
+
+When you see a code block, do not ask only "what does this do?" Ask five sharper questions:
+
+| Question | Example using `@Valid @RequestBody CreateTodoRequest request` |
+| --- | --- |
+| What does this line receive? | It receives JSON bytes from the HTTP request body after Jackson turns them into a Java record. |
+| What rule does it enforce? | `@Valid` triggers Bean Validation before the controller calls the service. |
+| What breaks without it? | Bad input can reach business logic or the database, producing late failures or invalid rows. |
+| How do I prove it? | Send a blank title and verify the API returns `400` and creates no row. |
+| Which deeper chapter owns it? | [Validation and Errors](/spring-boot/validation-errors), [REST APIs](/spring-boot/rest-api), and [Testing](/production/testing). |
+
+Use that pattern for SQL, YAML, Dockerfiles, Kubernetes manifests, security config, and diagrams. A line is not understood until you know the input it accepts, the rule it protects, the failure it prevents, and the proof that shows it works.
+
 ## Use each chapter in two passes
 
 On the first pass, find the problem, run the smallest example, and complete one exercise. Write down unfamiliar terms that block the exercise. Look up those terms immediately.
@@ -65,5 +79,20 @@ Then close the solution and solve a changed version. For example, after implemen
 | You understand the prose but cannot build | Return to a smaller exercise and change one input or rule. |
 
 Keep your own error log. Record what you expected, what happened, how you investigated, and what fixed it. Reproduce a previous failure without reading your notes during later reviews.
+
+## Example Error Log Entry
+
+```console
+Behavior: reject blank Todo title
+Prediction: POST /api/todos with {"title":"   "} returns 400 and inserts no row
+Command: mvn -f examples/todo-api/pom.xml test
+Failure: update endpoint rejected blanks, create endpoint accepted blanks
+Cause: @NotBlank was applied to UpdateTodoRequest but missing from CreateTodoRequest
+Fix: add @NotBlank to create request title and add MVC test
+Proof: old test fails before fix; both create/update blank-title tests pass after fix
+Remaining question: should title length count Unicode code points or Java UTF-16 chars?
+```
+
+This is stronger than "I studied validation" because it ties a requirement to an observable failure and a regression test.
 
 Continue with the [first program](/getting-started/first-program), [roadmap](/getting-started/backend-roadmap), or [mastery evidence plan](/getting-started/mastery-plan).

@@ -403,6 +403,19 @@ public interface InventoryRepository extends JpaRepository<InventoryEntity, Long
 }
 ```
 
+Line-by-line reservation reading:
+
+- `JpaRepository<InventoryEntity, Long>` gives normal CRUD, but this method deliberately bypasses load-mutate-save for the hot stock path.
+- `@Modifying` marks the query as a write operation.
+- `UPDATE InventoryEntity i` changes the row directly in PostgreSQL.
+- `availableQuantity = availableQuantity - :quantity` keeps the read and write inside one SQL statement.
+- `version = version + 1` leaves evidence that the row changed and can support optimistic-lock aware readers.
+- `WHERE i.productId = :productId` chooses the product.
+- `AND i.availableQuantity >= :quantity` prevents overselling.
+- `int reserveStock(...)` returns a decision: `1` means continue checkout; `0` means reject with an out-of-stock response.
+
+Proof drill: run the Testcontainers concurrency test with stock `5` and 100 buyer threads. The only acceptable results are 5 successful orders, 95 rejected attempts, and final available quantity `0`.
+
 ---
 
 ## 6. The Production Checkout Service (`OrderService`)

@@ -294,6 +294,26 @@ public class VectorClock {
 }
 ```
 
+Line-by-line vector clock reading:
+
+- `clockMap` stores one logical counter per node or region that has written this key.
+- `increment(nodeId)` is called only by the node accepting a new write. It copies the old map, increments that node's counter, and returns a new clock so previous versions remain inspectable.
+- `getOrDefault(node, 0L)` treats missing nodes as "this version has seen zero writes from that node."
+- `hasGreater` means this clock has at least one node counter ahead of the other version.
+- `hasLesser` means this clock is behind in at least one node counter.
+- `hasGreater && hasLesser` means neither version causally contains the other. They are concurrent siblings, not older/newer versions.
+- `merge(...)` takes pairwise maximums after the application resolves sibling values. The merged clock records that the new value has observed both histories.
+
+```json
+{
+  "cartId": "cart-42",
+  "items": ["sku-1", "sku-9"],
+  "vectorClock": {"us-east-1": 7, "eu-west-1": 3}
+}
+```
+
+Proof drill: write `cart-42` in two isolated regions during a network partition, heal the partition, and verify the store returns siblings instead of blindly overwriting one customer's item.
+
 ---
 
 ### Pillar 5: Anti-Entropy with Merkle Trees

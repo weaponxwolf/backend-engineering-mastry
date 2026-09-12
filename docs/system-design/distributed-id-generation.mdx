@@ -343,6 +343,24 @@ If your architecture exposes public resource IDs across external REST APIs and r
 | **Index Footprint (10M rows)** | ~890 MB | ~320 MB | **160 MB (5.5x smaller!)** |
 | **Network Coordination** | None (Local RNG) | None (Local RNG + Time) | Requires Worker ID allocation (etcd/Redis) |
 
+### Line-by-Line ID Reading: Decode A Snowflake
+
+A Snowflake ID is not a random number. It is a packed record:
+
+```java
+long timestampMillis = (id >> 22) + CUSTOM_EPOCH;
+long workerId = (id >> 12) & 0x3FF;
+long sequence = id & 0xFFF;
+```
+
+- `id >> 22` drops the lower 22 bits: 10 worker bits plus 12 sequence bits. What remains is the timestamp delta.
+- `+ CUSTOM_EPOCH` converts the compact delta back into a real wall-clock millisecond.
+- `(id >> 12) & 0x3FF` first removes the sequence bits, then masks `0x3FF` to keep exactly 10 worker bits.
+- `id & 0xFFF` keeps the lowest 12 bits, which is the per-millisecond sequence number.
+- If `sequence` reaches `4095` inside the same millisecond, the generator must wait for the next millisecond or fail fast.
+
+Proof drill: generate 100,000 IDs on one worker, decode them, and assert timestamps never go backwards and sequence resets when the timestamp increments.
+
 ---
 
 ## ID Generation Fundamentals Drill

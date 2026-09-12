@@ -182,6 +182,56 @@ public class OrderService {
 3. In another place, a promotion service updated stock directly without validation.
 4. Total stock fell below zero (`stockAvailable = -42`), resulting in overselling 42 high-value laptops during Black Friday.
 
+#### Production Fix: Put The Invariant Inside The Object
+
+```java
+public class ProductInventory {
+    private int stockAvailable;
+    private int reservedStock;
+
+    public void reserve(int quantity) {
+        if (quantity <= 0) {
+            throw new IllegalArgumentException("Quantity must be positive");
+        }
+        if (stockAvailable < quantity) {
+            throw new InsufficientInventoryException(stockAvailable, quantity);
+        }
+        stockAvailable -= quantity;
+        reservedStock += quantity;
+    }
+
+    public int stockAvailable() {
+        return stockAvailable;
+    }
+
+    public int reservedStock() {
+        return reservedStock;
+    }
+}
+```
+
+Line by line:
+
+- `private int stockAvailable` prevents outside code from changing stock without using the domain method.
+- `private int reservedStock` protects the second half of the invariant. Available and reserved stock must move together.
+- `reserve(int quantity)` names the business action. Callers do not say "set available"; they say "reserve."
+- `quantity <= 0` rejects impossible commands before mutating state.
+- `stockAvailable < quantity` checks the invariant at the point where the state transition happens.
+- `stockAvailable -= quantity` and `reservedStock += quantity` happen together in the same method, so one cannot be forgotten by another service.
+- The read methods expose state without exposing setters.
+
+Proof test:
+
+```console
+Given stockAvailable=3 and reservedStock=0
+When reserve(2)
+Then stockAvailable=1 and reservedStock=2
+When reserve(2) again
+Then InsufficientInventoryException is thrown and both values remain unchanged
+```
+
+This does not replace database-level concurrency protection. It protects the in-memory domain transition. Under concurrent HTTP requests, you still need a transaction, row lock, optimistic version, or atomic SQL update.
+
 ---
 
 ### Crash Scenario 3: The Liskov Substitution Runtime Crash in Batch Jobs

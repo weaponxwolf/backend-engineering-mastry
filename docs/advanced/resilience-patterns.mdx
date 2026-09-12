@@ -300,6 +300,25 @@ management:
       enabled: true
 ```
 
+### Configuration line-by-line reading
+
+- `register-health-indicator: true` exposes circuit breaker state through Actuator health so operators can see degraded dependencies without reading logs.
+- `sliding-window-type: COUNT_BASED` means the breaker evaluates the last N calls, not a wall-clock interval. This is easier to reason about in low-traffic services.
+- `sliding-window-size: 50` defines the sample window. Too small trips on noise; too large reacts slowly.
+- `minimum-number-of-calls: 20` prevents the breaker from opening after one unlucky failure at startup.
+- `failure-rate-threshold: 50.0` opens the breaker when at least half of measured calls fail.
+- `slow-call-rate-threshold` and `slow-call-duration-threshold` catch brownouts where calls technically succeed but consume threads long enough to break upstream services.
+- `wait-duration-in-open-state: 15000ms` gives the downstream time to recover before test traffic is allowed again.
+- `permitted-number-of-calls-in-half-open-state: 10` controls the recovery sample size. One success should not close a breaker for a payment provider.
+- `record-exceptions` should contain infrastructure failures: timeouts, refused connections, and 5xx responses.
+- `ignore-exceptions` should contain business outcomes: validation failure, not found, insufficient funds. Counting these as outages corrupts breaker math.
+- `max-attempts: 3` means original attempt plus two retries. In a call graph, this number multiplies quickly.
+- `enable-randomized-wait: true` spreads retries so thousands of callers do not hammer the dependency at the same millisecond.
+- `max-concurrent-calls: 30` is a bulkhead capacity budget. It protects the host from letting one dependency consume all request threads.
+- `timeout-duration: 3000ms` is the maximum patience for this dependency. It must be shorter than the caller's total HTTP timeout.
+
+Proof drill: use WireMock or Toxiproxy to add 4 seconds of latency. The expected chain is timeout, recorded slow/failure call, circuit breaker opens, fallback executes, and Actuator reports the state transition.
+
 ---
 
 ## Production Java Implementation: Resilient Payment Service

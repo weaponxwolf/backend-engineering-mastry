@@ -316,6 +316,23 @@ sequenceDiagram
     end
 ```
 
+Line-by-line autocomplete ranking:
+
+```bash
+ZINCRBY autocomplete:prefix:tok 1 "tokyo earthquake"
+ZREVRANGE autocomplete:prefix:tok 0 4 WITHSCORES
+```
+
+- `autocomplete:prefix:tok` stores candidates for the prefix `tok`. In production you normalize case, accents, punctuation, and whitespace before choosing the prefix.
+- `ZINCRBY ... 1` increments popularity when the user searches, clicks, or purchases. The event source changes the meaning of the score.
+- `"tokyo earthquake"` is the suggestion text. Store a stable query or entity ID too if display text can be renamed.
+- `ZREVRANGE ... 0 4` returns the top 5 candidates by score, highest first.
+- `WITHSCORES` gives operators proof of why a suggestion appeared.
+
+What breaks without guardrails: one bot can repeatedly search a nonsense phrase and poison suggestions. Production systems decay scores over time, rate-limit updates, and blend popularity with business filters.
+
+Proof drill: replay 10,000 search events, then assert the expected top 5 suggestions for `tok` and verify one abusive user cannot dominate the list alone.
+
 ---
 
 ## Search & Autocomplete Fundamentals Drill

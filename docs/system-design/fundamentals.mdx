@@ -327,6 +327,23 @@ public long getCelebrityLikeCount(String celebrityId, int saltBuckets) {
 }
 ```
 
+### Line-by-Line Design Reading: Consistent Hash Lookup
+
+When you present consistent hashing, do not only draw the ring. Explain the lookup line by line:
+
+```java
+long keyHash = murmur3_128(key);
+Map.Entry<Long, Server> entry = ring.ceilingEntry(keyHash);
+Server owner = entry != null ? entry.getValue() : ring.firstEntry().getValue();
+```
+
+- `murmur3_128(key)` turns an uneven business key like `user:42` into a uniformly distributed number. Without hashing, numeric or alphabetical patterns can overload one shard.
+- `ring.ceilingEntry(keyHash)` asks: "Which virtual node is the first clockwise owner at or after this key position?"
+- `entry != null ? ... : ...` handles ring wraparound. If the key lands after the largest vnode, ownership wraps to the first vnode at the beginning of the ring.
+- `entry.getValue()` returns the physical server behind that virtual node. Many virtual nodes point to the same physical server to smooth distribution.
+
+Proof drill: build a ring with 3 servers and 200 virtual nodes each, hash 1,000,000 keys, then remove one server. A healthy implementation moves roughly one-third of keys, not all keys.
+
 ---
 
 ## System Design Fundamentals Interview Map

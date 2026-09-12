@@ -129,6 +129,44 @@ sequenceDiagram
 
 ---
 
+#### Production Fix: Fetch Exactly The Shape The API Needs
+
+```java
+public interface PostRepository extends JpaRepository<Post, Long> {
+
+    @Query("""
+        select new com.example.PostSummaryDto(p.id, p.title, a.name)
+        from Post p
+        join p.author a
+        order by p.createdAt desc
+        limit 100
+        """)
+    List<PostSummaryDto> findRecentPostSummaries();
+}
+```
+
+Line by line:
+
+- `select new ... PostSummaryDto(...)` tells Hibernate to build DTOs directly instead of managed `Post` entities.
+- `p.id, p.title, a.name` fetches only fields the API needs.
+- `join p.author a` loads the author name in the same SQL query instead of lazily querying per post.
+- `order by p.createdAt desc` preserves the dashboard ordering.
+- `limit 100` caps response size at the database boundary.
+- `List<PostSummaryDto>` makes accidental lazy loading impossible because DTOs do not have JPA proxies.
+
+Proof task:
+
+```console
+Enable Hibernate SQL logging or a query-count test.
+Call the old endpoint with 100 posts: observe 101 queries.
+Call the DTO projection endpoint: observe 1 query.
+Verify response JSON is unchanged for the client.
+```
+
+Senior phrasing: "For read endpoints, I prefer DTO projections when I do not need managed entity state. It avoids N+1, reduces heap pressure, and prevents accidental lazy loading during JSON serialization."
+
+---
+
 ### Catastrophe 2: The "Vanishing Entity" HashSet Bug
 
 A developer creates a `Note` entity and overrides `equals()` and `hashCode()` using the database `id`:

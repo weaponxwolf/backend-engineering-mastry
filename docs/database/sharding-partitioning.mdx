@@ -134,6 +134,39 @@ public class NaiveShardResolver {
 }
 ```
 
+Line by line:
+
+- `totalShards = 8` fixes the cluster size into the resolver. Adding or removing shards changes the modulo result for many tenants.
+- `tenantId.hashCode()` produces a deterministic integer from the tenant string.
+- `Math.abs(...)` tries to avoid negative shard indexes, but `Math.abs(Integer.MIN_VALUE)` is still negative because of integer overflow.
+- `% totalShards` maps the hash into a shard number from 0 to 7.
+
+What breaks:
+
+```console
+If totalShards changes from 8 to 9,
+most tenantId % shardCount results change,
+so the app starts looking for existing tenants on the wrong shard.
+```
+
+Safer direction:
+
+```console
+Use a shard mapping table or consistent hash ring.
+Keep tenant -> shard assignment stable.
+Move tenants deliberately with a migration plan.
+Treat hot tenants as placement decisions, not random hash accidents.
+```
+
+Proof task:
+
+```console
+Hash 10,000 tenant IDs with 8 shards.
+Hash the same IDs with 9 shards.
+Count how many move.
+Then compare with a consistent hash ring using virtual nodes.
+```
+
 #### What Happened in Production:
 - 99% of tenants are small businesses generating 5 orders per day.
 - Tenant `"enterprise-mega-corp"` signs up and is routed to **Shard 4**. They generate **15,000 orders per minute**.
@@ -164,6 +197,20 @@ CREATE TABLE ledger_2026_12 PARTITION OF transaction_ledger
     FOR VALUES FROM ('2026-12-01 00:00:00+00') TO ('2027-01-01 00:00:00+00');
 -- Developer forgot to create the 2027_01 partition!
 ```
+
+Minimum defensive default:
+
+```sql
+CREATE TABLE transaction_ledger_default
+PARTITION OF transaction_ledger DEFAULT;
+```
+
+Why this matters:
+
+- `DEFAULT` catches rows that do not match any explicit partition.
+- It prevents a total write outage when the next time-range partition is missing.
+- It is not a substitute for creating future partitions. It is an emergency catch net.
+- Monitoring must alert if rows appear in the default partition, because that means partition maintenance failed.
 
 #### What Happened in Production:
 - At precisely `2027-01-01 00:00:00 UTC`, the first transaction of the new year arrived.

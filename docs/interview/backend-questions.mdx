@@ -11,6 +11,24 @@ Senior and Staff interviewers do not ask trivia. They ask **foundational questio
 Looking for complete, production-tested answers, memory diagrams, and code for every question below? Review [Backend Interview Answers](/interview/backend-answers).
 </Tip>
 
+## How To Answer Every Backend Question
+
+For each question, force yourself to answer in this order:
+
+1. **Definition**: one plain-English sentence.
+2. **Mechanism**: what the OS, JVM, framework, or database physically does.
+3. **Example**: a concrete HTTP request, Java method, SQL query, log line, or failure scenario.
+4. **Trap**: the beginner mistake that breaks production.
+5. **Proof**: the test, metric, command, or query that proves your fix.
+
+Example for "What is a socket?":
+
+- Definition: a socket is one endpoint of a network conversation.
+- Mechanism: Linux tracks local IP, local port, remote IP, remote port, protocol, buffers, and connection state.
+- Example: one browser connection to `api.example.com:443` creates a TCP socket accepted by the server.
+- Trap: confusing a port with a socket; many sockets can connect to one listening port.
+- Proof: `ss -tanp` shows established connections and the owning process.
+
 ---
 
 ## 0. Non-Negotiable Backend Fundamentals

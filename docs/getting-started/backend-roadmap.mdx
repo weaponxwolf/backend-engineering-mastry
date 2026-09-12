@@ -40,6 +40,23 @@ Use the [mastery assessments](/getting-started/mastery-assessments) to check you
 
 **Pass evidence:** source file, successful command output, one invalid-input example, and an explanation of the rule. Use [assessment 0](/getting-started/mastery-assessments#assessment-0-change-a-java-business-rule).
 
+**Deep example:** do not only say "the program validates quantity." Explain the path:
+
+```console
+Input value -> method parameter -> if condition -> exception or multiplication -> printed result
+```
+
+Then prove both branches:
+
+- `quantity = 3` reaches multiplication and prints `7500`.
+- `quantity = 0` reaches the exception and never prints an order total.
+
+This is the same mental model as an API later:
+
+```console
+HTTP JSON -> request DTO -> validation -> service rule -> database write or error response
+```
+
 ## Stage 1: Java and HTTP foundations
 
 **Build:** an in-memory task list in plain Java. Explain how a client would create and read one task over HTTP.
@@ -52,6 +69,21 @@ Use the [mastery assessments](/getting-started/mastery-assessments) to check you
 **Learn now:** create/read/update/delete operations, missing items, duplicate identifiers, JSON, and HTTP success/error responses. An identifier is a value used to find a particular item.
 
 **Pass evidence:** the Java foundations lab passes; you can add a new case and describe a request and response without framework annotations. Use [assessment 1](/getting-started/mastery-assessments#assessment-1-explain-a-request-and-find-a-failure).
+
+**Deep example:** when you describe `POST /api/tasks`, include every boundary:
+
+```http
+POST /api/tasks HTTP/1.1
+Content-Type: application/json
+
+{"title":"Learn maps"}
+```
+
+- `POST` means create or trigger a state-changing command.
+- `/api/tasks` names the collection.
+- `Content-Type` tells the server how to parse the body.
+- The JSON title is untrusted input.
+- The response status should prove whether creation happened, failed validation, or hit a duplicate ID.
 
 ## Stage 2: build your first Spring API
 
@@ -68,6 +100,14 @@ Use the [mastery assessments](/getting-started/mastery-assessments) to check you
 **Return later:** hexagonal architecture, advanced query tuning, streaming responses, and distributed deployment. A single working request path is the first target.
 
 **Pass evidence:** create, read, and update tests; a blank title is rejected; an unknown ID returns the documented error; the application starts from a clean checkout. Use [assessment 2](/getting-started/mastery-assessments#assessment-2-build-and-test-a-todo-api).
+
+**Deep example:** for one endpoint, trace the full line:
+
+```console
+curl request -> controller annotation -> request DTO -> service method -> repository call -> database row -> response DTO -> status code
+```
+
+If you cannot point to the file and test for each arrow, you have read the topic but not mastered the path.
 
 ## Stage 3: persistent data and secure access
 

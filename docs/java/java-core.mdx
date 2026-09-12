@@ -161,6 +161,26 @@ public String exportOrderAuditLog(List<AuditRecord> records) {
 }
 ```
 
+#### Line-By-Line Fix Explanation
+
+- `StringBuilder sb = new StringBuilder(records.size() * 60)` creates one mutable character buffer and estimates its needed size. The estimate prevents repeated internal array resizing as rows are appended.
+- `records.size() * 60` is not a universal truth. It is a local assumption: roughly 60 characters per CSV row. If rows are much larger, measure and adjust.
+- `sb.append("ID,ACTION,TIMESTAMP\n")` writes the header once into the same buffer.
+- Each chained `.append(...)` call mutates the existing buffer instead of allocating a new `String` on every loop iteration.
+- `append(',')` and `append('\n')` append single characters without creating extra string literals at runtime.
+- `return sb.toString()` creates the final immutable `String` once, after all content is complete.
+
+Proof task:
+
+```console
+Generate 100,000 fake records.
+Run the naive version and the StringBuilder version with GC logging enabled.
+Compare allocation rate, GC count, and elapsed time.
+Then explain why the StringBuilder version still may not be enough for a 5GB export.
+```
+
+Senior production note: for very large exports, even `StringBuilder` is not ideal because it still builds the entire CSV in heap memory. Stream rows directly to the HTTP response, S3 object, or file output when the result can exceed safe heap limits.
+
 ---
 
 ### Crash Scenario 2: Autoboxing in High-Frequency Accounting Loops

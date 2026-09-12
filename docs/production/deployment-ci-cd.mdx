@@ -195,6 +195,13 @@ spring:
     timeout-per-shutdown-phase: 30s # Grants active requests up to 30s to finish
 ```
 
+Line by line:
+
+- `server.shutdown: graceful` tells Spring Boot to stop accepting new requests but allow active requests to finish.
+- `timeout-per-shutdown-phase: 30s` caps how long Spring waits for in-flight work during each lifecycle phase.
+- This setting protects HTTP request handling; it does not magically finish background jobs unless those beans participate in lifecycle shutdown correctly.
+- The timeout must be shorter than Kubernetes `terminationGracePeriodSeconds` after accounting for `preStop`.
+
 #### Step 2: Kubernetes Graceful Teardown Manifest (`deployment.yml`)
 
 ```yaml
@@ -235,6 +242,28 @@ spec:
             port: 8080
           initialDelaySeconds: 30
           periodSeconds: 10
+```
+
+Manifest line by line:
+
+- `replicas: 6` gives spare capacity during rolling updates.
+- `maxSurge: 25%` creates new pods before removing old pods.
+- `maxUnavailable: 0` keeps full old capacity until replacements are ready.
+- `terminationGracePeriodSeconds: 60` gives the pod enough time for `preStop` plus Spring graceful shutdown.
+- `image: ...:v2.4.1` uses an immutable version tag instead of `latest`.
+- `preStop sleep 15` keeps the app alive while EndpointSlice and ingress routing updates propagate.
+- `readinessProbe` decides whether the pod should receive traffic.
+- `livenessProbe` decides whether Kubernetes should restart a stuck process.
+- Readiness should fail when the app cannot serve safely; liveness should not fail just because the database is temporarily down.
+
+Proof drill:
+
+```console
+Start a long 20-second request.
+Trigger a rollout.
+Verify the request completes successfully.
+Verify new requests stop routing to the terminating pod after readiness/endpoint removal.
+Verify no 502 spike appears during the rollout.
 ```
 
 > [!IMPORTANT]

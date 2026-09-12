@@ -181,6 +181,29 @@ public class ProductCacheService {
 }
 ```
 
+Line by line:
+
+- `cacheKey = "product:v1:" + productId` namespaces the key and includes a version so future schema changes can use `product:v2`.
+- `redisTemplate.opsForValue().get(cacheKey)` is the fast path. It should return before any lock or database work.
+- `redissonClient.getLock("lock:" + cacheKey)` creates one distributed lock per cached item, not one global lock for all products.
+- `tryLock(3, 5, TimeUnit.SECONDS)` waits at most 3 seconds and auto-releases after 5 seconds if the holder dies.
+- The second cache read after acquiring the lock is mandatory. Another thread may have already populated the key.
+- `findProductAsJson(productId)` is the expensive database fallback and should run once per stampede window.
+- Caching `""` for 30 seconds is negative caching. It protects the database from repeated misses for nonexistent IDs.
+- `600 + random(0..60)` adds TTL jitter so hot keys do not all expire at the same instant.
+- `finally { lock.unlock(); }` releases the lock on success and exceptions.
+- The fallback DB read after lock timeout is a safety valve, but under an outage it can still pressure the database. Monitor it.
+
+Proof test:
+
+```console
+Expire product:42.
+Launch 100 concurrent reads.
+Assert database repository was called once or a very small number of times.
+Assert all callers receive the same cached payload.
+Repeat with missing product ID and verify null sentinel prevents repeated DB hits.
+```
+
 ### 3.2 Cache Penetration
 An attacker maliciously requests millions of non-existent entity IDs (`GET /users/-99999` or random UUIDs). Because these records do not exist in the database, the cache never stores them, forcing every malicious request to hit PostgreSQL directly.
 

@@ -137,6 +137,28 @@ public class AsyncConfig {
 }
 ```
 
+Line by line:
+
+- `@Configuration` contributes the executor bean to Spring.
+- `@Bean(name = "taskExecutor")` defines the default async executor name Spring can use.
+- `setCorePoolSize(8)` keeps a baseline of worker threads alive.
+- `setMaxPoolSize(16)` limits burst concurrency so async work cannot create unlimited threads.
+- `setQueueCapacity(500)` bounds memory used by queued tasks.
+- `setThreadNamePrefix("async-exec-")` makes thread dumps searchable.
+- `setTaskDecorator(new MdcTaskDecorator())` copies MDC from request thread to worker thread.
+- `MDC.getCopyOfContextMap()` snapshots the caller's logging context before thread handoff.
+- `MDC.setContextMap(contextMap)` restores it in the worker thread.
+- `MDC.clear()` prevents correlation IDs from leaking into the next task on the same pooled thread.
+
+Proof task:
+
+```console
+Set requestId in a servlet filter.
+Call an @Async method that logs once.
+Verify the async log line contains the same requestId.
+Remove the TaskDecorator and verify the requestId disappears.
+```
+
 ---
 
 ## Structured JSON Logging for Log Aggregators (ELK / Loki)

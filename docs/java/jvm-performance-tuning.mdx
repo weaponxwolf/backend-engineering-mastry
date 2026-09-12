@@ -171,6 +171,57 @@ flowchart TD
 - The JVM Garbage Collector has no visibility into native memory pressure. Because no heap memory was exhausted, the JVM never triggered a full GC or invoked clean-up finalizers.
 - Native RSS (Resident Set Size) surpassed the Kubernetes container limit, triggering an immediate OS kernel `SIGKILL`.
 
+#### Production Fix: Release Reference-Counted Buffers On Every Path
+
+```java
+@Override
+public void channelRead(ChannelHandlerContext ctx, Object msg) {
+    if (!(msg instanceof ByteBuf byteBuf)) {
+        ctx.fireChannelRead(msg);
+        return;
+    }
+
+    boolean forwarded = false;
+    try {
+        int packetType = byteBuf.readInt();
+        if (packetType == 99) {
+            forwarded = true;
+            ctx.fireChannelRead(byteBuf);
+            return;
+        }
+        throw new IllegalArgumentException("Unsupported packet type: " + packetType);
+    } catch (Exception ex) {
+        ctx.fireExceptionCaught(ex);
+    } finally {
+        if (!forwarded) {
+            ReferenceCountUtil.release(byteBuf);
+        }
+    }
+}
+```
+
+Line by line:
+
+- `if (!(msg instanceof ByteBuf byteBuf))` forwards messages this handler does not own.
+- `boolean forwarded = false` records whether ownership was transferred downstream.
+- `byteBuf.readInt()` consumes bytes from the reference-counted off-heap buffer.
+- `forwarded = true` must happen before `ctx.fireChannelRead(byteBuf)` because the next handler now owns the buffer lifecycle.
+- `return` prevents the finally block from releasing a buffer that was intentionally forwarded.
+- `catch` reports the exception but does not swallow resource cleanup.
+- `finally` runs on success, validation failure, and exceptions.
+- `ReferenceCountUtil.release(byteBuf)` decrements the reference count so Netty can free native memory.
+
+Proof task:
+
+```console
+Enable Netty leak detection with -Dio.netty.leakDetection.level=paranoid in a local stress test.
+Send valid forwarded packets and invalid packets.
+Verify invalid packets do not produce leak reports.
+Watch process RSS with docker stats or ps and confirm native memory stabilizes.
+```
+
+Important caveat: `paranoid` leak detection is too expensive for normal production traffic. Use it for tests or controlled debugging, then run production with safer lower-overhead settings.
+
 ---
 
 ### Crash Scenario 3: The ThreadLocal Zombie Leak in Pooled Web Servers

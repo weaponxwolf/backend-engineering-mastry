@@ -245,6 +245,20 @@ SELECT
 FROM pg_stat_replication;
 ```
 
+Line-by-line DR reading:
+
+- `client_addr AS standby_ip` identifies the replica. During an incident, names and addresses must map clearly to regions.
+- `state` tells whether the standby is streaming, catching up, or disconnected.
+- `sync_state` tells whether this standby participates in synchronous commit. In async DR, it is usually not guaranteeing zero data loss.
+- `pg_current_wal_lsn()` is the primary's current WAL position.
+- `sent_lsn` is how far the primary has sent bytes to the standby.
+- `replay_lsn` is how far the standby has actually applied WAL into queryable data.
+- `send_lag_bytes` is network shipping lag.
+- `replay_lag_bytes` is the stronger user-facing danger: data sent but not yet replayed may not be visible after promotion.
+- `lag_megabytes` turns byte distance into an operator-readable number, but the business also needs time lag and order counts.
+
+Proof drill: stop cross-region replication for 2 minutes, create orders, then execute the failover runbook in staging. Record actual lost/replayed data and wall-clock recovery time; those are your tested RPO and RTO.
+
 ---
 
 ### 3.4 Conflict-Free Replicated Data Types (CRDTs)

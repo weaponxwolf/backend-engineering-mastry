@@ -258,6 +258,32 @@ public record AccountId(String value) {
     }
 }
 ```
+
+Line by line:
+
+- `public record Money(long cents, Currency currency)` creates a small immutable value object for a domain concept, not just two unrelated primitive values.
+- `long cents` stores minor units so the code avoids floating-point rounding errors such as `0.1 + 0.2`.
+- `Currency currency` prevents adding USD to EUR by accident.
+- The compact constructor runs every time `new Money(...)` is called.
+- `cents < 0` rejects a negative monetary value for use cases where this type represents a non-negative amount. If your domain needs refunds or ledger debits, model those as separate concepts instead of weakening this invariant.
+- `Objects.requireNonNull(currency, ...)` prevents a half-valid value object.
+- `ofUsd(long cents)` is a named factory for a common currency, but it still goes through the same constructor validation.
+- `add(Money other)` puts the currency-matching rule beside the arithmetic.
+- `return new Money(...)` preserves immutability: the existing value is not mutated; a new validated value is returned.
+- `AccountId(String value)` prevents raw string confusion. An account ID can no longer be accidentally passed where another domain ID type is expected.
+- `value.matches("^ACC-[0-9]{8}$")` makes the boundary explicit: `ACC-12345678` is valid; `12345678`, `acc-12345678`, and blank strings are not.
+
+Proof test:
+
+```console
+new Money(100, USD).add(new Money(50, USD)) returns 150 USD.
+new Money(100, USD).add(new Money(50, EUR)) throws.
+new Money(-1, USD) throws.
+new AccountId("ACC-12345678") succeeds.
+new AccountId("12345678") throws.
+```
+
+This is how Java types become backend safety equipment. They make illegal states harder to represent before Spring, JPA, or the database ever run.
 Now, signature swapping is **physically impossible**:
 ```java
 // COMPILE ERROR: Cannot pass AccountId where CustomerId is expected!

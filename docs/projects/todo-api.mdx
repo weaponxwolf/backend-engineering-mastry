@@ -171,6 +171,19 @@ curl -i -X DELETE http://localhost:8080/api/v1/todos/1
 curl -i -X GET http://localhost:8080/api/v1/todos/1
 ```
 
+### Curl line-by-line reading
+
+- `curl -i` prints response headers and body. You need headers to verify `Location`, `Content-Type`, and empty `204` responses.
+- `-X POST` chooses the HTTP method. The method is part of the contract; `POST /todos` creates, while `GET /todos` reads.
+- `-H "Content-Type: application/json"` tells Spring's `HttpMessageConverter` to parse the body as JSON.
+- `-d '{"title":"Implement Spring Security JWT"}'` is the request body. If `title` is missing or blank, validation should fail before service code mutates the database.
+- `PATCH /1/complete` is intentionally narrow. It changes only completion state, so clients cannot accidentally overwrite the title.
+- `PUT /1` is a full replacement. If your DTO omits `completed`, you must define whether that means `false`, unchanged, or invalid.
+- `DELETE /1` should return `204 No Content` with an empty body. A JSON message body on `204` is an HTTP contract smell.
+- The final `GET /1` proves deletion reached persistence, not only the in-memory response path.
+
+Proof habit: run the same curl suite after restarting the application. If data disappears unexpectedly, you tested an in-memory database or wiped the schema.
+
 ---
 
 ## 6. Acceptance Test Matrix

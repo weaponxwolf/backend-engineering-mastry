@@ -66,6 +66,36 @@ public class HelloBackend {
 
 In this exercise, one currency unit contains 100 cents. `2500` cents represents `25.00` units. We use whole cents so this calculation does not need fractional values. A real price model must also define the currency and rounding rules.
 
+### Read The Program Line By Line
+
+Do not treat the program as a block of magic. Read it as a tiny backend rule:
+
+| Line or block | What it does | Backend idea it introduces |
+| --- | --- | --- |
+| `public class HelloBackend` | Names the container for this program's methods. | A backend is also a named set of code loaded by the JVM. |
+| `lineTotal(int quantity, long unitPriceCents)` | Defines a reusable operation with two inputs. | A service method later does the same thing with request data and database data. |
+| `if (quantity <= 0)` | Rejects impossible business input. | Validation should happen before invalid state reaches storage. |
+| `throw new IllegalArgumentException(...)` | Stops execution and reports why the input is invalid. | A Spring API later maps this kind of failure to an HTTP error response. |
+| `if (unitPriceCents < 0)` | Rejects a negative price. | Money rules belong on the backend because clients can lie. |
+| `Math.multiplyExact(...)` | Multiplies and throws if the result overflows the number type. | Production code must prefer detectable failure over silent corruption. |
+| `main(String[] args)` | Gives the JVM a starting point. | Spring Boot also starts from `main`, then creates a web server. |
+| `System.out.println(...)` | Prints the observed result. | Later, tests, logs, HTTP responses, and database rows become your observations. |
+
+The important habit is: every line either accepts input, checks a rule, performs work, returns output, or reveals behavior. Backend code is the same pattern with more boundaries.
+
+### What Breaks If You Remove One Line?
+
+Try these changes one at a time:
+
+| Remove or change | Expected failure | Why that failure matters |
+| --- | --- | --- |
+| Remove the `quantity <= 0` check | `lineTotal(0, 2500)` returns `0` instead of rejecting the order | The program accepts a business action that should not exist. |
+| Replace `Math.multiplyExact` with `unitPriceCents * quantity` | Very large values can silently wrap around | Silent arithmetic corruption is worse than a loud exception. |
+| Remove `return` | Compilation fails | Java requires a method declared to return `long` to actually return a `long`. |
+| Rename the file to `helloBackend.java` | Compilation fails on case-sensitive systems | Java public class names and file names must match. |
+
+Each failure teaches a different boundary: business rule, arithmetic safety, compiler rule, or file-system rule.
+
 ## 3. Compile and run
 
 From `backend-first-program`, run:
@@ -84,6 +114,20 @@ The compiler should finish without printing an error. The second command should 
 `java -cp build HelloBackend` looks in `build` for the class to run and starts its `main` method. The command takes the class name without `.java` or `.class`.
 
 You have now executed one business rule. It has no HTTP endpoint and does not save an order or charge a payment.
+
+### Command Deconstruction
+
+| Command part | Meaning | What to check when it fails |
+| --- | --- | --- |
+| `javac` | Runs the Java compiler. | If missing, the JDK is not installed or not on `PATH`. |
+| `--release 21` | Compiles against Java 21 language/API rules. | If unsupported, your compiler is older than Java 21. |
+| `-d build` | Writes compiled `.class` files into the `build` directory. | If the directory is wrong, the later `java -cp build` command cannot find the class. |
+| `HelloBackend.java` | Source file to compile. | File name, current directory, and case must match. |
+| `java` | Starts the JVM runtime. | If compilation never succeeded, the runtime may execute an older class or fail. |
+| `-cp build` | Adds `build` to the classpath. | The classpath is where Java searches for compiled classes. |
+| `HelloBackend` | The class containing `main`. | Do not add `.java` or `.class`; Java wants the class name. |
+
+This is the first version of a build/run loop. Later, Maven, Docker, and Kubernetes do the same larger job: prepare files, start a process, and give you a way to observe whether the process worked.
 
 ## 4. Understand the pieces you used
 

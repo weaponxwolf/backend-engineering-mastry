@@ -130,6 +130,58 @@ flowchart TD
 5. Bucket `2` was empty. `remove()` returned `false`.
 6. The session was never removed from bucket `7`. Over weeks, thousands of orphaned sessions accumulated, leading to an **unrecoverable heap OutOfMemoryError**.
 
+#### Production Fix: Make Hash Identity Stable
+
+```java
+public final class UserSession {
+    private final String sessionId;
+    private String status;
+    private Instant lastAccessTime;
+
+    public UserSession(String sessionId, String status, Instant lastAccessTime) {
+        this.sessionId = Objects.requireNonNull(sessionId, "sessionId required");
+        this.status = Objects.requireNonNull(status, "status required");
+        this.lastAccessTime = Objects.requireNonNull(lastAccessTime, "lastAccessTime required");
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        return this == o || (o instanceof UserSession that
+                && this.sessionId.equals(that.sessionId));
+    }
+
+    @Override
+    public int hashCode() {
+        return sessionId.hashCode();
+    }
+
+    public void updateAccess(Instant now) {
+        this.lastAccessTime = Objects.requireNonNull(now, "now required");
+    }
+}
+```
+
+Line by line:
+
+- `final class` prevents subclasses from changing equality behavior unexpectedly.
+- `final String sessionId` makes the identity field impossible to reassign after construction.
+- `status` and `lastAccessTime` may still change, but they are deliberately excluded from `equals` and `hashCode`.
+- `Objects.requireNonNull(...)` prevents a broken key from entering the collection.
+- `equals(...)` compares only `sessionId`, the stable identity.
+- `hashCode()` uses only `sessionId`, so the bucket index remains stable even when access time changes.
+- `updateAccess(...)` mutates non-identity state safely because hash identity does not depend on it.
+
+Proof test:
+
+```console
+Add session to HashSet.
+Call updateAccess(now.plusSeconds(300)).
+Assert set.contains(session) is still true.
+Assert set.remove(session) is true.
+```
+
+Rule: if an object is used as a `HashMap` key or `HashSet` member, every field used in `equals` and `hashCode` must be stable while the object lives inside that collection.
+
 ---
 
 ### Crash Scenario 2: The `ConcurrentModificationException` Web Crash

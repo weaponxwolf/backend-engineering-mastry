@@ -85,6 +85,28 @@ com.example.store
 In the structure above, `com.example.store.payment` **cannot** inject or query `OrderRepository` directly because `OrderRepository` is package-private. The only way the payment module can interact with orders is through the public `OrderService` contract!
 </Tip>
 
+### Package Structure Line-By-Line
+
+- `order/` groups one business capability instead of scattering its controller, service, repository, and entity across global technical folders.
+- `OrderController.java (public)` is public because Spring MVC and external packages need to call it through HTTP routing.
+- `OrderService.java (public interface or package-private class)` is the application boundary. Other modules should depend on a narrow behavior contract, not internals.
+- `OrderServiceImpl.java (package-private)` hides implementation details so other packages cannot bypass rules.
+- `OrderRepository.java (package-private)` prevents other features from querying order tables directly.
+- `Order.java (package-private)` keeps JPA persistence shape away from controllers and other modules.
+- `CreateOrderRequest.java (public record)` is public because it is part of the HTTP API contract.
+- `OrderResponse.java (public record)` is public because controllers serialize it to clients.
+
+Proof task:
+
+```console
+Make OrderRepository package-private.
+Try injecting it from payment/.
+Compilation should fail.
+Then expose the exact needed behavior through OrderService.
+```
+
+That compile error is not friction. It is architecture enforcement.
+
 ---
 
 ## Hexagonal Architecture (Ports and Adapters) in Spring Boot
@@ -150,6 +172,14 @@ public interface CreateOrderUseCase {
     ) {}
 }
 ```
+
+Line by line:
+
+- `CreateOrderUseCase` names an inbound business capability, not a transport mechanism.
+- `OrderId createOrder(...)` returns a domain identifier instead of an HTTP response.
+- `CreateOrderCommand` carries the data needed by the use case.
+- `String customerId`, `String productId`, and `int quantity` are still simplified here; a stronger domain model would use typed IDs and value objects.
+- No Spring annotation appears in this interface. That keeps the application core testable without a web server.
 
 ### 2. Outbound Port (Driven SPI Interface)
 ```java

@@ -147,6 +147,31 @@ Planning Time: 0.350 ms
 Execution Time: 14.850 ms
 ```
 
+### Read This Plan Line By Line
+
+- `Hash Join` tells you PostgreSQL chose to build an in-memory hash table for one side of the join and probe it with the other side.
+- `cost=125.50..1420.30` is the planner's estimate before running the query. It is not milliseconds.
+- `actual time=1.210..14.350` is the measured runtime while executing. This is what users feel.
+- `rows=512` is estimated row count; `rows=480` is actual row count. Large mismatch means statistics may be stale or predicates are correlated in a way the planner does not understand.
+- `loops=1` means this node ran once. If a nested loop inner node shows `loops=100000`, a small-looking node can secretly dominate runtime.
+- `Buffers: shared hit=840 read=12` means most pages were already in PostgreSQL memory, but 12 pages required disk or OS cache reads.
+- `Index Scan using idx_orders_created` means the date predicate used an index, but the executor may still visit heap pages for columns not in the index.
+- `Buckets`, `Batches`, and `Memory Usage` describe the hash table. `Batches: 1` means it fit in memory; `Batches > 1` means disk spill risk.
+- `Planning Time` is optimizer time before execution.
+- `Execution Time` is end-to-end executor time for the query.
+
+Proof habit:
+
+```console
+Never tune from one EXPLAIN line.
+Compare estimated rows vs actual rows.
+Check loops.
+Check buffers.
+Check heap fetches.
+Check whether work spilled to disk.
+Then change one thing and re-run the same plan.
+```
+
 ### The Key Numbers Decoded:
 1. **`cost=125.50..1420.30`**:
    - `125.50`: **Startup Cost** (arbitrary cost units before returning the very first row).

@@ -158,6 +158,38 @@ ON orders(created_at)
 WHERE status = 'PENDING_PAYMENT';
 ```
 
+Line by line:
+
+- `CREATE INDEX idx_orders_pending` gives the index a name that explains the query it serves.
+- `ON orders(created_at)` sorts only matching rows by `created_at`, which is useful for "oldest pending payments first" jobs.
+- `WHERE status = 'PENDING_PAYMENT'` makes this a partial index. Rows with other statuses are not stored in the index at all.
+- The index is small because it covers only the active subset, so it is cheaper to keep in memory and cheaper to update.
+
+Matching query:
+
+```sql
+SELECT id, created_at
+FROM orders
+WHERE status = 'PENDING_PAYMENT'
+ORDER BY created_at
+LIMIT 100;
+```
+
+Why this works:
+
+- The `WHERE` clause matches the partial-index predicate.
+- The `ORDER BY created_at` matches the indexed column order.
+- `LIMIT 100` allows PostgreSQL to stop early after finding the first 100 matching index entries.
+
+Proof task:
+
+```console
+Run EXPLAIN (ANALYZE, BUFFERS) before creating the partial index.
+Create the index.
+Run the same EXPLAIN again.
+Confirm the plan switches away from scanning unrelated statuses.
+```
+
 ---
 
 ## Covering Indexes & Index-Only Scans (`INCLUDE`)

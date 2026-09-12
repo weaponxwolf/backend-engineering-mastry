@@ -180,6 +180,31 @@ ON orders (user_id, status)
 INCLUDE (total_amount, created_at);
 ```
 
+Line by line:
+
+- `CREATE INDEX CONCURRENTLY` avoids blocking normal reads and writes while the index is built. It takes longer than a normal index build but is safer for live systems.
+- `idx_orders_user_status_covering` names the query shape the index serves.
+- `ON orders (user_id, status)` makes `user_id` and `status` the searchable sorted key.
+- `INCLUDE (total_amount, created_at)` stores payload columns in leaf pages so PostgreSQL can answer the query without visiting heap pages.
+- `total_amount` and `created_at` are not useful for searching in this index; they are useful for returning the response cheaply.
+
+Matching query:
+
+```sql
+SELECT total_amount, created_at
+FROM orders
+WHERE user_id = 42
+  AND status = 'PAID';
+```
+
+Proof target:
+
+```console
+EXPLAIN should show Index Only Scan using idx_orders_user_status_covering.
+Heap Fetches should be 0 or close to 0 after VACUUM marks pages all-visible.
+Buffers should show mostly shared hits after warmup.
+```
+
 #### Anatomy of a Covering Index:
 - **Search Key (`user_id`, `status`)**: Sorted in the upper B-Tree branch and interior nodes. Used for $O(\log N)$ binary search.
 - **Payload (`INCLUDE (total_amount, created_at)`)**: Stored **only in the leaf nodes**. It is never evaluated during branch navigation, preventing B-Tree key size inflation and keeping the B-Tree shallow!

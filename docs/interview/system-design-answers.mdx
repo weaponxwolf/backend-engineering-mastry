@@ -16,6 +16,28 @@ Use the **Senior Design Formula**:
 5. **Trade-Offs**: Latency vs Consistency, Cost vs Complexity.
 </Tip>
 
+## Example: Capacity Answer With Units
+
+Thin answer: "We can scale horizontally."
+
+Senior answer:
+
+```python
+daily_orders = 2_000_000
+average_write_qps = daily_orders / 86_400      # 23 writes/sec
+peak_write_qps = average_write_qps * 10        # 230 writes/sec
+order_bytes = 2_048
+five_year_raw_storage = daily_orders * order_bytes * 365 * 5
+replicated_indexed_storage = five_year_raw_storage * 3 * 2
+```
+
+- `daily_orders` comes from product traffic assumptions.
+- `/ 86_400` converts daily work to average seconds.
+- `* 10` models peak traffic; the multiplier must be justified by product behavior.
+- `order_bytes` must include metadata, indexes, and audit records if the estimate is for disk planning.
+- `* 3 * 2` accounts for replication and index overhead.
+- The design consequence: 230 peak writes/sec does not require exotic storage, but flash-sale inventory still needs atomic row-level protection.
+
 ---
 
 ## 1. System Design Foundations & Capacity Estimation

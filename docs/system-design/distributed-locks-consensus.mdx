@@ -232,6 +232,16 @@ WHERE id = :resourceId
 ```
 If an outdated zombie process attempts to write with token `33` when the database has already seen token `34`, the database updates **0 rows**, completely neutralizing the race condition!
 
+Line-by-line fencing guard:
+
+- `UPDATE shared_resources` targets the real resource, not the lock record. The invariant must live beside the state being protected.
+- `SET payload = :newData` is the business mutation the lock holder wants to perform.
+- `last_fencing_token = :incomingToken` records the newest accepted owner.
+- `WHERE id = :resourceId` scopes the guard to one resource.
+- `AND last_fencing_token < :incomingToken` is the stale-owner defense. A paused process with token 33 cannot overwrite work already done by token 34.
+
+Proof drill: simulate worker A with token 33 pausing for 60 seconds, worker B with token 34 completing the update, then worker A resuming. Worker A's update count must be zero.
+
 ---
 
 ### 2. Complete Java Fencing Token Storage Guard Implementation

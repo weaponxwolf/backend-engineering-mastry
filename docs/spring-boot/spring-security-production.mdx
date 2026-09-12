@@ -102,6 +102,32 @@ public class SecurityConfig {
 
 Spring chooses the first matching chain. The auth chain's `permitAll()` allows access without an access token; it does **not** bypass its CSRF check. The roles converter above replaces default scope mapping; add a combined converter if the API also requires scopes.
 
+### Security Chain Line-By-Line
+
+- `@Configuration` makes this class contribute beans to the Spring application context.
+- `@EnableMethodSecurity` activates annotations such as `@PreAuthorize` on service methods.
+- `@Bean @Order(1)` registers the browser-auth filter chain first.
+- `securityMatcher("/api/auth/**")` limits that chain to auth routes.
+- `.csrf(csrf -> {})` keeps CSRF enabled for cookie-carrying browser flows.
+- `SessionCreationPolicy.IF_REQUIRED` allows a session when CSRF token storage needs it.
+- `permitAll()` means authentication is not required for login/register/refresh routes. It does not mean "skip all filters."
+- `@Bean @Order(2)` registers the general bearer-token API chain after the auth chain.
+- `.csrf(AbstractHttpConfigurer::disable)` is safe only if these routes never authenticate with cookies, sessions, or HTTP Basic.
+- `SessionCreationPolicy.STATELESS` prevents Spring Security from creating server-side login sessions for bearer API calls.
+- `.requestMatchers("/api/admin/**").hasRole("ADMIN")` enforces coarse route-level authorization.
+- `.anyRequest().authenticated()` requires a valid identity for everything else.
+- `.oauth2ResourceServer(...jwt...)` uses Spring's resource-server filter to validate bearer JWTs before controllers run.
+
+Proof tests:
+
+```console
+POST /api/auth/login without CSRF token -> 403.
+GET /actuator/health without token -> 200.
+GET /api/admin/users with USER role -> 403.
+GET /api/notes with no token -> 401.
+GET /api/notes with valid token -> reaches controller/service authorization.
+```
+
 ### Give the Browser a CSRF Token
 
 ```java

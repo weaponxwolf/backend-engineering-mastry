@@ -95,6 +95,20 @@ WHERE state != 'idle'
 ORDER BY duration DESC;
 ```
 
+Line-by-line incident reading:
+
+- `pid` is the process you can inspect, cancel, or terminate. Never act on a query without its PID.
+- `now() - query_start AS duration` shows how long the query has been running. Long duration plus lock wait is a stronger signal than duration alone.
+- `usename` tells which application or user owns the session.
+- `state` separates actively running queries from sessions that are just connected.
+- `wait_event_type` tells the broad category: `Lock`, `IO`, `Client`, or another subsystem.
+- `wait_event` gives the specific wait, such as `relation` for table lock conflict.
+- `query` is evidence, but it can contain sensitive data. Paste it carefully during incident comms.
+- `WHERE state != 'idle'` removes noise from sleeping sessions.
+- `ORDER BY duration DESC` puts the oldest pressure at the top so the team can find blockers quickly.
+
+Proof drill: run a long transaction in one session, attempt a blocking `ALTER TABLE` in another, then run this query. You should see the lock queue before web traffic times out.
+
 #### The Diagnostic Output
 ```console
   pid  |    duration    | state  | wait_event_type | wait_event | query

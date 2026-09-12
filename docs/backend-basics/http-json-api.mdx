@@ -100,6 +100,51 @@ Accept: application/json
 {"productId":"prod_991","quantity":2,"unitPrice":49.99}
 ```
 
+Read the request like a backend engineer, not like a copy-paste snippet:
+
+| Line | What it physically means | What Spring/backend behavior depends on it |
+| :--- | :--- | :--- |
+| `POST /api/v1/orders HTTP/1.1` | The request line: method, path, and protocol version. | `POST` says this is a state-changing command. `/api/v1/orders` must match a route such as `@PostMapping("/api/v1/orders")`. |
+| `Host: api.store.com` | The domain the client intended to reach. | Reverse proxies and API gateways use it to route many domains through the same IP address. |
+| `User-Agent: iOS/17.4 PaymentClient/2.1` | Client software identity. | Useful for debugging rollout bugs, mobile version incompatibilities, and suspicious traffic. Never use it as a security proof because clients can forge it. |
+| `Authorization: Bearer ...` | Access token proving caller identity, usually JWT or opaque token. | Spring Security reads this before the controller. If missing or invalid, the controller should not run. |
+| `Content-Type: application/json` | The body format. | Spring selects Jackson to deserialize the body into a Java DTO. Wrong value can produce `415 Unsupported Media Type`. |
+| `Content-Length: 54` | Number of body bytes that follow. | The server knows when the request body is complete. Wrong lengths can cause hanging reads or rejected requests. |
+| `Idempotency-Key: ...` | Client-generated unique key for one business attempt. | Lets the backend safely handle retries without charging twice or creating duplicate orders. |
+| `Accept: application/json` | The response format the client wants. | Spring content negotiation decides whether JSON is acceptable. |
+| Empty line | Header/body delimiter. | HTTP parsers require this boundary. Everything after it is body bytes. |
+| JSON body | Client intent. | The backend must validate it and load trusted price/state from the database. |
+
+The dangerous part is the body:
+
+```json
+{"productId":"prod_991","quantity":2,"unitPrice":49.99}
+```
+
+Line by line:
+
+- `productId` is client intent. The client is allowed to say which product it wants.
+- `quantity` is also client intent, but it must be validated. `0`, `-1`, or `999999999` should fail before business logic reserves stock.
+- `unitPrice` is suspicious. A production backend should not trust a price supplied by the client. The service should load the authoritative price from the database.
+
+Better request shape:
+
+```json
+{"productId":"prod_991","quantity":2}
+```
+
+Then the service does this:
+
+```console
+Client says: productId=prod_991, quantity=2
+Backend loads product prod_991 from database
+Backend reads current price from trusted row
+Backend checks inventory atomically
+Backend creates order with server-calculated total
+```
+
+That is the difference between an API that merely receives JSON and an API that protects business rules.
+
 ```http
 [Method] [Request-URI] [HTTP-Version] \r\n  <-- Request Line
 [Header-Name]: [Header-Value] \r\n          <-- Request Headers
@@ -122,6 +167,70 @@ Cache-Control: private, no-cache
 {"id":"ord_55219","status":"PENDING","totalAmount":99.98,"createdAt":"2026-09-10T15:30:00Z"}
 ```
 
+Response line by line:
+
+| Line | Meaning | Production reason |
+| :--- | :--- | :--- |
+| `HTTP/1.1 201 Created` | The request succeeded and created a resource. | Clients, gateways, logs, and tests can distinguish creation from normal `200 OK` reads. |
+| `Date: ...` | Server response timestamp. | Useful for cache validation, clock debugging, and HTTP intermediaries. |
+| `Content-Type: application/json; charset=UTF-8` | Body is JSON encoded as UTF-8. | Clients decode the body correctly. |
+| `Content-Length: 82` | Body length in bytes. | Helps clients know when the response body is complete, especially on persistent connections. |
+| `Location: /api/v1/orders/ord_55219` | Canonical URI for the new order. | A client can follow this URI to fetch the created resource. |
+| `ETag: W/"a8f12c-0912"` | Version/hash-like validator for the representation. | Enables conditional requests and optimistic cache revalidation. |
+| `Cache-Control: private, no-cache` | Browser may store privately but must revalidate before reuse. | Prevents shared proxies from caching user-specific order data. |
+| JSON body | Public response contract. | Should expose only safe fields, not internal database columns or security-sensitive data. |
+
+Body field explanation:
+
+- `id` is server-generated. The client should not choose order IDs unless the API explicitly supports client-generated IDs.
+- `status` tells the client the workflow state. `PENDING` means the order exists, but later payment or fulfillment steps may still happen.
+- `totalAmount` should be calculated by the backend from trusted product price, discounts, tax rules, and quantity.
+- `createdAt` is a server timestamp. It helps clients sort and audit without trusting device clocks.
+
+### Controller Mapping For This Request
+
+The HTTP request above usually maps to a Spring controller like this:
+
+```java
+@PostMapping("/api/v1/orders")
+ResponseEntity<OrderResponse> createOrder(
+        @RequestHeader("Idempotency-Key") String idempotencyKey,
+        @AuthenticationPrincipal AuthenticatedUser user,
+        @Valid @RequestBody CreateOrderRequest request) {
+    OrderResponse response = orderService.createOrder(user.id(), idempotencyKey, request);
+    URI location = URI.create("/api/v1/orders/" + response.id());
+    return ResponseEntity.created(location).body(response);
+}
+```
+
+Every line has a job:
+
+- `@PostMapping("/api/v1/orders")` binds the HTTP method and path to this Java method. A `GET` to the same path should not accidentally create an order.
+- `ResponseEntity<OrderResponse>` lets the method control status code, headers, and body instead of returning only JSON.
+- `@RequestHeader("Idempotency-Key")` reads the retry-safety key from the HTTP headers. If a mobile client times out and retries, the service can detect the same business attempt.
+- `@AuthenticationPrincipal AuthenticatedUser user` comes from Spring Security after token validation. This is safer than accepting `userId` in the JSON body.
+- `@Valid @RequestBody CreateOrderRequest request` tells Spring to deserialize JSON into a DTO and validate its annotations before the service runs.
+- `orderService.createOrder(...)` moves business logic out of the controller. The service should load trusted price, check stock, and write the order.
+- `URI.create(...)` builds the resource URI for the `Location` header.
+- `ResponseEntity.created(location).body(response)` returns `201 Created`, includes `Location`, and serializes `OrderResponse` as JSON.
+
+Common beginner bug:
+
+```java
+@PostMapping("/api/v1/orders")
+Order createOrder(@RequestBody Order order) {
+    return orderRepository.save(order);
+}
+```
+
+Why it is dangerous:
+
+- The API accepts a database entity directly, so the client may set fields it should never control.
+- There is no `@Valid`, so invalid data can reach the service or database.
+- There is no authenticated principal, so ownership may come from an untrusted request field.
+- There is no idempotency key, so retries can duplicate orders.
+- Returning `Order` leaks persistence shape and can trigger lazy-loading problems during JSON serialization.
+
 ---
 
 ## Method Semantics: Safety, Idempotency & Cacheability
@@ -143,6 +252,38 @@ HTTP methods are strictly categorized by formal RFC 9110 architectural propertie
 #### 1. Safe vs Unsafe
 An operation is **Safe** if it does not alter server state. Clients can call `GET` or `HEAD` repeatedly without fear of mutating business records, making them safe for web crawlers, browser prefetching, and CDN edge caching.
 
+Bad unsafe `GET`:
+
+```java
+@GetMapping("/api/orders/{id}/cancel")
+public OrderResponse cancel(@PathVariable Long id) {
+    return orderService.cancel(id);
+}
+```
+
+Why this is broken:
+
+- `@GetMapping` tells browsers, crawlers, caches, and monitoring tools that this route is safe to call.
+- The path says `cancel`, which changes business state.
+- A browser prefetch, link scanner, or crawler could accidentally cancel orders.
+- Observability also becomes confusing because a read-looking endpoint mutates data.
+
+Correct shape:
+
+```java
+@PostMapping("/api/orders/{id}/cancellations")
+public ResponseEntity<OrderResponse> cancel(@PathVariable Long id) {
+    OrderResponse response = orderService.cancel(id);
+    return ResponseEntity.ok(response);
+}
+```
+
+Line by line:
+
+- `@PostMapping` honestly declares a state-changing command.
+- `/api/orders/{id}/cancellations` models cancellation as a sub-resource/action record instead of hiding a mutation behind `GET`.
+- `orderService.cancel(id)` should enforce ownership, current order status, refund rules, and idempotency if retries are possible.
+
 #### 2. Idempotent vs Non-Idempotent
 An operation is **Idempotent** if making $N$ identical requests produces the exact same server side-effects as making 1 request:
 $$f(f(x)) = f(x)$$
@@ -157,9 +298,125 @@ POST /users/42/charges HTTP/1.1
 {"amount": 100}
 ```
 
+Think about a real mobile network:
+
+```console
+Time 1: Client sends POST /orders.
+Time 2: Server creates the order and commits the database transaction.
+Time 3: The response packet is lost on the network.
+Time 4: Client sees timeout and retries the same POST.
+Time 5: Server creates a second order unless idempotency protection exists.
+```
+
+That is why idempotency is not academic. It is how APIs survive retries.
+
+Production retry-safe `POST`:
+
+```sql
+CREATE TABLE idempotency_keys (
+    user_id BIGINT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    response_status INT NOT NULL,
+    response_body JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, idempotency_key)
+);
+```
+
+What each column does:
+
+- `user_id` scopes the key to one authenticated caller. Two different users may generate the same random key without colliding.
+- `idempotency_key` stores the client retry key.
+- `response_status` stores the original HTTP status, such as `201`.
+- `response_body` stores the original response so a retry can receive the same result.
+- `created_at` lets a cleanup job expire old keys.
+- `PRIMARY KEY (user_id, idempotency_key)` is the concurrency guard. Two simultaneous retries cannot both insert the same key.
+
+Service shape:
+
+```java
+@Transactional
+public OrderResponse createOrder(Long userId, String idempotencyKey, CreateOrderRequest request) {
+    Optional<StoredResponse> existing = idempotencyRepository.find(userId, idempotencyKey);
+    if (existing.isPresent()) {
+        return existing.get().toOrderResponse();
+    }
+
+    Order order = orderFactory.createFromTrustedState(userId, request);
+    orderRepository.save(order);
+
+    OrderResponse response = OrderResponse.from(order);
+    idempotencyRepository.save(userId, idempotencyKey, 201, response);
+    return response;
+}
+```
+
+Important line explanations:
+
+- `@Transactional` keeps order creation and idempotency-key storage in one database transaction. If one succeeds and the other fails, retry behavior becomes inconsistent.
+- `find(userId, idempotencyKey)` checks whether this exact business attempt already completed.
+- `return existing.get().toOrderResponse()` replays the first result instead of performing the side effect again.
+- `orderFactory.createFromTrustedState(...)` should load price and inventory from the database, not trust client values.
+- `idempotencyRepository.save(...)` records the response before the transaction commits.
+
+Production caveat: the simplified code above still needs duplicate-key handling around concurrent first requests. In a real implementation, the database `PRIMARY KEY` is the final authority.
+
 #### 3. PUT vs PATCH
 - **PUT**: Replaces the **entire resource**. Any field omitted in the request body is set to `null` or default values.
 - **PATCH**: Modifies **only the specified fields**, leaving omitted attributes untouched.
+
+Concrete example:
+
+Existing resource:
+
+```json
+{
+  "id": 42,
+  "title": "Transactions",
+  "content": "Old content",
+  "tags": ["spring", "database"]
+}
+```
+
+Full replacement with `PUT`:
+
+```http
+PUT /api/notes/42
+Content-Type: application/json
+
+{
+  "title": "Transactions Deep Dive",
+  "content": "New full content",
+  "tags": []
+}
+```
+
+After this request, `tags` becomes empty because the client sent the complete new representation.
+
+Partial update with `PATCH`:
+
+```http
+PATCH /api/notes/42
+Content-Type: application/json
+
+{
+  "title": "Transactions Deep Dive"
+}
+```
+
+After this request, only `title` changes. `content` and `tags` stay as they were.
+
+Failure case:
+
+```console
+Mobile app version 1 knows fields: title, content.
+Backend version 2 adds field: tags.
+Mobile app sends PUT with only title and content.
+Backend treats missing tags as empty.
+All tags disappear.
+```
+
+That is why `PUT` requires careful versioning and full-resource contracts. For mobile clients, `PATCH` is often safer when clients do not always know every server field.
 
 ---
 

@@ -309,6 +309,18 @@ public class Post {
 }
 ```
 
+## Line-by-Line Blog Domain Proof
+
+Read these entity choices as production defenses:
+
+- `getTags() { return Set.copyOf(tags); }` returns an immutable copy. Without this, controller or mapper code could mutate the entity's internal collection outside a domain method.
+- `slug` should be unique because it becomes a public URL identity. Two posts with the same slug create ambiguous routing and SEO corruption.
+- `status` separates drafts from published posts. Never infer publication only from `publishedAt != null`; explicit state makes authorization and workflows clearer.
+- `publishedAt` is an instant, not a local date string. Search, sorting, and feeds need one global timeline.
+- `author` is the ownership boundary. Update and delete endpoints must check the authenticated principal against this author.
+
+Proof drill: enable SQL logging, list 20 posts with tags, and count queries. With the correct fetch plan, you should not see one extra tag query per post.
+
 ---
 
 ## Project Proof Drill

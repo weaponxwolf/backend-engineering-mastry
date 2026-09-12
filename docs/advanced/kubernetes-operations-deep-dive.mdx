@@ -197,6 +197,19 @@ livenessProbe:
   failureThreshold: 6
 ```
 
+Line-by-line probe reading:
+
+- `startupProbe` answers "has the JVM finished booting yet?" While it is failing, Kubernetes suppresses liveness and readiness decisions for that container.
+- `path: /actuator/health/liveness` should check process life, not database reachability.
+- `failureThreshold: 30` with `periodSeconds: 10` gives a cold-start budget of about 300 seconds.
+- `readinessProbe` answers "should Service endpoints route traffic here?"
+- `timeoutSeconds: 2` prevents a stuck health endpoint from tying up kubelet probe workers.
+- `failureThreshold: 3` means readiness changes after roughly three failed checks, not after the first brief hiccup.
+- `livenessProbe` answers "should the container be restarted because it is wedged?"
+- `failureThreshold: 6` deliberately makes liveness less sensitive than readiness. Remove traffic first; restart only when the process cannot recover.
+
+Proof drill: block database access. Readiness may fail if your readiness group depends on the database, but liveness should stay up. If liveness fails because the database is down, Kubernetes will restart healthy pods into a worse outage.
+
 <Warning>
 A bad liveness probe can create a cascading outage. If the app is slow because the database is overloaded, killing pods may make the remaining pods receive more traffic and fail harder.
 </Warning>
@@ -233,6 +246,13 @@ env:
       -XX:MaxRAMPercentage=75.0
       -XX:+ExitOnOutOfMemoryError
 ```
+
+Line-by-line memory reading:
+
+- `JAVA_TOOL_OPTIONS` is read by the JVM on startup, so the same container image can run with different memory policy per environment.
+- `-XX:MaxRAMPercentage=75.0` sizes the maximum heap as a percentage of container-visible memory. It does not reserve memory for metaspace, stacks, direct buffers, or native libraries.
+- `-XX:+ExitOnOutOfMemoryError` forces the JVM process to exit when it cannot recover from OOM. In Kubernetes, a clean process exit lets the pod restart instead of limping in a corrupted state.
+- The proof is `kubectl top pod`, JVM Native Memory Tracking, and load tests under the real memory limit. A percentage value is a hypothesis until measured.
 
 Why not give the heap 100% of container memory?
 

@@ -160,6 +160,30 @@ SET statement_timeout = '5s';  -- Abort if total execution exceeds 5 seconds
 ALTER TABLE orders ADD COLUMN fulfillment_center_id INT;
 ```
 
+Line by line:
+
+- `SET lock_timeout = '2s'` means PostgreSQL will give up if it cannot acquire the needed table lock quickly. This prevents the migration from sitting in the FIFO lock queue and blocking live traffic behind it.
+- `SET statement_timeout = '5s'` limits total execution time after the statement starts. It is a second circuit breaker for unexpectedly slow DDL.
+- `ALTER TABLE orders ADD COLUMN fulfillment_center_id INT` is safe only if it can complete as a metadata change quickly. The timeout settings make the safety assumption enforceable.
+
+Failure behavior:
+
+```console
+If a BI query is holding ACCESS SHARE for 45 seconds,
+the migration tries to acquire its lock,
+PostgreSQL waits 2 seconds,
+then aborts the migration instead of freezing checkout traffic.
+```
+
+Proof task:
+
+```console
+Session A: BEGIN; SELECT * FROM orders; keep the transaction open.
+Session B: SET lock_timeout='2s'; ALTER TABLE orders ADD COLUMN test_col INT;
+Expected: Session B fails fast with lock timeout.
+Session C: SELECT id FROM orders LIMIT 1 should not sit blocked behind the failed DDL.
+```
+
 ---
 
 ### Practice 2: The Expand and Contract Pattern

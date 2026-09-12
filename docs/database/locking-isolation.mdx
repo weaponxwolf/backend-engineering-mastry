@@ -204,6 +204,28 @@ if (updatedRows == 0) {
 }
 ```
 
+Line by line:
+
+- `UPDATE inventory` moves the operation into PostgreSQL, where row locks and MVCC rules can protect the change.
+- `SET available_quantity = available_quantity - :quantity` subtracts from the current committed row value, not from a stale Java copy.
+- `WHERE product_id = :productId` scopes the update to one product.
+- `AND available_quantity >= :quantity` turns the business invariant into a database guard.
+- `@Modifying` tells Spring Data this query changes rows instead of selecting entities.
+- The repository returns `int` because the affected-row count is the success signal.
+- `updatedRows == 0` means the database refused the reservation because no row matched the product and stock condition at update time.
+
+Proof test:
+
+```console
+Seed product 101 with available_quantity = 2.
+Start 10 concurrent transactions, each reserving quantity 1.
+Exactly 2 calls should return updatedRows = 1.
+Exactly 8 calls should return updatedRows = 0.
+Final available_quantity must be 0, never negative.
+```
+
+Senior phrasing: "I prefer atomic SQL for simple counters because it collapses read, validation, and write into one database statement. Java never observes a stale stock value and tries to write it back later."
+
 ---
 
 ### Strategy 2: Optimistic Locking with `@Version` (Best for Low Contention)

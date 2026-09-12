@@ -152,6 +152,22 @@ class OrderControllerSliceTest {
 }
 ```
 
+Line by line:
+
+- `@WebMvcTest(OrderController.class)` loads the MVC slice around one controller, not the full application.
+- `MockMvc` sends fake HTTP requests through Spring MVC without starting a real network port.
+- `ObjectMapper` serializes the request exactly as production Jackson would.
+- `@MockBean OrderService` replaces the service bean so the test stays focused on HTTP, validation, and serialization.
+- `@WithMockUser` inserts an authenticated security context.
+- `.with(csrf())` proves the endpoint works with CSRF protection enabled.
+- `contentType(MediaType.APPLICATION_JSON)` sets the request body format.
+- `objectMapper.writeValueAsString(request)` avoids hand-written JSON drift.
+- `status().isCreated()` verifies protocol behavior, not just Java return values.
+- `header().string("Location", ...)` proves the REST creation contract.
+- `jsonPath(...)` checks response fields the client depends on.
+
+Proof boundary: this test does not prove database persistence, transaction rollback, PostgreSQL constraints, or real JWT decoding. That is why it is a slice test.
+
 ---
 
 ## 4. Multi-Threaded Concurrency Testing: Catching Race Conditions

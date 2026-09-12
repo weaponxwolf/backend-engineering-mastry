@@ -177,6 +177,22 @@ Before migrating the `orders` table, drop physical database foreign key constrai
 ALTER TABLE orders DROP CONSTRAINT fk_orders_users;
 ```
 
+Line-by-line production reading:
+
+- `ALTER TABLE orders` targets the child table that stores `user_id`. This operation can require locks, so run it with `lock_timeout` and during a measured migration window.
+- `DROP CONSTRAINT fk_orders_users` removes only the physical database enforcement. It does not remove the business rule that an order must refer to a real user.
+- After this change, the application must enforce referential behavior with service contracts, cached reference checks, asynchronous reconciliation, or a materialized read model.
+- The proof is not "the migration ran." The proof is a reconciliation query that counts orphaned `orders.user_id` values and an alert when that number is greater than zero.
+
+```sql
+SELECT o.user_id, count(*) AS orphaned_orders
+FROM orders o
+LEFT JOIN users u ON u.id = o.user_id
+WHERE u.id IS NULL
+GROUP BY o.user_id
+ORDER BY orphaned_orders DESC;
+```
+
 In the Java domain layer, replace JPA entity associations with scalar identifiers:
 
 ```java
@@ -195,6 +211,17 @@ public class Order {
     private Long userId; // Decoupled scalar reference
 }
 ```
+
+#### Entity refactor meaning
+
+- `@ManyToOne(fetch = FetchType.LAZY)` looks convenient, but it teaches Hibernate that `Order` and `User` live inside one deployable data model. That blocks service extraction.
+- `@JoinColumn(name = "user_id")` makes the foreign key feel like an object pointer, even though over the network it is only a number.
+- `private User user` lets order code walk into user fields and accidentally create cross-domain coupling.
+- `private Long userId` is deliberately less magical. It forces the order service to treat user data as external reference data and makes the network boundary visible in code.
+
+<Info>
+Senior phrasing: "We did not remove the invariant; we moved enforcement from a local foreign key to an explicit distributed consistency mechanism with reconciliation."
+</Info>
 
 ---
 

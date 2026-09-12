@@ -213,6 +213,30 @@ Why this matters:
 | Presigned URL leaks | short expiry and narrow permissions |
 | Private file is cached publicly | correct CDN cache and authorization strategy |
 
+## Line-by-Line Presigned Upload Reading
+
+```json
+{
+  "method": "PUT",
+  "url": "https://storage.example/uploads/user-42/avatar.png?signature=abc",
+  "headers": {
+    "Content-Type": "image/png",
+    "x-amz-server-side-encryption": "AES256"
+  },
+  "expiresInSeconds": 300,
+  "maxBytes": 5242880
+}
+```
+
+- `method: PUT` means the client uploads the object bytes directly to storage. Your application server does not proxy the file body.
+- `url` contains a short-lived signature. Anyone with this URL can upload until it expires, so never log it carelessly.
+- `Content-Type` must be part of the signed policy if you depend on it. Otherwise a client can upload a different type than the UI promised.
+- `x-amz-server-side-encryption` asks storage to encrypt the object at rest.
+- `expiresInSeconds: 300` limits the theft window to 5 minutes.
+- `maxBytes` prevents a user from uploading a 20 GB object through a URL intended for an avatar.
+
+Proof drill: try uploading after expiry, with the wrong content type, and with a body larger than `maxBytes`. All three attempts should fail before the object becomes visible to readers.
+
 ## Download Patterns
 
 | Pattern | Use when |

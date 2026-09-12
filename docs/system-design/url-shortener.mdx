@@ -269,6 +269,29 @@ sequenceDiagram
 - **`301 Moved Permanently`**: Browser caches the mapping forever. Origin servers save bandwidth, but **click analytics are completely broken**.
 - **`302 Found` (or `307 Temporary Redirect`)**: Browser must re-request the short code on every visit. The API resolves the redirect in 1ms via Redis, fires an async Kafka event, and redirects the user.
 
+Line-by-line redirect reading:
+
+```http
+HTTP/1.1 302 Found
+Location: https://merchant.example/sale
+Cache-Control: no-store
+```
+
+- `302 Found` means the redirect target can change later. Use this when you need analytics, abuse blocking, expiration, or mutable destinations.
+- `Location` is the real destination. Validate it during short-link creation so your service does not become an open redirect platform.
+- `Cache-Control: no-store` tells browsers and intermediaries not to cache the redirect. Without it, a corrected malicious or expired destination can remain stuck in user agents.
+
+```http
+HTTP/1.1 301 Moved Permanently
+Location: https://docs.example/backend
+Cache-Control: public, max-age=31536000
+```
+
+- `301` can be cached aggressively by browsers and CDNs. That is fast, but dangerous if owners can edit destinations.
+- `max-age=31536000` trades control for performance. Only use it when the mapping is immutable.
+
+Proof drill: create a link, fetch it once, change the destination, then fetch again through a browser or CDN. If you used `301`, the client may never ask your service again.
+
 ---
 
 ## 7. Cache Penetration Defense: Redisson Bloom Filter

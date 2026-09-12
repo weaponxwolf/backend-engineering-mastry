@@ -219,6 +219,35 @@ WHERE NOT EXISTS (
 );
 ```
 
+Line by line:
+
+- `SELECT u.* FROM users u` returns users from the parent table.
+- `WHERE NOT EXISTS (...)` asks PostgreSQL to keep only users for whom the subquery finds no matching order.
+- `SELECT 1` means the subquery only needs to prove existence. It does not need to fetch child row payload.
+- `orders o WHERE o.user_id = u.id` correlates the child table to the current parent row.
+- If an order with `NULL user_id` exists, it does not poison the entire result the way `NOT IN (SELECT user_id ...)` can.
+
+Required supporting index:
+
+```sql
+CREATE INDEX idx_orders_user_id ON orders(user_id);
+```
+
+Why this line matters:
+
+- The foreign key column lives in the child table.
+- Deletes, ownership checks, joins, and anti-joins all need to find child rows by `user_id`.
+- Without this index, PostgreSQL may scan the whole child table while holding locks, blocking writes and melting connection pools.
+
+Proof task:
+
+```console
+Run EXPLAIN (ANALYZE, BUFFERS) for the NOT EXISTS query before adding idx_orders_user_id.
+Create the index.
+Run the same EXPLAIN again.
+Confirm the child lookup becomes indexed and buffer reads drop.
+```
+
 ---
 
 ### 5. Multi-Tenant Security: PostgreSQL Row-Level Security (RLS)

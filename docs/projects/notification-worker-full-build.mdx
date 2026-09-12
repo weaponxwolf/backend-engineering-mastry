@@ -453,6 +453,21 @@ public class NotificationConsumerWorker {
 }
 ```
 
+Line-by-line worker proof:
+
+- `@KafkaListener` subscribes this method to `notification-requests` as part of the `notification-dispatch-workers` consumer group.
+- `@Transactional` makes the delivery-row reservation and status update one database transaction. The Kafka acknowledgment still happens manually after the important work.
+- `INSERT ... ON CONFLICT (event_id) DO NOTHING` is the idempotency gate. Duplicate Kafka deliveries become zero-row inserts instead of duplicate emails.
+- `inserted == 0` means another worker or previous attempt already reserved the event, so the listener acknowledges and exits.
+- `DataIntegrityViolationException` handles the race where two workers try the same insert at nearly the same time.
+- `findByEventId(...)` loads the delivery record created by the reservation. If it is missing, the transaction is corrupted and should fail.
+- The preferences query is scoped by `user_id` and `channel`, so opting out of email does not disable SMS or push by accident.
+- `orElse(true)` is a product choice: default opt-in. If the product requires explicit consent, this must be `false`.
+- `ack.acknowledge()` happens only after duplicate detection, opt-out persistence, successful delivery, or permanent failure recording.
+- Transient provider failures are intentionally not acknowledged here; they should be retried or sent to a DLT depending on the configured error handler.
+
+Proof drill: publish the same event ID 10 times. The database should contain one delivery row, the fake provider should be called once, and the Kafka offsets should still advance.
+
 ---
 
 ## 6. End-to-End Integration Testing with Testcontainers

@@ -161,6 +161,28 @@ CREATE INDEX idx_refresh_tokens_family ON refresh_tokens(family_id);
 
 The unique constraint already indexes `token_hash`. At login, create a family with an absolute expiry and its first token in one transaction. Generate each raw token from 32 random bytes using `SecureRandom`; store only its SHA-256 hash. The family identifier is a grouping key, not a credential.
 
+Line by line:
+
+- `refresh_families.id` groups all rotated tokens from one login session.
+- `user_id` ties the session family to a real account.
+- `revoked` lets the server kill the entire session family after reuse detection.
+- `expires_at` enforces an absolute session lifetime even if the user keeps refreshing.
+- `refresh_tokens.token_hash` stores a hash, never the raw credential. A database leak should not hand attackers usable refresh tokens.
+- `UNIQUE` on `token_hash` prevents duplicate token records.
+- `family_id` connects each token to its family.
+- `used` marks single-use consumption.
+- `idx_refresh_tokens_family` makes family revocation and cleanup efficient.
+
+Proof task:
+
+```console
+Login creates family F and token R1 hash.
+Refresh with R1 marks R1 used and creates R2.
+Refresh with R1 again revokes family F.
+Refresh with R2 after family revocation returns 401.
+Verify revocation is committed even though the HTTP response is an error.
+```
+
 ### 3.2 Commit Revocation Before Returning an Error
 
 A subtle bug is to update `revoked = TRUE` and then throw `BadCredentialsException` inside `@Transactional`. The exception is unchecked, so the default transaction interceptor rolls back the revocation. Return a rejected outcome normally, commit, then let the controller produce the authentication error. [Spring transaction rollback rules](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/rolling-back.html)

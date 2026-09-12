@@ -11,6 +11,24 @@ Senior and Staff interviewers test whether you truly understand how Spring Boot 
 Looking for complete, production-tested answers, architectural sequence diagrams, and code snippets for every question below? Review [Spring Interview Answers](/interview/spring-answers).
 </Tip>
 
+## How To Answer Every Spring Question
+
+Use this pattern:
+
+1. Name the annotation or component.
+2. Explain which Spring subsystem handles it.
+3. Describe when it runs in the request, bean, transaction, or filter lifecycle.
+4. Give one realistic failure mode.
+5. Give one proof test.
+
+Example for `@Transactional`:
+
+- Subsystem: Spring AOP proxy plus `PlatformTransactionManager`.
+- Runtime moment: the external caller enters the proxy before the service method runs.
+- Mechanism: the proxy opens or joins a transaction, binds a connection to the thread, invokes the method, then commits or rolls back.
+- Trap: `this.otherTransactionalMethod()` bypasses the proxy.
+- Proof: write an integration test that throws after a repository write and asserts the row is absent.
+
 ---
 
 ## 0. Non-Negotiable Spring Fundamentals

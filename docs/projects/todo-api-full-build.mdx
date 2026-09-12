@@ -507,6 +507,29 @@ It is small enough to finish in an afternoon, yet serious enough to teach the co
   </Tab>
 </Tabs>
 
+## Line-by-Line Runtime Proof
+
+Read the create request like this:
+
+```bash
+curl -i -X POST http://localhost:8080/api/todos \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Learn Spring Boot"}'
+```
+
+- `curl -i` keeps headers visible. For create endpoints, headers are part of the proof.
+- `POST /api/todos` enters the controller method responsible for creation, not update.
+- `Content-Type: application/json` activates JSON deserialization into the request DTO.
+- `title` is user input. It must pass DTO validation before an entity is created.
+
+Expected proof points:
+
+- Status is `201 Created`, not `200 OK`.
+- The response body contains a generated `id`.
+- The `completed` field starts as `false`.
+- A later `GET /api/todos/{id}` returns the same row from PostgreSQL.
+- A blank title returns `400` and does not insert a row.
+
 ## Project Proof Drill
 
 Use this drill after the full build compiles. The point is to prove the learner understands the backend layers, not just that the happy path responds once.

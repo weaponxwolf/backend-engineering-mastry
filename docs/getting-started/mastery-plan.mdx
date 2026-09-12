@@ -52,6 +52,34 @@ Revisit a skill in a later session and again after another project. These are pr
 
 Before opening old notes, predict the design and the failure cases. Compare your result with the earlier evidence afterward.
 
+## Explain One Line Until It Becomes A Skill
+
+When a concept feels familiar but not usable, pick one line and expand it:
+
+```java
+@Transactional
+public void transfer(AccountId from, AccountId to, Money amount) {
+```
+
+Minimum explanation:
+
+- `@Transactional` means Spring opens a database transaction through a proxy before the method body runs.
+- The transaction binds one database connection to the current thread.
+- Both debit and credit must commit together or roll back together.
+- A runtime exception escaping the method triggers rollback by default.
+- A checked exception does not roll back by default unless configured.
+- Calling this method through `this.transfer(...)` from the same class bypasses the proxy and can skip the transaction.
+
+Evidence task:
+
+```console
+Write a test where debit succeeds and credit throws.
+Verify both account balances remain unchanged.
+Then remove @Transactional and prove the test catches partial state.
+```
+
+This is the standard for every page: explanation becomes mastery only when a failure proves why the line exists.
+
 ## Build a sequence, then maintain something
 
 The core sequence is plain Java → [Todo](/projects/todo-api-full-build) → [Notes](/projects/notes-api-full-build) → [Deployment](/projects/deployment-lab) → [Incident Debugging](/projects/incident-debugging-lab). Each step depends on the earlier behavior working.

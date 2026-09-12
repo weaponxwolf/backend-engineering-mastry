@@ -309,6 +309,26 @@ CREATE TABLE idempotency_records (
 CREATE INDEX idx_idempotency_expiry ON idempotency_records(expires_at);
 ```
 
+#### Line-by-line idempotency reading
+
+- `idempotency_key` is supplied by the client for one logical operation, such as "create payment attempt." Reusing it for a different operation is a client bug.
+- `user_id` prevents one user's key from accidentally or maliciously colliding with another user's request.
+- `request_path` prevents the same key from being replayed against a different endpoint.
+- `request_hash` protects against accidental key reuse with a different payload. The server can reject "same key, different body" instead of returning a misleading cached response.
+- `status` tells whether the first request is still `IN_PROGRESS`, already `COMPLETED`, or failed in a known way.
+- `response_body` lets safe retries return the exact same result after success.
+- `expires_at` supports cleanup. Idempotency records are not kept forever unless legal or audit rules require it.
+
+```http
+POST /payments HTTP/1.1
+Idempotency-Key: pay_2026_09_12_order_8842
+Content-Type: application/json
+
+{"orderId":"8842","amountCents":129900}
+```
+
+Proof drill: send the same request twice while forcing the first HTTP response to time out after the database commits. The second request must return the original success, not charge the customer again.
+
 ### 2. The Circuit Breaker Pattern (Resilience4j)
 When a downstream service is failing, continuing to send requests will:
 1. Exhaust thread pools on the calling service.

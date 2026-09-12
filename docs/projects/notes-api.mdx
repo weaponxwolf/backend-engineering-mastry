@@ -276,6 +276,18 @@ curl -i -X GET http://localhost:8080/api/v1/notes/1 \
   -H "Authorization: Bearer $EVE_TOKEN"
 ```
 
+### Ownership proof line-by-line
+
+- `LOGIN_RESPONSE=$(...)` captures the JSON response instead of printing it. This simulates how a frontend stores the access token.
+- `TOKEN=$(echo ... grep ...)` extracts the bearer token for Alice. In real scripts, prefer `jq`, but this keeps the raw shell flow visible.
+- `Authorization: Bearer $TOKEN` is the trust boundary. Spring Security validates the signature and extracts the subject before the controller handles notes.
+- Creating Alice's note must store `user_id = Alice`, not accept `userId` from the JSON body.
+- Eve's login creates a second valid token. This proves the attack is not "unauthenticated"; it is authenticated cross-tenant access.
+- Eve's `GET /notes/1` must return `404`, not `403`, when the API wants to avoid confirming that Alice's note exists.
+- The repository method behind this endpoint should be shaped like `findByIdAndOwnerId(noteId, currentUserId)`. `findById(noteId)` followed by a Java ownership check is easier to get wrong and can leak timing or error differences.
+
+Proof habit: after Eve's delete/update attempt, query as Alice again. Alice's note must still exist with unchanged content.
+
 ---
 
 ## 6. Acceptance Test Matrix

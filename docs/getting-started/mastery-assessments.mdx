@@ -23,6 +23,20 @@ For every attempt, save source, exact commands, expected results, actual results
 The comparison should reject values greater than 100, not greater than or equal to 100. A check only in `main` does not protect callers that construct a line item elsewhere. Put the rule where the value is created and keep the existing invalid-input tests.
 </Accordion>
 
+### Example Evidence Shape For Assessment 0
+
+Do not submit only "tests passed." A strong answer looks like this:
+
+```console
+Requirement: quantity must be between 1 and 100 inclusive
+Boundary accepted: quantity=100 returns expected total
+Boundary rejected: quantity=101 throws IllegalArgumentException
+Regression proof: test fails before adding upper-bound check, passes after
+Explanation: the check is inside lineTotal so all callers get the same rule
+```
+
+The important point is placement. A check in `main` protects only this demo. A check inside the business method protects any future controller, test, CLI, or batch job that calls it.
+
 ## Assessment 1: explain a request and find a failure
 
 **Starting point:** a plain Java map of task IDs to task objects, plus [HTTP](/backend-basics/http-json-api).
@@ -46,6 +60,22 @@ The comparison should reject values greater than 100, not greater than or equal 
 <Note>
 The checked-in starter uses H2 in memory. Its passing tests do not prove PostgreSQL behavior, persistence across restarts, or authorization. Those are the next gate.
 </Note>
+
+### Example Trace For Assessment 2
+
+When you add `priority`, trace it line by line:
+
+```console
+JSON field -> CreateTodoRequest.priority -> validation/defaulting -> Todo entity field -> migration column -> repository save -> TodoResponse.priority -> MVC test assertion
+```
+
+Failure cases to prove:
+
+- Omitted priority uses default `2`.
+- Priority `0` returns `400`.
+- Priority `4` returns `400`.
+- A valid priority persists and appears in the read response.
+- Existing tests still pass, proving the change did not break title/completion behavior.
 
 ## Assessment 3: protect data and ownership
 

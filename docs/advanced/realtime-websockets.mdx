@@ -308,6 +308,19 @@ public class WebSocketProductionConfig implements WebSocketMessageBrokerConfigur
 }
 ```
 
+Line-by-line reading:
+
+- `@EnableWebSocketMessageBroker` switches on Spring's STOMP broker pipeline. Without it, the endpoint may exist but messages will not route through STOMP destinations.
+- `setApplicationDestinationPrefixes("/app")` reserves `/app/...` for messages that should hit server-side `@MessageMapping` handlers.
+- `enableSimpleBroker("/topic", "/queue")` creates an in-memory broker for local fan-out. It is fine for one pod; multiple pods need a shared backplane or external broker.
+- `setHeartbeatValue(new long[]{25000, 25000})` sends periodic heartbeats in both directions. This helps detect dead mobile connections that never sent a clean close frame.
+- `addEndpoint("/ws/connect")` is the HTTP upgrade URL. Before it becomes a WebSocket, it is still an HTTP request with cookies, headers, and origin checks.
+- `setAllowedOriginPatterns("https://*.production-domain.com")` blocks arbitrary websites from opening authenticated sockets to your backend.
+- `.withSockJS()` adds fallback transports for clients that cannot use native WebSockets, but those fallbacks have different scaling behavior.
+- `setDisconnectDelay(30000)` gives unstable clients a grace window before server-side session cleanup.
+
+Proof drill: connect two browser clients to different pods and publish through `/app`. If only one pod's local clients receive the message, the Redis backplane is missing or miswired.
+
 #### 2. Redis Message Backplane Listener:
 ```java
 package com.backend.realtime.service;
@@ -359,6 +372,18 @@ public class RedisWebSocketBridge implements MessageListener {
     }
 }
 ```
+
+Redis bridge reading:
+
+- `StringRedisTemplate` publishes cluster-wide messages to Redis channels.
+- `SimpMessagingTemplate` sends messages only to clients connected to the current JVM pod.
+- `publishToCluster(...)` is used when a local client sends a message that every pod must learn about.
+- `convertAndSend(destinationTopic, json)` makes Redis the cross-pod fan-out path. Redis Pub/Sub is ephemeral; if a pod is offline, it misses the message.
+- `onMessage(...)` runs when Redis delivers a broadcast to this pod.
+- `message.getChannel()` becomes the STOMP destination, such as `/topic/room.42`.
+- `localMessagingTemplate.convertAndSend(topic, payload)` is the final hop from this pod to its own connected sockets.
+
+What breaks without this bridge: a user connected to Pod A sends a chat message, but a recipient connected to Pod B never sees it because WebSocket connections are pinned to physical pods.
 
 ---
 

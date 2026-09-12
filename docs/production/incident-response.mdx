@@ -228,6 +228,19 @@ WHERE state != 'idle'
 ORDER BY duration DESC;
 ```
 
+Line by line:
+
+- `pid` is the backend process ID you may later cancel or terminate.
+- `now() - query_start AS duration` shows how long the statement has been running.
+- `state` distinguishes active work from idle-in-transaction sessions.
+- `wait_event_type` and `wait_event` show whether the backend is waiting on locks, I/O, client input, or another resource.
+- `query` shows the SQL text. Treat it as sensitive because it may include literals.
+- `state != 'idle'` filters out harmless idle connections.
+- `pid != pg_backend_pid()` avoids listing your own diagnostic session.
+- `ORDER BY duration DESC` puts the most suspicious long-running queries first.
+
+Runbook rule: do not terminate the longest query blindly. First check whether it is the root blocker, a victim waiting behind another transaction, or a legitimate migration.
+
 ##### Step 2: Trace Recursive Blocking PIDs (Finding the Root Blocker)
 ```sql
 SELECT 
@@ -252,6 +265,23 @@ SELECT pg_cancel_backend(12345);
 
 -- If query does not terminate within 5 seconds, forcefully kill the connection:
 SELECT pg_terminate_backend(12345);
+```
+
+Command explanation:
+
+- `pg_cancel_backend(pid)` asks PostgreSQL to cancel the current query while keeping the connection alive. Use this first when possible.
+- `pg_terminate_backend(pid)` kills the whole backend connection. It rolls back the active transaction and can disrupt an application request.
+- Never terminate autovacuum, replication, or migration sessions casually. Identify the owner and blast radius first.
+
+Proof drill:
+
+```console
+In a staging database, open one transaction that locks a row.
+Open a second session blocked on that row.
+Use pg_blocking_pids to identify the blocker.
+Cancel or terminate the blocker.
+Verify the waiting session proceeds or fails as expected.
+Record the exact timeline.
 ```
 
 ---

@@ -95,6 +95,44 @@ Spring's transaction interceptor sits **outside** your service method. It only t
 
 Because the developer caught and swallowed the `Exception`, the method finishes normally. Spring assumes everything succeeded and sends a **`COMMIT` command to PostgreSQL**. The customer was never charged, but the unpaid order is permanently committed to your database!
 
+#### Production Fix: Let Failure Escape Or Mark Rollback Explicitly
+
+```java
+@Transactional
+public void checkout(OrderRequest request) {
+    Order order = new Order(request);
+    orderRepository.save(order);
+
+    try {
+        paymentClient.charge(request.creditCardToken(), request.amount());
+    } catch (PaymentDeclinedException ex) {
+        throw ex;
+    } catch (Exception ex) {
+        throw new PaymentProcessingException("Payment provider failed", ex);
+    }
+}
+```
+
+Line by line:
+
+- `@Transactional` opens a database transaction through a Spring proxy.
+- `orderRepository.save(order)` writes inside that transaction.
+- `paymentClient.charge(...)` can fail for business or network reasons.
+- `catch (PaymentDeclinedException ex) { throw ex; }` lets a domain runtime exception escape so Spring rolls back.
+- `throw new PaymentProcessingException(...)` wraps unknown provider failures in an unchecked exception.
+- Because an unchecked exception leaves the method, Spring calls rollback instead of commit.
+
+Proof test:
+
+```console
+Mock paymentClient.charge to throw.
+Call checkout.
+Assert the exception escapes.
+Assert no order row exists after the method returns.
+```
+
+Production caveat: charging an external card inside a database transaction can hold the DB connection while the network call waits. Real payment flows often reserve/create pending state, call the provider outside the short transaction, then finalize with idempotency and reconciliation.
+
 ---
 
 ### Catastrophe 2: The Checked Exception Trap

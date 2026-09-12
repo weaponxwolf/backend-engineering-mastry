@@ -224,6 +224,17 @@ public void runBillingJob() {
 - **`lockAtMostFor = "PT30M"`**: If Pod 1 acquires the lock and immediately suffers a kernel panic or container kill, the lock automatically expires after 30 minutes. This guarantees that tomorrow's run will not be permanently locked out.
 - **`lockAtLeastFor = "PT5M"`**: If Pod 1 completes the entire job in 4 seconds, it **continues to hold the lock for at least 5 minutes**. This prevents other pods whose clocks lag by a few seconds from immediately re-acquiring the lock and running the job a second time!
 
+Line-by-line reading:
+
+- `@Scheduled(cron = "0 0 2 * * *")` fires inside every pod running this code. Kubernetes does not know that the method should run only once globally.
+- `@SchedulerLock` wraps the method with a database-backed lock attempt before business code runs.
+- `name = "NightlyBillingJob"` must be stable and unique. Changing this string creates a different lock and can accidentally let the old and new jobs overlap during deploy.
+- `lockAtMostFor` is crash recovery. It must be longer than the worst credible job duration, or a second pod can start while the first pod is still working.
+- `lockAtLeastFor` is duplicate prevention under fast jobs and small clock differences. It should be long enough to absorb skew, not so long that it blocks legitimate reruns.
+- `billingService.chargeCustomerSubscriptions()` must still be idempotent. ShedLock reduces duplicate starts; it does not protect against manual reruns, retries after partial failure, or lock expiry during a long job.
+
+Proof drill: run two app instances against the same database with the same clock schedule. Exactly one instance should log the billing execution, and the other should log lock denial or no-op behavior.
+
 #### PostgreSQL ShedLock Table DDL:
 ```sql
 CREATE TABLE shedlock (
@@ -233,6 +244,13 @@ CREATE TABLE shedlock (
     locked_by VARCHAR(255) NOT NULL
 );
 ```
+
+DDL reading:
+
+- `name` is the logical job key and the primary key. The database uses that uniqueness to prevent two pods from owning the same job at once.
+- `lock_until` is the expiry timestamp checked by competing pods.
+- `locked_at` is audit evidence for incident debugging.
+- `locked_by` should contain pod or hostname identity so operators can find the owner during a stuck job.
 
 ---
 

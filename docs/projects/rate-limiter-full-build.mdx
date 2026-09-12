@@ -184,6 +184,21 @@ else
 end
 ```
 
+Line-by-line Lua proof:
+
+- `KEYS[1]` and `KEYS[2]` are current and previous Redis buckets. The previous bucket is needed to smooth traffic at minute boundaries.
+- `ARGV[1]` is the limit, such as 5 login attempts.
+- `ARGV[2]` is the window size in seconds.
+- `ARGV[3]` is the current timestamp. Keep the clock source consistent across app pods.
+- `ARGV[4]` is request cost. Expensive endpoints can consume more than 1 token.
+- `prev_count` and `current_count` are read inside one Redis script, so no concurrent request can interleave between check and increment.
+- `time_weight` fades the previous window based on how far we are into the current window.
+- `estimated_requests + cost > limit` rejects the request before mutation.
+- `INCRBY current_key, cost` records accepted traffic atomically.
+- `EXPIRE current_key, window_size * 2` keeps the current key available as the previous key during the next window, then cleans it up.
+
+Proof drill: send 6 requests to a rule with limit 5. The first 5 should include decreasing `X-RateLimit-Remaining`; the 6th should return `429` with a positive `Retry-After`.
+
 ---
 
 ## 4. Java Domain Models & Rate Limit Strategy

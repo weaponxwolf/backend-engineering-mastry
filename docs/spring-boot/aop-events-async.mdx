@@ -93,6 +93,47 @@ Fix:
 - Or use `TransactionTemplate` for explicit boundaries.
 - Avoid `AopContext.currentProxy()` in ordinary business code.
 
+Production collaborator shape:
+
+```java
+@Service
+public class BillingService {
+    private final InvoiceService invoiceService;
+
+    public BillingService(InvoiceService invoiceService) {
+        this.invoiceService = invoiceService;
+    }
+
+    public void billCustomer(Long customerId) {
+        invoiceService.createInvoice(customerId);
+    }
+}
+
+@Service
+public class InvoiceService {
+    @Transactional
+    public void createInvoice(Long customerId) {
+        // insert invoice rows
+    }
+}
+```
+
+Line by line:
+
+- `BillingService` depends on another Spring bean, so calls to `InvoiceService` go through the proxy.
+- `private final InvoiceService invoiceService` makes the transactional collaborator explicit.
+- `invoiceService.createInvoice(...)` is an external bean call, not `this.createInvoice(...)`.
+- `@Transactional` now sits on a method reached through the proxy, so transaction advice can run.
+
+Proof test:
+
+```console
+Call billCustomer.
+Inside createInvoice, assert TransactionSynchronizationManager.isActualTransactionActive() is true.
+Move createInvoice back into the same class and call through this.
+The assertion should fail.
+```
+
 ## Catastrophe 2: Publishing Events Before Commit
 
 ```java
@@ -171,6 +212,28 @@ public class AsyncConfig {
         return executor;
     }
 }
+```
+
+Line by line:
+
+- `@EnableAsync` activates Spring's async method interceptor.
+- `@Bean(name = "notificationExecutor")` gives this executor a stable name for `@Async("notificationExecutor")`.
+- `setCorePoolSize(8)` keeps eight worker threads ready for normal notification load.
+- `setMaxPoolSize(32)` allows temporary expansion during bursts.
+- `setQueueCapacity(500)` bounds memory use. An unbounded queue can hide overload until the JVM runs out of heap.
+- `setThreadNamePrefix("notification-")` makes logs and thread dumps readable.
+- `CallerRunsPolicy()` applies backpressure by making the caller execute work when the pool is saturated.
+- `setTaskDecorator(new MdcTaskDecorator())` copies correlation IDs into async threads.
+- `initialize()` starts the executor.
+
+Proof task:
+
+```console
+Trigger one async receipt send.
+Check logs contain thread name notification-*.
+Fill the executor queue in a test.
+Verify rejection/backpressure behavior is observable instead of silently dropping tasks.
+Verify correlation ID appears in async logs.
 ```
 
 ```java

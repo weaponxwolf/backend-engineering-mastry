@@ -367,6 +367,17 @@ jobs:
           severity: 'CRITICAL'
 ```
 
+## Line-by-Line Deployment Gate Reading
+
+- `uses: aquasecurity/trivy-action@master` runs a container vulnerability scanner as a CI step. Pinning to a version is safer for regulated environments.
+- `image-ref: ecommerce-backend:${{ github.sha }}` scans the exact image built from the commit, not a floating `latest` tag.
+- `format: 'table'` keeps CI logs human-readable during review.
+- `exit-code: '1'` turns a critical vulnerability into a failed pipeline, not a warning everyone ignores.
+- `ignore-unfixed: true` avoids blocking on issues with no vendor patch yet; this is a policy choice and should be revisited for internet-facing services.
+- `severity: 'CRITICAL'` sets the initial gate. Mature teams often add `HIGH` with allowlists and expiry dates.
+
+Proof drill: intentionally build from an old vulnerable base image in a branch. The pipeline should fail before deployment and record the CVE evidence in CI logs.
+
 ---
 
 ## Project Proof Drill

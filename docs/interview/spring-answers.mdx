@@ -14,6 +14,26 @@ Use the **Senior Answer Formula**:
 3. **Production Implementation**: Concrete Java 21 / Spring Boot 3 code snippet.
 </Tip>
 
+## Example: Annotation Answer Expansion
+
+Thin answer: "`@Valid` validates request bodies."
+
+Senior answer:
+
+- **Definition**: `@Valid` asks Bean Validation to check constraints on the deserialized DTO before controller logic runs.
+- **Mechanism**: Spring MVC reads HTTP bytes, Jackson creates the DTO, Bean Validation inspects annotations, and Spring throws `MethodArgumentNotValidException` on failure.
+- **Example**:
+
+```java
+public record CreateTodoRequest(
+        @NotBlank String title,
+        @Size(max = 500) String description) {}
+```
+
+- **Line reading**: `@NotBlank` rejects `null`, empty, and whitespace-only titles; `@Size(max = 500)` protects storage, UI, and logs from oversized descriptions.
+- **Trap**: DTO validation does not prove business rules. "User owns this note" and "stock is available" belong in service/database logic.
+- **Proof**: a MockMvc test sends blank title and expects `400` with a field-level error.
+
 ---
 
 ## 0. Non-Negotiable Spring Fundamentals

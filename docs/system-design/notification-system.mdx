@@ -276,6 +276,20 @@ public final class QuietHoursScheduler {
 }
 ```
 
+Line-by-line quiet-hours reading:
+
+- `QUIET_START = 22:00` and `QUIET_END = 08:00` define a window that crosses midnight. That is why simple `start < time < end` logic is wrong.
+- `ZoneId userZone` must be an IANA zone like `Asia/Kolkata`, not a fixed offset like `+05:30`, because daylight saving rules can change local morning time.
+- `ZonedDateTime.now(userZone)` converts the current instant into the user's local calendar and clock.
+- `time = now.toLocalTime()` discards the date only after timezone conversion.
+- `QUIET_START.isAfter(QUIET_END)` detects midnight-spanning ranges.
+- `time.isAfter(QUIET_START) || time.isBefore(QUIET_END)` means 23:00 and 07:00 are quiet, while 14:00 is not.
+- `targetMorning = now.toLocalDate().atTime(QUIET_END).atZone(userZone)` builds the next allowed local send time.
+- `targetMorning.plusDays(1)` handles the case where today's 08:00 has already passed.
+- `toInstant().toEpochMilli()` converts the local morning back to a UTC score for Redis ZSET scheduling.
+
+Proof drill: test `America/New_York` on a daylight-saving transition, `Asia/Kolkata` with no daylight saving, and `Pacific/Kiritimati` near the date boundary. The message must mature at the user's real 08:00 local time.
+
 ---
 
 ### 3. Complete Production Worker Implementation (Spring Boot 3.3)

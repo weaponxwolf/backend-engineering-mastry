@@ -174,6 +174,17 @@ OrderResponse response = orderClient
                 .build());
 ```
 
+Line-by-line reading:
+
+- `orderClient` is the generated gRPC stub. It hides HTTP/2 frames, but it does not remove the network failure boundary.
+- `.withDeadlineAfter(300, TimeUnit.MILLISECONDS)` puts a hard clock on the RPC. Without it, a slow downstream can hold the caller's thread, connection, and memory until an outer system times out.
+- `.getOrder(...)` is a synchronous unary RPC. The calling thread waits until response, error, or deadline.
+- `GetOrderRequest.newBuilder()` creates a typed protobuf request instead of hand-built JSON.
+- `.setOrderId(orderId.toString())` converts the domain ID into the wire format expected by the `.proto` contract.
+- `.build()` freezes the request message. Protobuf messages should be treated as immutable value objects once sent.
+
+Proof habit: set the server to sleep for 500ms and assert the client receives `DEADLINE_EXCEEDED` in about 300ms. Then verify the gateway maps that status to a controlled HTTP error, not a generic 500 stack trace.
+
 ## Protobuf Compatibility
 
 | Change | Safe? | Rule |
@@ -194,6 +205,15 @@ message OrderResponse {
   int64 total_cents = 3;
 }
 ```
+
+Line-by-line compatibility reading:
+
+- `reserved 4;` permanently blocks reuse of old field number 4. This matters because protobuf encodes field numbers on the wire, not Java field names.
+- `reserved "legacy_status";` prevents future source-level reuse of the old field name.
+- `string order_id = 1;` means field number 1 is part of the binary contract. Renaming `order_id` later may be okay on the wire but can break generated-code callers.
+- `int64 total_cents = 3;` stores money as integer cents. A floating-point `double` would introduce rounding bugs in billing and ledgers.
+
+What breaks without reserves: an old mobile app can send field `4` with the old meaning while a new server interprets field `4` as a different concept. That is semantic data corruption, not a harmless decode error.
 
 ## Gateway Observability
 

@@ -23,6 +23,25 @@ When you answer, do not stop at "what it is." Say:
 3. What beginner mistake breaks production.
 4. What code, SQL, test, metric, or diagram proves the fix.
 
+## Example Answer Shape
+
+Question: "Why is N+1 dangerous?"
+
+Answer:
+
+- **Definition**: N+1 means one query loads parent rows, then one extra query per parent loads children.
+- **Mechanism**: Hibernate lazily initializes associations when code touches them, so a loop over 50 posts can trigger 51 SQL statements.
+- **Failure mode**: the endpoint works in development with 3 rows but times out in production with 5,000 rows.
+- **Fix**:
+
+```java
+@EntityGraph(attributePaths = "comments")
+List<Post> findTop20ByStatusOrderByCreatedAtDesc(PostStatus status);
+```
+
+- **Line reading**: `@EntityGraph` tells Hibernate to fetch `comments` with the posts; `Top20` caps response size; `Status` keeps drafts out; `OrderByCreatedAtDesc` matches the user-facing feed order.
+- **Proof**: enable SQL counting in an integration test and assert the endpoint does not emit one child query per post.
+
 ---
 
 ## 1. Backend Fundamentals

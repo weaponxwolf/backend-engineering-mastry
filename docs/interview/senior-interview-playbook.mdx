@@ -11,6 +11,21 @@ At the **Senior (L5) and Staff (L6)** level, interviewers evaluate completely di
 
 This playbook deconstructs the exact grading rubrics, 45-minute pacing strategies, and psychological frameworks used by hiring managers and principal engineers at FAANG, high-growth scale-ups, and tier-1 fintech companies.
 
+## The Senior Answer Loop
+
+Use this loop whenever you feel the conversation getting vague:
+
+1. **Clarify**: "Which operation is most important: reads, writes, fan-out, or correctness?"
+2. **Quantify**: "Let me put rough numbers on QPS, storage, and p99 latency."
+3. **Constrain**: "The invariant is that payment is never captured twice."
+4. **Design**: "Given that invariant, this part needs a transaction or idempotency key."
+5. **Fail**: "Here is what breaks under timeout, retry, deploy, or regional failure."
+6. **Prove**: "Here is the test, metric, or runbook that proves the design works."
+
+Example phrase:
+
+> "I would not start by splitting this into microservices. First I would identify the write invariant, estimate peak writes, and prove whether a single PostgreSQL primary with atomic SQL can handle it. Only if that bottleneck is real would I add distributed complexity."
+
 ---
 
 ## 1. How Senior Candidates Are Graded: The Evaluation Rubric

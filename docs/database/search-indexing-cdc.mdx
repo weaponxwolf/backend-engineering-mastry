@@ -163,6 +163,14 @@ max_wal_senders = 4
 max_replication_slots = 4
 ```
 
+Line by line:
+
+- `wal_level = logical` makes PostgreSQL include enough information in WAL for logical decoding. Without it, Debezium cannot reconstruct row-level change events.
+- `max_wal_senders = 4` allows replication sender processes to stream WAL to standbys or logical consumers.
+- `max_replication_slots = 4` allows PostgreSQL to track retention positions for replicas/connectors.
+
+Operational risk: every replication slot is a retention promise. If a Debezium connector stops, the primary keeps WAL until the connector catches up or the slot is advanced/dropped. Monitor slot lag like production disk risk, not like a harmless metric.
+
 ### 2. Idempotent Indexing with Versioning
 To prevent out-of-order Kafka message deliveries from overwriting newer records, configure Elasticsearch external versioning:
 
@@ -173,6 +181,32 @@ PUT /products/_doc/1001?version=1740837190000&version_type=external_gte
   "price": 299.99,
   "updated_at": 1740837190000
 }
+```
+
+Line by line:
+
+- `PUT /products/_doc/1001` writes document ID `1001`, matching the source database primary key.
+- `version=1740837190000` supplies the source ordering value, usually an update timestamp, LSN-derived value, or monotonically increasing version.
+- `version_type=external_gte` tells Elasticsearch/OpenSearch to accept this write only if its version is greater than or equal to the stored document version.
+- `title`, `price`, and `updated_at` are the denormalized search document fields, not the transactional source of truth.
+
+What breaks without versioning:
+
+```console
+Event A: product price = 299, version 10
+Event B: product price = 249, version 11
+Network delay delivers B first, then A second
+Without versioning, stale event A overwrites the newer price
+With external versioning, event A is rejected
+```
+
+Proof task:
+
+```console
+Index document version 11.
+Try indexing older version 10.
+Verify the search engine rejects or ignores the stale update.
+Then replay the same version 11 event and confirm idempotent behavior.
 ```
 If an out-of-order event arrives with a `version` (timestamp) lower than the version currently stored in Elasticsearch, Elasticsearch rejects the write with `409 Conflict`, guaranteeing eventual consistency.
 

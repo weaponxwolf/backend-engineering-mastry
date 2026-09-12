@@ -255,6 +255,20 @@ local remaining = math.max(0, math.floor(max_limit - (estimated_count + 1)))
 return {1, remaining, 0} -- [Allowed (1=true), Remaining, Retry-After]
 ```
 
+Line-by-line Lua reading:
+
+- `KEYS[1]` and `KEYS[2]` separate current and previous windows. Keeping two windows lets the limiter smooth the fixed-window boundary spike.
+- `tonumber(ARGV[1])` converts Redis strings into numbers. Lua arithmetic on strings is a bug waiting to happen.
+- `current_count` and `previous_count` are read inside the same script, so no other request can change them halfway through the decision.
+- `time_into_current_window = now_seconds % window_seconds` tells how far the current window has progressed.
+- `weight = (window_seconds - time_into_current_window) / window_seconds` fades out the previous window as time moves forward.
+- `estimated_count = current_count + (previous_count * weight)` is the sliding-window approximation.
+- `if estimated_count >= max_limit then` rejects before incrementing. The script returns `retry_after` so the API can set a useful `Retry-After` header.
+- `INCR current_key` records the accepted request atomically.
+- `EXPIRE current_key, window_seconds * 2` keeps the key long enough to serve as the previous window, then removes it to control memory.
+
+Proof drill: run 1,000 concurrent requests against a 100-request limit. The accepted count must be 100, not 101 or 130. If the result varies, the limiter is not atomic.
+
 ---
 
 ## 5. High-Throughput Scaling: Two-Tier L1/L2 Caching

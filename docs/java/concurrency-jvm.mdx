@@ -220,6 +220,41 @@ public void recordRequest() {
 }
 ```
 
+Line by line:
+
+- `private final` means callers cannot replace the counter reference after construction.
+- `AtomicInteger` stores the integer in an object whose update methods use CPU-supported atomic operations.
+- `new AtomicInteger(0)` initializes the counter to zero before requests arrive.
+- `incrementAndGet()` repeatedly performs a compare-and-swap loop until the write succeeds. If another thread wins the race first, this thread retries using the newer value.
+- The method protects an in-memory metric. It does not protect persistent business state in PostgreSQL; inventory and money need database atomicity.
+
+Proof test:
+
+```java
+AtomicInteger counter = new AtomicInteger();
+ExecutorService pool = Executors.newFixedThreadPool(16);
+
+List<Callable<Void>> tasks = IntStream.range(0, 1_000)
+        .mapToObj(i -> (Callable<Void>) () -> {
+            counter.incrementAndGet();
+            return null;
+        })
+        .toList();
+
+pool.invokeAll(tasks);
+
+assert counter.get() == 1_000;
+```
+
+What each part proves:
+
+- `newFixedThreadPool(16)` creates actual concurrent worker pressure.
+- `1_000` tasks create many racing increments.
+- `invokeAll(tasks)` waits for every increment attempt to complete.
+- `counter.get() == 1_000` proves no increments vanished.
+
+Run the same test with `volatile int count` and `count++` in a loop. It will eventually fail or become flaky because `count++` is a read-modify-write sequence, not one atomic operation.
+
 ---
 
 ## 2. Java 21 Virtual Threads (Project Loom)

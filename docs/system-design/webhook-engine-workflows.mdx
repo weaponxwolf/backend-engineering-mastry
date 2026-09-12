@@ -197,6 +197,22 @@ Stripe-Signature: t=1740837190,v1=5257a863e5e...
    $$| \text{Current Time} - t | \le 300\text{ seconds}$$
    If the timestamp is older than 5 minutes, the webhook is immediately discarded!
 
+Line-by-line signature verification:
+
+```java
+String signedPayload = timestamp + "." + rawBody;
+byte[] expected = hmacSha256(endpointSecret, signedPayload);
+boolean valid = MessageDigest.isEqual(expected, providedSignature);
+```
+
+- `timestamp + "." + rawBody` recreates the exact bytes the provider signed. Use the raw request body, not a parsed-and-reformatted JSON object.
+- `endpointSecret` must be the secret for this webhook endpoint, not a global application secret shared across tenants.
+- `hmacSha256(...)` proves the sender knows the shared secret and that the body was not changed in transit.
+- `MessageDigest.isEqual(...)` performs constant-time comparison. A normal string comparison can leak timing differences byte by byte.
+- The timestamp tolerance rejects replayed webhooks that were valid in the past.
+
+Proof drill: send the same payload with a changed body, a changed timestamp, a wrong secret, and an old timestamp. All four should fail before business code runs.
+
 ---
 
 ### 2. Outbound Worker Architecture: Concurrency Limits & Circuit Breakers
