@@ -98,7 +98,8 @@ const interceptorCode = `(function() {
 
   async function getPagefind() {
     if (!pagefindPromise) {
-      pagefindPromise = import('/pagefind/pagefind.js').then(async (pf) => {
+      const scriptPath = typeof window !== 'undefined' && window.PAGEFIND_PATH ? window.PAGEFIND_PATH : '/pagefind/pagefind.js';
+      pagefindPromise = import(scriptPath).then(async (pf) => {
         await pf.init();
         return pf;
       });
@@ -146,10 +147,12 @@ const interceptorCode = `(function() {
         const results = [];
         for (const item of topResults) {
           let cleanUrl = item.url
-            .replace(/\\/index\\.html$/, '')
-            .replace(/\\.html$/, '')
-            .replace(/\\/$/, '')
-            .replace(/^\\//, '');
+            .replace(/^.*\/out\//, '')
+            .replace(/^.*file:[^\/]*\//, '')
+            .replace(/\/index\.html$/, '')
+            .replace(/\.html$/, '')
+            .replace(/\/$/, '')
+            .replace(/^\//, '');
           if (cleanUrl === 'index') cleanUrl = '';
           const folder = cleanUrl.split('/')[0] || '';
           const categoryName = categoryMap[folder] || 'Documentation';

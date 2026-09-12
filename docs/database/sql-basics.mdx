@@ -1,6 +1,6 @@
 ---
 title: "SQL Query Lifecycle, Physical Storage Internals & Analytical Window Functions"
-description: "Master relational SQL from the ground up: Logical query execution order, 8 KB page storage layout, TOAST tables, advanced analytical window functions, recursive CTEs, and AST SQL injection deconstruction."
+description: "Master relational SQL from first principles: Logical query execution order, SQL three-valued logic (3VL), 8 KB page storage layout, TOAST tables, physical execution operators (scans, sorts, aggregations), analytical window functions, recursive CTEs, and atomic UPSERT conflict handling."
 ---
 
 # SQL Query Lifecycle, Physical Storage Internals & Analytical Window Functions
@@ -9,11 +9,14 @@ Structured Query Language (SQL) is often taught superficially as simple CRUD sta
 
 However, in high-throughput enterprise backends, treating SQL as magic text strings leads to catastrophic production failures:
 - Writing queries that fail with `column alias does not exist` because of a misunderstanding of the **logical query processing order**.
+- Writing queries with `WHERE status != 'CANCELLED'` and silently losing thousands of unassigned orders due to **SQL Three-Valued Logic (3VL)**.
+- Causing zero-row query blackouts on critical reporting pipelines because of the **`NOT IN (NULL)` subquery trap**.
 - Storing currency as `FLOAT` or `DOUBLE`, silently corrupting financial balances due to binary floating-point rounding errors.
 - Triggering severe disk I/O stalls because table columns exceed the **PostgreSQL 2 KB TOAST threshold**, forcing out-of-line disk seeks.
-- Causing security breaches because dynamic string concatenation mutates the database's **Abstract Syntax Tree (AST)**.
+- Triggering multi-gigabyte disk spills during analytical queries because sorting and hashing exceed **`work_mem`**.
+- Calculating incorrect cumulative balances due to the subtle, silent default frame behavior of **`RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`**.
 
-This masterclass provides an exhaustive, production-grade guide to the SQL query lifecycle, PostgreSQL physical storage page mechanics, advanced analytical window functions, recursive common table expressions (CTEs), and Prepared Statement internals.
+This masterclass provides an exhaustive, production-grade guide to the SQL query lifecycle, PostgreSQL physical storage page mechanics, query execution engine operators, advanced analytical window functions, recursive common table expressions (CTEs), and Prepared Statement internals.
 
 ---
 
@@ -83,7 +86,6 @@ LIMIT 10;
 ```
 
 Line by line:
-
 - `SELECT customer_id, ...` describes the final columns returned to the client, but it is not logically evaluated first.
 - `COUNT(*) AS order_count` counts rows inside each group after `GROUP BY`.
 - `SUM(total_cents) AS total_spent_cents` adds paid order totals per customer.
@@ -94,25 +96,137 @@ Line by line:
 - `ORDER BY total_spent_cents DESC` sorts the final grouped result. This can use the alias because `SELECT` has already created it.
 - `LIMIT 10` returns only the first ten sorted groups. It does not make the earlier grouping free.
 
-What breaks:
+---
+
+## SQL Three-Valued Logic (3VL) & The NULL Disaster
+
+Most programming languages use two-valued boolean logic (`TRUE` or `FALSE`). SQL fundamentally adheres to **Three-Valued Logic (3VL)**: a boolean expression evaluates to **`TRUE`**, **`FALSE`**, or **`UNKNOWN`** (`NULL`).
+
+### The 3VL Truth Tables
+
+| A | B | `A AND B` | `A OR B` | `NOT A` |
+| :--- | :--- | :--- | :--- | :--- |
+| `TRUE` | `TRUE` | `TRUE` | `TRUE` | `FALSE` |
+| `TRUE` | `FALSE` | `FALSE` | `TRUE` | `FALSE` |
+| `TRUE` | `UNKNOWN` | **`UNKNOWN`** | `TRUE` | `FALSE` |
+| `FALSE` | `FALSE` | `FALSE` | `FALSE` | `TRUE` |
+| `FALSE` | `UNKNOWN` | `FALSE` | **`UNKNOWN`** | `TRUE` |
+| `UNKNOWN` | `UNKNOWN` | **`UNKNOWN`** | **`UNKNOWN`** | **`UNKNOWN`** |
+
+> **The Filtering Law**:
+> In an SQL `WHERE` or `HAVING` clause, a row is returned **if and only if** the predicate evaluates strictly to **`TRUE`**. Rows where the predicate evaluates to `FALSE` **or `UNKNOWN`** are discarded!
+
+### Trap 1: The Silent Dropped Row Bug (`!=`)
+```sql
+-- Table contains 3 rows:
+-- id: 1, status: 'CANCELLED'
+-- id: 2, status: 'COMPLETED'
+-- id: 3, status: NULL (Unassigned order)
+
+SELECT * FROM orders WHERE status != 'CANCELLED';
+```
+**The Disaster**: You expect rows 2 and 3. You **only get row 2**!
+When evaluating row 3:
+$$\mathtt{NULL \ne 'CANCELLED'} \implies \mathbf{UNKNOWN}$$
+Because `UNKNOWN` is not `TRUE`, row 3 is silently eliminated. To include unassigned orders, you must explicitly handle nullability:
+```sql
+SELECT * FROM orders WHERE status != 'CANCELLED' OR status IS NULL;
+```
+
+### Trap 2: The Insidious `NOT IN (NULL)` Disaster
+Suppose you want to find all users who have not received any warnings:
 
 ```sql
-SELECT customer_id, SUM(total_cents) AS total_spent_cents
-FROM orders
-WHERE total_spent_cents > 100000
-GROUP BY customer_id;
+SELECT id, email 
+FROM users 
+WHERE id NOT IN (SELECT user_id FROM user_warnings);
 ```
 
-`WHERE total_spent_cents > 100000` fails because `total_spent_cents` does not exist yet at the `WHERE` step.
+If the `user_warnings` table contains even **a single row where `user_id IS NULL`**, the entire query returns **ZERO ROWS**, even if you have 10,000,000 users!
 
-Proof task:
+#### Why It Collapses:
+`id NOT IN (1, 2, NULL)` expands logically to:
+$$\mathtt{id \ne 1 \;\mathbf{AND}\; id \ne 2 \;\mathbf{AND}\; id \ne NULL}$$
+Since $\mathtt{id \ne NULL}$ evaluates to `UNKNOWN`:
+$$\mathtt{TRUE \;\mathbf{AND}\; TRUE \;\mathbf{AND}\; UNKNOWN} \implies \mathbf{UNKNOWN}$$
+The expression can never evaluate to `TRUE` for any row!
 
+#### The Production Defense: Always Use `NOT EXISTS`
+```sql
+-- Bulletproof: Immune to NULL values in the subquery!
+SELECT u.id, u.email 
+FROM users u
+WHERE NOT EXISTS (
+    SELECT 1 FROM user_warnings w WHERE w.user_id = u.id
+);
+```
+`NOT EXISTS` checks whether the subquery produces at least one tuple. If `user_id IS NULL`, the join condition `w.user_id = u.id` evaluates to `UNKNOWN` (no match), preserving correct anti-join semantics.
+
+---
+
+## Physical Execution Engine Operators: Scans, Sorts & Aggregations
+
+When PostgreSQL executes a query, the Executor interprets the execution plan as a physical tree of **Iterator Nodes**. Each node implements an iterator contract:
+- `ExecInitNode`: Allocates memory structures and opens relation files.
+- `ExecProcNode`: Called repeatedly to fetch the next single tuple (the Volcano iterator model).
+- `ExecEndNode`: Releases buffers, closes files, and deallocates memory.
+
+```mermaid
+flowchart TD
+    subgraph PlanTree ["PostgreSQL Physical Plan Operator Tree"]
+        Limit["1. Limit Node (Slices stream)"] --> Sort["2. Sort / External Merge Sort Node"]
+        Sort --> HashAgg["3. HashAggregate Node (Groups rows in RAM)"]
+        HashAgg --> Scan["4. Scan Operator (Seq Scan / Index Scan / Bitmap Scan)"]
+        Scan --> Disk["Physical 8 KB Database Pages (RAM or SSD)"]
+    end
+```
+
+### 1. Physical Scan Operators Compared
+
+```mermaid
+flowchart TD
+    subgraph ScanMechanics ["The 4 PostgreSQL Table Scan Operators"]
+        direction TB
+        Seq["1. Seq Scan<br/>Reads all 8 KB pages linearly from disk.<br/>Best for: Bulk table reads (> 15% of table)."]
+        Idx["2. Index Scan<br/>Traverses B-Tree leaf nodes -> gets (page, offset) -> random I/O read of 8 KB heap page.<br/>Best for: High selectivity point lookups (< 5% of rows)."]
+        IdxOnly["3. Index-Only Scan<br/>Traverses B-Tree -> checks Visibility Map.<br/>If all-visible: reads data directly from index! 0 heap fetches!<br/>Best for: Covering queries."]
+        Bitmap["4. Bitmap Index Scan + Bitmap Heap Scan<br/>Phase 1: B-Tree scan populates memory bitmap of target page IDs.<br/>Phase 2: Reads physical heap pages in sequential physical disk order!<br/>Best for: Multiple index intersections & medium selectivity (5-15%)."]
+    end
+```
+
+#### The Bitmap Index Scan Lossy Memory Fallback
+When executing a Bitmap Index Scan:
+1. PostgreSQL allocates an in-memory bitmap in `work_mem`.
+2. If `work_mem` is large enough, the bitmap is **Exact**: it stores the exact byte offset of every matching tuple within each page.
+3. If the number of matching rows is huge and exceeds `work_mem`, PostgreSQL downgrades the bitmap to **Lossy**: it only tracks which $8\text{ KB}$ pages contain matching rows, discarding the specific tuple offsets.
+4. During the subsequent **Bitmap Heap Scan**, PostgreSQL reads the marked pages and must re-evaluate the query predicate on every row in those pages (`Recheck Cond: (status = 'PAID')`)!
+
+### 2. Sort Operators: QuickSort vs External Merge Sort
+When sorting rows (`ORDER BY`), PostgreSQL evaluates the estimated memory size of the result set against the session's **`work_mem`** (default $4\text{ MB}$):
+
+| Sort Type | Location | Mechanics | Latency Impact |
+| :--- | :--- | :--- | :--- |
+| **`quicksort`** | In-Memory RAM | All tuples fit entirely within `work_mem`. Sorted in CPU cache. | Instantaneous ($< 1\text{ ms}$) |
+| **`top-N heapsort`** | In-Memory RAM | Used for `ORDER BY ... LIMIT K`. Maintains a bounded binary min-heap of only $K$ elements. | Extremely fast ($< 2\text{ ms}$) |
+| **`external merge disk`** | Disk (`pgsql_tmp/`) | Dataset exceeds `work_mem`. Engine partitions data into multiple sorted run files on disk, then executes an $N$-way merge! | Catastrophic latency spike ($100\text{ ms to }30\text{ s}$) |
+
+<Tip>
+**Diagnostic Rule**: If your `EXPLAIN (ANALYZE, BUFFERS)` reveals:
 ```console
-Run both queries against a small orders table.
-Observe the alias failure.
-Move the aggregate filter to HAVING.
-Explain why WHERE filters rows and HAVING filters groups.
+Sort Method: external merge  Disk: 42180kB
 ```
+Your query spilled $42\text{ MB}$ to disk temporary files. Increase `work_mem` for that session or query:
+```sql
+SET work_mem = '64MB';
+```
+</Tip>
+
+### 3. Aggregate Operators: `HashAggregate` vs `GroupAggregate`
+- **`HashAggregate`**: Builds an in-memory hash table where keys are the `GROUP BY` columns and values are the accumulated aggregate states (e.g., `sum`, `count`).
+  - *Speed*: $O(N)$ single pass over data.
+  - *Hazard*: If the number of distinct groups exceeds `work_mem`, PostgreSQL spills hash partitions to disk.
+- **`GroupAggregate`**: Expects input data to arrive **already sorted** on the `GROUP BY` keys (either via an existing B-Tree index or an explicit prior `Sort` node).
+  - *Speed*: Streams rows sequentially; emits aggregate result immediately when group key changes. Memory consumption is near-zero ($O(1)$).
 
 ---
 
@@ -325,28 +439,68 @@ WHERE account_id = 101;
 
 ---
 
-### 3. Sliding Window Frames: Running Balances & Moving Averages
+### 3. Sliding Window Frames: `ROWS` vs `RANGE` & The Default Frame Trap
 
-The `ROWS BETWEEN` clause defines the explicit physical boundary of rows evaluated relative to the current row:
+The window frame clause defines the exact subset of rows in the partition evaluated for each row.
+
+```mermaid
+flowchart TD
+    subgraph FrameTrap ["The RANGE vs ROWS Frame Difference"]
+        direction TB
+        R1["Row 1: date = 2026-09-01, amount = 100"]
+        R2["Row 2: date = 2026-09-02, amount = 200 (DUPLICATE DATE TIE!)"]
+        R3["Row 3: date = 2026-09-02, amount = 300 (DUPLICATE DATE TIE!)"]
+        
+        R2 & R3 -->|"RANGE (Default): Sees Row 2 & 3 as PEERS!"| RangeRes["Row 2 running sum = 600!<br/>Row 3 running sum = 600!<br/>💥 Running balance JUMPS ahead prematurely!"]
+        R2 & R3 -->|"ROWS: Evaluates strictly row-by-row"| RowsRes["Row 2 running sum = 300<br/>Row 3 running sum = 600<br/>✅ True mathematical cumulative balance!"]
+    end
+```
+
+<Warning>
+### The Treacherous Default Window Frame Trap
+When you write:
+```sql
+SUM(amount) OVER (PARTITION BY account_id ORDER BY transaction_date)
+```
+SQL standards dictate a hidden default frame:
+```sql
+RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+```
+Because `RANGE` operates on **value peers** rather than physical rows, if multiple rows share the exact same `transaction_date`, PostgreSQL aggregates all peer rows together for every peer! 
+
+**Production Rule**: For true physical running totals, always specify **`ROWS`**:
+```sql
+SUM(amount) OVER (
+    PARTITION BY account_id 
+    ORDER BY transaction_date 
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+) as running_balance
+```
+</Warning>
+
+### 4. Advanced Analytics: `NTILE`, `PERCENT_RANK`, and First/Last Values
 
 ```sql
 SELECT 
-    transaction_date,
+    id,
     amount,
-    -- 1. Running cumulative account balance from start of time to current row:
-    SUM(amount) OVER (
+    -- Splits transactions into 4 equal quartiles (1, 2, 3, 4)
+    NTILE(4) OVER (ORDER BY amount) AS quartile,
+    -- Relative rank from 0.0 to 1.0 (percentile rank)
+    ROUND(PERCENT_RANK() OVER (ORDER BY amount)::numeric, 3) AS pct_rank,
+    -- First transaction amount in the account's history
+    FIRST_VALUE(amount) OVER (
         PARTITION BY account_id 
-        ORDER BY transaction_date 
-        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-    ) as running_balance,
-    -- 2. Rolling 3-transaction moving average (Current row + 2 prior rows):
-    AVG(amount) OVER (
+        ORDER BY transaction_date
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS initial_deposit,
+    -- Latest transaction amount in the account's history
+    LAST_VALUE(amount) OVER (
         PARTITION BY account_id 
-        ORDER BY transaction_date 
-        ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
-    ) as moving_avg_3_tx
-FROM financial_transactions
-WHERE account_id = 101;
+        ORDER BY transaction_date
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS most_recent_amount
+FROM financial_transactions;
 ```
 
 ---
@@ -354,11 +508,19 @@ WHERE account_id = 101;
 ## Hierarchical Recursive CTEs with Cycle Detection
 
 Common Table Expressions (CTEs) define temporary named result sets using `WITH`.
-In PostgreSQL 12+, CTEs are automatically inlined by the optimizer unless explicitly marked `WITH my_cte AS MATERIALIZED (...)`.
+
+### PostgreSQL 12+ Inlining vs `MATERIALIZED` Optimization Fences
+In PostgreSQL 11 and older, all CTEs acted as **strict optimization fences**: PostgreSQL computed the CTE in RAM completely before executing the outer query, preventing the query optimizer from pushing down `WHERE` filters into the CTE.
+
+In PostgreSQL 12+, CTEs are automatically inlined into the main query plan. If you explicitly need to force PostgreSQL to evaluate a CTE once and prevent inlining:
+```sql
+WITH expensive_stats AS MATERIALIZED (
+    SELECT category, AVG(amount) FROM financial_transactions GROUP BY category
+)
+SELECT * FROM expensive_stats WHERE category = 'UTILITIES';
+```
 
 ### Traversal of Deeply Nested Comment Trees
-
-When building discussion forums or organizational charts, relational databases must traverse recursive hierarchical trees:
 
 ```sql
 CREATE TABLE comments (
@@ -369,12 +531,23 @@ CREATE TABLE comments (
     body TEXT NOT NULL
 );
 
--- Seed hierarchical data
 INSERT INTO comments (id, parent_id, post_id, author, body) VALUES
 (1, NULL, 99, 'alice', 'Top-level question?'),
 (2, 1,    99, 'bob',   'Direct answer to Alice'),
 (3, 2,    99, 'charlie','Follow-up reply to Bob'),
 (4, 1,    99, 'david', 'Alternative answer to Alice');
+```
+
+```mermaid
+flowchart TD
+    subgraph CTEExecution ["Recursive CTE Internal Engine Step Trace"]
+        Init["1. Anchor Evaluation<br/>Run Non-Recursive Member -> Populate Working Table (depth 1)"] --> Emit["2. Emit Working Table to Output Stream"]
+        Emit --> Recurse["3. Recursive Evaluation<br/>Join Working Table with Base Table -> Populate Intermediate Table"]
+        Recurse --> Check{"Intermediate Table Empty?"}
+        Check -- No --> Swap["Swap: Intermediate becomes Working Table -> Repeat Step 2"]
+        Swap --> Emit
+        Check -- Yes --> Terminate["4. Terminate execution and return result set"]
+    end
 ```
 
 ```sql
@@ -415,13 +588,67 @@ FROM comment_tree
 ORDER BY path;
 ```
 
-#### Output: Flawlessly Indented Comment Hierarchy
-```console
-alice: Top-level question?
-  --> bob: Direct answer to Alice
-  -->   --> charlie: Follow-up reply to Bob
-  --> david: Alternative answer to Alice
+---
+
+## Atomic Conflict Handling: `UPSERT` (`ON CONFLICT`) vs Standard `MERGE`
+
+Modern high-concurrency backends must handle concurrent inserts idempotently without throwing duplicate key errors.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Worker1 as Pod 1 (Concurrent User Sync)
+    actor Worker2 as Pod 2 (Concurrent User Sync)
+    participant DB as PostgreSQL Engine (Unique Index on email)
+
+    Worker1->>DB: INSERT INTO users (email, login_count) VALUES ('alice@x.com', 1)
+    Worker2->>DB: INSERT INTO users (email, login_count) VALUES ('alice@x.com', 1)
+    
+    Note over DB: Worker 1 inserts tuple first; acquires Row Exclusive lock.
+    Note over DB: Worker 2 detects Unique Key Conflict!
+    
+    alt Standard INSERT without Conflict Handler
+        DB-->>Worker2: 💥 ERROR: duplicate key value violates unique constraint "users_email_key"
+    else ON CONFLICT (email) DO UPDATE
+        Note over DB: Engine pivots Worker 2's statement into UPDATE on existing row!
+        DB-->>Worker2: 200 OK (login_count incremented to 2)
+    end
 ```
+
+### The PostgreSQL `ON CONFLICT` Construct
+```sql
+INSERT INTO user_analytics (user_id, last_seen, event_count)
+VALUES (42, NOW(), 1)
+ON CONFLICT (user_id) 
+DO UPDATE SET 
+    last_seen = EXCLUDED.last_seen,
+    event_count = user_analytics.event_count + 1
+WHERE user_analytics.last_seen < EXCLUDED.last_seen;
+```
+
+Line by line:
+- `INSERT INTO user_analytics ...`: The optimistic attempt to insert a new row.
+- `ON CONFLICT (user_id)`: Specifies the unique index or primary key target. An explicit unique index on `user_id` **is mandatory**.
+- `DO UPDATE SET`: If another transaction already committed `user_id = 42`, PostgreSQL acquires a row-level lock on the conflicting row and updates it.
+- `EXCLUDED`: A special pseudo-relation containing the row proposed for insertion.
+- `WHERE user_analytics.last_seen < EXCLUDED.last_seen`: Concurrency guard preventing older events from overwriting newer timestamps!
+
+### `ON CONFLICT` vs SQL:2016 Standard `MERGE` (PostgreSQL 15+)
+PostgreSQL 15 introduced standard SQL `MERGE`:
+```sql
+MERGE INTO customer_balance cb
+USING incoming_payments ip ON cb.customer_id = ip.customer_id
+WHEN MATCHED THEN
+    UPDATE SET balance = cb.balance + ip.amount
+WHEN NOT MATCHED THEN
+    INSERT (customer_id, balance) VALUES (ip.customer_id, ip.amount);
+```
+
+| Feature | `INSERT ... ON CONFLICT` | `MERGE` (PostgreSQL 15+) |
+| :--- | :--- | :--- |
+| **Concurrency Safety** | **Atomic**: Specially handles concurrent inserts without race conditions. | Vulnerable to concurrent race conditions if two threads run `MERGE` simultaneously! |
+| **Prerequisite** | Requires an explicit unique index on conflict target. | Operates on arbitrary join conditions. |
+| **Use Case** | Single-row high-throughput OLTP upserts (APIs). | Bulk batch syncing from staging/ETL tables. |
 
 ---
 
@@ -457,10 +684,7 @@ graph TD
 
 ## SQL Fundamentals Interview Map
 
-SQL questions look easy until the interviewer asks what the database actually executes.
-
 ### 1. `WHERE` vs `HAVING`
-
 `WHERE` filters rows before grouping. `HAVING` filters groups after aggregation.
 
 ```sql
@@ -471,117 +695,20 @@ GROUP BY user_id
 HAVING COUNT(*) >= 3;
 ```
 
-Execution idea:
-
-```mermaid
-flowchart LR
-    Rows["All orders"] --> Where["WHERE status = PAID"]
-    Where --> Group["GROUP BY user_id"]
-    Group --> Having["HAVING count >= 3"]
-    Having --> Select["Return result"]
-```
-
 ### 2. `NULL` Is Unknown, Not Empty
-
 `NULL` means missing or unknown. It does not equal anything, even another `NULL`.
-
-```sql
-SELECT *
-FROM users
-WHERE deleted_at = NULL; -- wrong
-```
-
-Correct:
-
-```sql
-SELECT *
-FROM users
-WHERE deleted_at IS NULL;
-```
-
-Production trap:
-
-```sql
-SELECT *
-FROM users
-WHERE id NOT IN (SELECT user_id FROM bans);
-```
-
-If the subquery contains `NULL`, `NOT IN` can return no rows. Prefer `NOT EXISTS`.
+- `WHERE deleted_at = NULL` is always `UNKNOWN` (returns 0 rows).
+- Use `WHERE deleted_at IS NULL`.
+- `NOT IN (subquery with NULL)` fails completely; always use `NOT EXISTS`.
 
 ### 3. Inner Join vs Left Join
-
 `INNER JOIN` returns only matching rows. `LEFT JOIN` keeps every row from the left table and fills missing right-side values with `NULL`.
 
-```sql
-SELECT p.id, p.title, c.id AS comment_id
-FROM posts p
-LEFT JOIN comments c ON c.post_id = p.id;
-```
-
-Use `LEFT JOIN` when the parent should appear even if no child exists.
-
 ### 4. Why `SELECT *` Hurts Production
-
-`SELECT *` reads columns you do not need.
-
-Costs:
-
-- More disk and buffer-pool reads.
-- More network bytes.
-- More JVM object allocation.
-- More risk of pulling large TOAST values.
-- Fragile API behavior when columns are added.
-
-Use explicit projection:
-
-```sql
-SELECT id, title, created_at
-FROM notes
-WHERE user_id = ?
-ORDER BY created_at DESC
-LIMIT 50;
-```
-
-### 5. Transactions Are Not Just `BEGIN` and `COMMIT`
-
-A transaction groups reads and writes into one atomic unit. But isolation controls what concurrent transactions can observe.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant T1 as Transaction 1
-    participant T2 as Transaction 2
-    participant DB as Database
-
-    T1->>DB: Read stock = 1
-    T2->>DB: Read stock = 1
-    T1->>DB: Write stock = 0
-    T2->>DB: Write stock = 0
-    Note over DB: Without protection, two purchases can succeed
-```
-
-Do not answer transaction questions only with ACID definitions. Be ready to explain lost updates, locks, MVCC snapshots, and atomic SQL updates.
-
-### Build-Break-Fix Lab
-
-<Steps>
-  <Step title="Build">
-    Create `users`, `orders`, and `payments` tables with realistic constraints.
-  </Step>
-  <Step title="Break">
-    Write queries using `SELECT *`, `NOT IN` with nullable subqueries, and unbounded result sets.
-  </Step>
-  <Step title="Observe">
-    Compare result correctness and `EXPLAIN (ANALYZE, BUFFERS)` output.
-  </Step>
-  <Step title="Fix">
-    Use explicit columns, `NOT EXISTS`, indexes that match filters, and bounded pagination.
-  </Step>
-  <Step title="Prove">
-    Add SQL tests or integration tests for each query's expected rows.
-  </Step>
-</Steps>
+- Forces unnecessary TOAST table out-of-line seeks.
+- Evicts active pages from the shared buffer cache.
+- Bypasses Index-Only scans.
+- Increases JVM garbage collection overhead.
 
 ---
 
@@ -602,39 +729,25 @@ Do not answer transaction questions only with ACID definitions. Be ready to expl
     11. `LIMIT / OFFSET`: Slices the returned row window.
   </Accordion>
 
-  <Accordion title="2. What is the physical structure of an 8 KB PostgreSQL database page, and why are Line Pointers used?">
-    An $8\text{ KB}$ PostgreSQL page consists of:
-    1. **`PageHeaderData` (24 bytes)**: Contains the LSN, lower/upper free space pointers, and transaction checksums.
-    2. **Line Pointers / ItemIDs**: 4-byte pointers that grow downward from the header, storing byte offsets to individual tuples.
-    3. **Free Space**: Empty memory between lower and upper pointers.
-    4. **Tuple Data**: Physical heap rows that grow upward from the bottom of the page, beginning with a 23-byte header (`xmin`, `xmax`, `t_ctid`).
-    
-    **Line Pointers** decouple physical byte locations from index pointers. Database indexes point to `(PageNumber, ItemId)`. If a row moves or is vacuumed within the page, only its line pointer offset is updated; table indexes do not need to be rewritten.
+  <Accordion title="2. Why does WHERE status != 'CANCELLED' silently discard rows where status IS NULL?">
+    SQL uses Three-Valued Logic (3VL). When evaluating `NULL != 'CANCELLED'`, the result is neither `TRUE` nor `FALSE`; it evaluates to `UNKNOWN`. In an SQL `WHERE` clause, a row is returned only if the condition evaluates strictly to `TRUE`. Because `UNKNOWN` is not `TRUE`, all NULL rows are silently filtered out.
   </Accordion>
 
-  <Accordion title="3. What is PostgreSQL TOAST, what triggers it, and what performance hazard does it create?">
-    TOAST (The Oversized-Attribute Storage Technique) handles column values that exceed the $2\text{ KB}$ inline threshold, since rows cannot span across $8\text{ KB}$ pages.
-    
-    PostgreSQL first attempts to compress the column inline (`pglz` or `lz4`). If it still exceeds $2\text{ KB}$, it slices the data into $2\text{ KB}$ chunks and writes them to a separate out-of-line table (`pg_toast_xxx`), leaving an 18-byte pointer in the main table.
-    
-    **Performance Hazard**: Executing `SELECT *` forces PostgreSQL to perform random disk seeks into the TOAST table to reconstruct large text/json columns, degrading query throughput. Always select explicit columns to avoid reading unneeded TOAST data.
+  <Accordion title="3. Why does NOT IN return zero rows if the subquery contains a NULL value, and how does NOT EXISTS solve this?">
+    `x NOT IN (1, 2, NULL)` expands to `x != 1 AND x != 2 AND x != NULL`. Because `x != NULL` evaluates to `UNKNOWN`, the entire logical `AND` chain evaluates to `UNKNOWN` or `FALSE`. It can never evaluate to `TRUE`, causing zero rows to be returned. `NOT EXISTS` tests for the existence of rows matching a correlated predicate, preserving correct three-valued anti-join semantics without collapsing.
   </Accordion>
 
-  <Accordion title="4. Explain the difference between ROW_NUMBER(), RANK(), and DENSE_RANK().">
-    - `ROW_NUMBER()`: Assigns a strictly unique, sequential integer (1, 2, 3, 4) to each row within a partition, breaking ties arbitrarily if values match.
-    - `RANK()`: Assigns the same rank to identical values, but leaves gaps in the sequence following ties (e.g., 1, 2, 2, 4).
-    - `DENSE_RANK()`: Assigns the same rank to identical values, but leaves **no gaps** in the sequence following ties (e.g., 1, 2, 2, 3).
+  <Accordion title="4. What is the difference between Index Scan, Index-Only Scan, and Bitmap Index Scan?">
+    - **Index Scan**: Traverses the B-Tree index to find tuple identifiers (`ctid`), then performs random disk seeks to fetch the physical 8 KB table heap page for every matching row.
+    - **Index-Only Scan**: Fetches required column data directly from B-Tree leaf pages without visiting the table heap, verified via the Visibility Map.
+    - **Bitmap Index Scan**: Scans the index to build an in-memory bitmap of target page numbers, then executes a Bitmap Heap Scan reading table pages in sequential physical disk block order, minimizing disk head movements.
   </Accordion>
 
-  <Accordion title="5. Why does storing currency as FLOAT or DOUBLE cause silent financial loss, and what should be used instead?">
-    `FLOAT` and `DOUBLE` adhere to IEEE 754 floating-point standards that represent numbers in base-2 binary fractions. Decimal fractions like $0.10$ cannot be represented accurately in binary, producing precision errors such as $0.1 + 0.2 = 0.30000000000000004$. Over millions of transactions, rounding drift causes real financial balance discrepancies.
-    
-    **Solution**: Always use exact arbitrary precision types like `NUMERIC(19, 4)` / `DECIMAL(19, 4)`, or store financial amounts as whole integers representing atomic micro-units (`BIGINT amount_in_cents`).
+  <Accordion title="5. Explain the dangerous default window frame in SQL running sums and how to fix it.">
+    When specifying `OVER (ORDER BY date)` without an explicit frame, SQL defaults to `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. Because `RANGE` treats duplicate date values as peers, it sums all peer rows together for every peer row, causing running totals to jump ahead prematurely. To ensure true row-by-row cumulative sums, explicitly specify `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`.
   </Accordion>
 
-  <Accordion title="6. How do Prepared Statements mathematically eliminate SQL Injection at the Abstract Syntax Tree (AST) level?">
-    In dynamic string concatenation, user input is parsed alongside SQL keywords, allowing malicious quotes and operators (`OR '1'='1`) to alter the grammar and generate new boolean AST branches.
-    
-    In a Prepared Statement, the SQL engine parses and compiles the AST **once** using parameter placeholders (`$1`). When user input values are supplied during execution, the database engine binds them strictly as **scalar literal data values** into pre-allocated memory slots. The engine never passes the parameter bytes through the SQL lexer or parser again, making AST grammar mutation impossible.
+  <Accordion title="6. What is the difference between INSERT ... ON CONFLICT and standard SQL MERGE under high concurrency?">
+    `INSERT ... ON CONFLICT` is atomic and explicitly engineered for high-concurrency OLTP workloads; if two threads attempt concurrent inserts on the same unique key, PostgreSQL safely pivots one into an update without failing. Standard SQL `MERGE` evaluates join conditions over an entire dataset and is susceptible to concurrent race conditions and serialization deadlocks if multiple threads run `MERGE` concurrently on overlapping rows.
   </Accordion>
 </AccordionGroup>

@@ -55,16 +55,23 @@ npx vercel --prod
 
 ---
 
-## Mintlify Search Architecture & Local Dev Mechanics
-- **Cloud-Powered Search Engine**:
-  - Mintlify does **not** generate an in-browser client-side full-text search index (e.g. Lunr/FlexSearch).
-  - Search queries are handled by Mintlify's cloud AI & semantic search backend (`https://api.mintlify.com`).
-- **Why Search Fails Locally in `npm run dev`**:
-  - When typing in the search bar on `http://localhost:3000`, the browser posts to `/_mintlify/api-public/search/:subdomain`.
-  - The local Express dev server attempts to proxy this request upstream to `https://api.mintlify.com/api/cli/${subdomain}/search`.
-  - **Authentication Requirement**: Upstream proxying requires a valid Mintlify account access token. Without logging in, the upstream API returns `{"error":"session_invalid"}`.
-  - **To Activate Search Locally**:
-    Run `npx mintlify login` in your terminal to authenticate with your Mintlify account. Once authenticated, `mintlify dev` includes the `Authorization: Bearer <token>` header, enabling local search.
+## Mintlify Search Architecture & Offline Local Dev Mechanics
+- **Cloud-Powered Search vs Local Offline Search**:
+  - In standard Mintlify, full-text and semantic search queries are handled by Mintlify's cloud AI search backend (`https://api.mintlify.com`).
+  - Without logging in via `mintlify login`, the cloud proxy fails with `{"error":"session_invalid"}`.
+- **Why the AI Assistant Was Coming Up Instead of Search Results**:
+  1. **Missing `subdomain` in Client Context**:
+     - The client-side hook `useSearch` checks `let { subdomain } = useContext(DeploymentMetadataContext)`.
+     - If `subdomain` is `undefined` (which occurs if `MINTLIFY_CLI_SUBDOMAIN` is not explicitly exported), `useSearch` immediately executes `if (!e) return { id: crypto.randomUUID(), results: [] };` without querying the search proxy at all.
+  2. **`isLoggedInCli` & `hasChatPermissions` Trap**:
+     - When `MINTLIFY_CLI_ACCESS_TOKEN` is set, `isLoggedInCli()` evaluates to `true`.
+     - In `layout.tsx`, `hasChatPermissions` is assigned the value of `isLoggedInCli()`.
+     - If `hasChatPermissions` is `true` while search results are empty (`0 results`), Mintlify's `Autocomplete` component only renders `{ key: "ask-ai", label: "Ask Assistant" }` in the dropdown.
+     - Pressing Enter or clicking immediately routed the query to the cloud AI assistant (which fails offline anyway), while rendering a floating "Ask a question... Ctrl+I" widget across all pages.
+- **The Complete Offline Search Solution (`scripts/patch-mintlify-dev-search.mjs`)**:
+  - **Subdomain Initialization**: `run.js` and `package.json` export `MINTLIFY_CLI_SUBDOMAIN=backend-mastery` and `MINTLIFY_CLI_ACCESS_TOKEN=local-offline-dev-token` before `setupNext()` is initialized.
+  - **Disabling Broken Cloud Assistant Locally**: `scripts/patch-mintlify-dev-search.mjs` automatically patches `apps_client_src_app_(local)_[[___slug]]_layout_tsx_*.js` in `~/.mintlify/previews/` to enforce `hasChatPermissions: false`. This removes all AI assistant modals, the floating "Ask a question..." widget, and the "Ask Assistant" fallback.
+  - **In-Memory Scored Content Search**: The local Express server at `/_mintlify/api-public/search/:subdomain` reads all `.mdx` files in `docs/`, scores exact/partial title matches and body occurrences, strips markdown formatting, and returns top results with breadcrumbs, clean excerpts, and instant client-side route navigation.
 - **Production Search (Vercel / Cloud)**:
   - In static export builds on Vercel, the frontend issues search requests directly to `https://api.mintlify.com/api/search/<subdomain>`.
   - For results to return in production, the repository must be connected to a registered Mintlify project dashboard so Mintlify's cloud crawler has indexed the MDX pages.
@@ -96,6 +103,13 @@ npx vercel --prod
 ## Repository Transformation & Current State (September 2026)
 
 All phases of the comprehensive documentation overhaul and book-replacement depth expansion have been successfully executed and validated:
+
+**September 12, 2026 Update — Database Engineering Deepening (Book Replacement Standard)**
+- `docs/database/postgres-wal-replication-pgbouncer.mdx` expanded from 10.7 KB to 30.5 KB: physical storage pipeline and non-volatile NAND flash boundaries, 16 MB WAL segment naming (`Timeline ID + LSN High + Segment`), 8 KB WAL page layout, `XLogRecord` C-struct headers, `pg_waldump` deconstruction, LSN byte math (`pg_wal_lsn_diff`), torn-page hazard and `full_page_writes = on` with `wal_compression = lz4`, checkpoint flush smoothing math (`checkpoint_completion_target = 0.9`), 5 levels of `synchronous_commit`, physical vs logical replication slots and `max_slot_wal_keep_size` disk protection, complete production Spring Boot dynamic read/write routing architecture (`AbstractRoutingDataSource`, `@Order` AOP aspect, ThreadLocal cleanup, `LazyConnectionDataSourceProxy`), and PgBouncer epoll architecture, connection pooling modes, prepared statement solutions (`prepareThreshold=0`), and production `pgbouncer.ini` configuration.
+- `docs/database/sql-basics.mdx` expanded to 35+ KB: SQL Three-Valued Logic (3VL) complete truth tables, `WHERE column != 'X'` silent NULL omission trap, the insidious `NOT IN (NULL)` disaster vs `NOT EXISTS` anti-join, physical execution engine iterator tree (Volcano model: `ExecInitNode`, `ExecProcNode`, `ExecEndNode`), physical scan operators (`Seq Scan`, `Index Scan`, `Index-Only Scan`, `Bitmap Index Scan` exact vs lossy in `work_mem`), sort operators (`quicksort`, `top-N heapsort`, `external merge disk` in `pgsql_tmp`), aggregate operators (`HashAggregate` vs `GroupAggregate`), window frame physics (`ROWS` vs `RANGE` and the dangerous default frame peer-sum trap), advanced analytics (`NTILE`, `PERCENT_RANK`, `FIRST_VALUE`, `LAST_VALUE`), recursive CTE working table and intermediate table step trace, and atomic `UPSERT` (`INSERT ... ON CONFLICT (key) DO UPDATE`) vs SQL:2016 standard `MERGE`.
+- `docs/database/locking-isolation.mdx` expanded to 33+ KB: PostgreSQL complete 8 Table Lock modes and 8x8 conflict matrix (`ACCESS SHARE` through `ACCESS EXCLUSIVE`), DDL lock queue trap and `SET lock_timeout = '2s'`, 4 Row Lock modes (`FOR KEY SHARE`, `FOR SHARE`, `FOR NO KEY UPDATE`, `FOR UPDATE`) and their conflict matrix, why `FOR NO KEY UPDATE` is vital to prevent blocking concurrent child foreign-key validations, distributed cluster coordination with PostgreSQL transactional advisory locks in Spring Boot (`pg_try_advisory_xact_lock`), Serializable Snapshot Isolation (SSI) internals and `SIREAD` rw-antidependency cycle detection with Spring `@Retryable` for `SQLState 40001`, deadlock detection wait-for graph cycle detection, and the production timeout triad.
+- `docs/database/relationships-joins.mdx` expanded to 28+ KB: Physical join execution engine (Nested Loop cost formula, Hash Join multi-batch disk spills to `pgsql_tmp` when `work_mem` is exceeded, Merge Join zipper scan and duplicate rewind), Semi-Joins (`EXISTS`) vs Anti-Joins (`NOT EXISTS`) execution mechanics, foreign-key indexing lock propagation (`SHARE ROW EXCLUSIVE` table lock on child when deleting from parent), and kernel-level Row-Level Security (RLS) AST rewriting via PostgreSQL Query Rewriter with Spring Boot `SET LOCAL app.current_tenant_id`.
+- `docs/database/indexes-transactions.mdx` expanded to 32+ KB: B+Tree fanout mathematics, page split physics comparing 50-50 splits on random `UUIDv4` vs 90-10 rightmost append splits on monotonic keys (`BIGSERIAL`, `UUIDv7`, `TSID`), Heap-Only Tuples (HOT) update mechanics and line pointer chaining, `fillfactor = 70` free space reserve tuning, Cost-Based Optimizer (CBO) index abandonment threshold (5-15% selectivity), and covering indexes (`INCLUDE` clause) leaf vs branch payload separation.
 
 **September 12, 2026 Update — Explanation Density Standard**
 - `docs/getting-started/simple-english-rule.mdx` now contains an "Every Line Must Teach" rule requiring nearby explanations for important code lines, SQL clauses, configuration properties, commands, headers, and architecture steps.
@@ -997,6 +1011,26 @@ All phases of the comprehensive documentation overhaul and book-replacement dept
       - Updated incoming links in `first-program.mdx`, `backend-roadmap.mdx`, `mastery-assessments.mdx`, and `index.mdx`.
       - Validated full test suite: `test:audit` (4/4 passed), `audit` (0 errors, 103 navigation entries), `validate` (build passed), and `links` (0 broken links).
 
+20. **Client-Side Search via Pagefind WebAssembly & Offline Dev Fallback (September 12, 2026)**:
+    - **Problem**:
+      - Mintlify CLI does not ship with an in-browser local full-text search index. Instead, it proxies search queries (`/_mintlify/api-public/search/:subdomain`) to Mintlify's cloud backend (`https://api.mintlify.com`).
+      - Without executing `npx mintlify login` to authenticate an active account, local searches fail with `{"error":"session_invalid"}`.
+      - On static deployments (such as Vercel export), queries default to cloud endpoints that fail if the site is not registered on Mintlify's cloud crawler.
+    - **Solution (Option 3 Architecture)**:
+      1. *Production Static Search (Pagefind WebAssembly)*:
+         - Integrated `npx pagefind --site out` directly into the Vercel build pipeline (`scripts/build-vercel.mjs`).
+         - Configured `data-pagefind-body` tagging on `<main id="content-container">` across all 105 exported HTML pages, ensuring Pagefind indexes only actual technical prose, completely eliminating noise from sidebars, navigation trees, and theme switches.
+         - Generates `out/pagefind-interceptor.js`, which monkey-patches `window.fetch` to intercept Mintlify's search calls (`/_mintlify/api-public/search`, `/api/search`, `/_mintlify/api/search`).
+         - Queries the client-side Pagefind WASM engine in sub-millisecond time and maps results to Mintlify's native autocomplete format (matching `page`, `header`, `content`, `metadata.breadcrumbs`, and direct `#hash` section jumps).
+         - Injected `<script src="/pagefind-interceptor.js"></script>` into the `<head>` of every HTML output file.
+      2. *Local Dev Server Fallback (`scripts/patch-mintlify-dev-search.mjs`)*:
+         - Added an automated patch script to `package.json` (`dev` and `postinstall` hooks).
+         - Sets `MINTLIFY_CLI_ACCESS_TOKEN=local-offline-dev-token` directly in the `dev` command script so the environment is initialized before Node or Next.js starts.
+         - Patches `@mintlify/previewing/dist/local-preview/run.js` before `setupNext()` is called, ensuring `isLoggedInCli` evaluates to `true` in Next.js React layout (`tu = isCli && !isLoggedInCli` becomes false), unlocking the native `<input data-component-part="search-input">`.
+         - Uses `CMD_EXEC_PATH` from `constants.js` to reliably resolve the project's `docs/` directory (since Mintlify dev executes `process.chdir(CLIENT_PATH)` into `~/.mintlify/previews/...`).
+         - Serves a 5ms local disk search across all 103 MDX files with complete metadata schema (`breadcrumbs`, `title`, `hash`), completely removing the need to run `npx mintlify login` in local development.
+         - Note: If `npm run dev` was already running in a terminal when patches were applied, the running Node process in RAM must be restarted (`Ctrl+C` then `npm run dev`) because Node does not reload modified modules in active memory.
+
 ---
 
 ## Latest Verification Summary
@@ -1006,5 +1040,10 @@ All phases of the comprehensive documentation overhaul and book-replacement dept
   - **Editorial Observations**: 0 generic text fences remain.
   - **Mintlify Validate**: Build validation passed cleanly (`navigation.tabs` with 9 major topics, 15 pages in Java Foundation).
   - **Mintlify Broken Links**: `success no broken links found` (100% link and anchor integrity across all 103 MDX documents).
-- `npm run build` (`node scripts/build-vercel.mjs`) should still be run before deployment packaging when a new static bundle is required.
+- `npm run build` (`node scripts/build-vercel.mjs`):
+  - **Mintlify Export**: 103 pages exported to `docs/export.zip`.
+  - **HTML Staging & Tagging**: 105 HTML files prepared with `data-pagefind-body` and `<script src="/pagefind-interceptor.js">`.
+  - **Pagefind Indexing**: 105 pages and 18,883 words indexed in WebAssembly in 1.33s.
+  - **Interceptor Verification**: Pagefind interceptor successfully verified in Node simulation (21 results returned for query `"hashmap"` with proper breadcrumbs and section hashes).
+
 

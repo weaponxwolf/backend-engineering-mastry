@@ -1,7 +1,7 @@
 ---
 title: "Database Locking, Isolation Levels & MVCC Internals"
 sidebarTitle: "Locking & Isolation"
-description: "From physical CPU cache races to staff-level MVCC internals: The definitive guide to database concurrency, isolation anomalies, PostgreSQL xmin/xmax tuples, pessimistic locking, and deadlock elimination."
+description: "From physical CPU cache races to staff-level MVCC internals: The definitive guide to database concurrency, ANSI isolation levels vs PostgreSQL reality, the 8 table lock modes conflict matrix, row locks (FOR NO KEY UPDATE), distributed advisory locks in Spring Boot, SSI rw-antidependencies, and deadlock elimination."
 ---
 
 ## Prerequisites: Before You Begin
@@ -130,7 +130,9 @@ PostgreSQL's background deadlock detector runs, detects the circular wait, and *
 
 # Phase 3: Under the Hood (Mechanics & Bytecode)
 
-To build bulletproof concurrent systems, you must understand how the database engine manages row versions and locks.
+To build bulletproof concurrent systems, you must understand how the database engine manages row versions, table locks, and memory structures.
+
+---
 
 ## 1. PostgreSQL MVCC Internals: How Snapshots Work
 
@@ -176,11 +178,234 @@ sequenceDiagram
 
 ---
 
-## 2. The 3 Production Concurrency Control Strategies
+## 2. PostgreSQL Table-Level Lock Modes & Conflict Matrix
+
+In PostgreSQL, every SQL statement automatically acquires a **Table-Level Lock** in shared memory to protect against conflicting structural schema changes.
+
+There are **8 Table Lock Modes**, arranged in ascending order of restrictiveness:
+
+| Lock Mode | Acquired By Statements | Conflicts With |
+| :--- | :--- | :--- |
+| **`ACCESS SHARE`** | `SELECT` | `ACCESS EXCLUSIVE` |
+| **`ROW SHARE`** | `SELECT FOR UPDATE / FOR SHARE` | `EXCLUSIVE`, `ACCESS EXCLUSIVE` |
+| **`ROW EXCLUSIVE`** | `INSERT`, `UPDATE`, `DELETE` | `SHARE`, `SHARE ROW EXCLUSIVE`, `EXCLUSIVE`, `ACCESS EXCLUSIVE` |
+| **`SHARE UPDATE EXCLUSIVE`** | `VACUUM (without FULL)`, `ANALYZE`, `CREATE INDEX CONCURRENTLY` | `SHARE UPDATE EXCLUSIVE`, `SHARE`, `SHARE ROW EXCLUSIVE`, `EXCLUSIVE`, `ACCESS EXCLUSIVE` |
+| **`SHARE`** | `CREATE INDEX (non-concurrent)` | `ROW EXCLUSIVE`, `SHARE UPDATE EXCLUSIVE`, `SHARE ROW EXCLUSIVE`, `EXCLUSIVE`, `ACCESS EXCLUSIVE` |
+| **`SHARE ROW EXCLUSIVE`** | `CREATE TRIGGER`, unindexed FK checks | `ROW EXCLUSIVE`, `SHARE UPDATE EXCLUSIVE`, `SHARE`, `SHARE ROW EXCLUSIVE`, `EXCLUSIVE`, `ACCESS EXCLUSIVE` |
+| **`EXCLUSIVE`** | `REFRESH MATERIALIZED VIEW CONCURRENTLY` | `ROW SHARE`, `ROW EXCLUSIVE`, `SHARE UPDATE EXCLUSIVE`, `SHARE`, `SHARE ROW EXCLUSIVE`, `EXCLUSIVE`, `ACCESS EXCLUSIVE` |
+| **`ACCESS EXCLUSIVE`** | `ALTER TABLE`, `DROP TABLE`, `TRUNCATE`, `VACUUM FULL`, `REINDEX TABLE` | **ALL OTHER LOCK MODES** (Blocks all reads and writes!) |
+
+### The Table Lock Conflict Matrix
+
+$$\begin{array}{l|cccccccc}
+\textbf{Requested} \downarrow \;/\; \textbf{Existing} \rightarrow & \text{AS} & \text{RS} & \text{RE} & \text{SUE} & \text{S} & \text{SRE} & \text{E} & \text{AE} \\
+\hline
+\text{ACCESS SHARE (AS)} & & & & & & & & \mathbf{X} \\
+\text{ROW SHARE (RS)} & & & & & & & \mathbf{X} & \mathbf{X} \\
+\text{ROW EXCLUSIVE (RE)} & & & & & \mathbf{X} & \mathbf{X} & \mathbf{X} & \mathbf{X} \\
+\text{SHARE UPDATE EXCL (SUE)} & & & & \mathbf{X} & \mathbf{X} & \mathbf{X} & \mathbf{X} & \mathbf{X} \\
+\text{SHARE (S)} & & & \mathbf{X} & \mathbf{X} & & \mathbf{X} & \mathbf{X} & \mathbf{X} \\
+\text{SHARE ROW EXCL (SRE)} & & & \mathbf{X} & \mathbf{X} & \mathbf{X} & \mathbf{X} & \mathbf{X} & \mathbf{X} \\
+\text{EXCLUSIVE (E)} & & \mathbf{X} & \mathbf{X} & \mathbf{X} & \mathbf{X} & \mathbf{X} & \mathbf{X} & \mathbf{X} \\
+\text{ACCESS EXCLUSIVE (AE)} & \mathbf{X} & \mathbf{X} & \mathbf{X} & \mathbf{X} & \mathbf{X} & \mathbf{X} & \mathbf{X} & \mathbf{X} \\
+\end{array}$$
+
+*(Where $\mathbf{X}$ denotes a blocking conflict).*
+
+<Warning>
+### The DDL Lock Queue Trap
+Notice that `ACCESS EXCLUSIVE` conflicts with `ACCESS SHARE`. If an analytics query runs a 10-minute `SELECT` (`ACCESS SHARE`), and an engineer issues `ALTER TABLE users ADD COLUMN bio TEXT` (`ACCESS EXCLUSIVE`):
+1. The `ALTER TABLE` blocks behind the `SELECT`.
+2. **Every subsequent `SELECT` on `users` queues behind the `ALTER TABLE`!**
+3. Within 15 seconds, all Tomcat threads freeze, and the entire backend crashes!
+
+**Production Rule**: Always set a lock timeout before executing DDL:
+```sql
+SET lock_timeout = '2s';
+ALTER TABLE users ADD COLUMN bio TEXT;
+```
+</Warning>
+
+---
+
+## 3. Row-Level Lock Modes & `FOR NO KEY UPDATE`
+
+PostgreSQL provides **4 Row-Level Lock Modes**:
+
+```mermaid
+flowchart TD
+    subgraph RowLocks ["PostgreSQL Row Lock Hierarchy"]
+        FKS["1. FOR KEY SHARE<br/>Weakest: Foreign Key referencing rows"]
+        FS["2. FOR SHARE<br/>Shared read lock: Prevents concurrent row mutations"]
+        FNKU["3. FOR NO KEY UPDATE<br/>Updates non-key columns (e.g. balance, bio). DOES NOT BLOCK FOR KEY SHARE!"]
+        FU["4. FOR UPDATE<br/>Strongest: Updates primary/unique keys or deletes row. Blocks EVERYTHING."]
+    end
+    FKS --> FS --> FNKU --> FU
+```
+
+### Row Lock Conflict Matrix
+
+| Requested $\downarrow$ / Current $\rightarrow$ | `FOR KEY SHARE` | `FOR SHARE` | `FOR NO KEY UPDATE` | `FOR UPDATE` |
+| :--- | :---: | :---: | :---: | :---: |
+| **`FOR KEY SHARE`** | No | No | **No (Permitted!)** | Conflict |
+| **`FOR SHARE`** | No | No | Conflict | Conflict |
+| **`FOR NO KEY UPDATE`** | **No (Permitted!)** | Conflict | Conflict | Conflict |
+| **`FOR UPDATE`** | Conflict | Conflict | Conflict | Conflict |
+
+### Why `FOR NO KEY UPDATE` Is Critical for High-Throughput APIs
+When an order is created, PostgreSQL checks referential integrity on `users(id)` by acquiring a **`FOR KEY SHARE`** lock on the referenced user tuple.
+
+If your user profile service locks the user row with standard `FOR UPDATE`:
+```sql
+-- DANGEROUS: Blocks ALL incoming orders for this user!
+SELECT * FROM users WHERE id = 42 FOR UPDATE;
+```
+Concurrent order creations trying to verify the foreign key `REFERENCES users(id)` will **block** waiting for `FOR UPDATE` to release!
+
+**The Production Fix**: If you are modifying non-primary-key columns (e.g. updating user balance or name), use **`FOR NO KEY UPDATE`**:
+```sql
+-- SAFE: Does NOT block foreign key validation on child tables!
+SELECT * FROM users WHERE id = 42 FOR NO KEY UPDATE;
+```
+
+---
+
+## 4. Distributed Advisory Locks in Spring Boot
+
+Why introduce Redis (Redisson) for distributed locking when PostgreSQL provides kernel-level **Advisory Locks** for free?
+
+An Advisory Lock is an application-defined lock stored in PostgreSQL's shared memory lock table:
+- **No table or disk row is locked**.
+- The lock target is an arbitrary 64-bit integer (`bigint`).
+- **Session-level** (`pg_advisory_lock`): Survives transactions; released on socket disconnect.
+- **Transaction-level** (`pg_advisory_xact_lock`): Released automatically when `@Transactional` commits or rolls back!
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Pod1 as Spring Pod 1 (Billing Cron)
+    actor Pod2 as Spring Pod 2 (Billing Cron)
+    participant DB as PostgreSQL Lock Manager (RAM)
+
+    Pod1->>DB: SELECT pg_try_advisory_xact_lock(9001)
+    DB-->>Pod1: Returns TRUE (Lock Granted!)
+    
+    Pod2->>DB: SELECT pg_try_advisory_xact_lock(9001)
+    DB-->>Pod2: Returns FALSE (Instantly rejects without blocking!)
+    
+    Note over Pod1: Pod 1 executes daily billing cycle safely...
+    Note over Pod2: Pod 2 logs: 'Another pod is processing billing. Skipping.'
+    
+    Pod1->>DB: COMMIT Transaction
+    Note over DB: Lock 9001 automatically deallocated from shared RAM!
+```
+
+### Production Spring Boot Implementation
+```java
+package com.backendmastery.service;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+public class DistributedBillingService {
+
+    private static final Logger log = LoggerFactory.getLogger(DistributedBillingService.class);
+    private static final long BILLING_JOB_LOCK_ID = 8492041289410L;
+
+    private final JdbcTemplate jdbcTemplate;
+
+    public DistributedBillingService(JdbcTemplate jdbcTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+    }
+
+    @Transactional
+    public void executeNightlyBilling() {
+        // Non-blocking try-lock: Returns false immediately if another pod holds the lock!
+        Boolean acquired = jdbcTemplate.queryForObject(
+                "SELECT pg_try_advisory_xact_lock(?)", 
+                Boolean.class, 
+                BILLING_JOB_LOCK_ID
+        );
+
+        if (Boolean.FALSE.equals(acquired)) {
+            log.info("Nightly billing job is already being executed by another pod. Skipping execution.");
+            return;
+        }
+
+        log.info("Advisory lock acquired. Beginning billing calculations...");
+        // Execute mission-critical single-leader batch process...
+    }
+}
+```
+
+---
+
+## 5. Serializable Snapshot Isolation (SSI) Internals
+
+The ANSI standard defines `SERIALIZABLE` as the gold standard of consistency. Classic database engines achieved this using pessimistic Two-Phase Locking (S2PL), causing severe reader-writer stalls.
+
+PostgreSQL uses **Serializable Snapshot Isolation (SSI)**:
+- Readers **never block writers**, and writers **never block readers**.
+- Transactions execute concurrently against standard MVCC snapshots.
+- The PostgreSQL lock manager tracks **SIREAD locks** (Predicate Locks) in shared memory to detect **rw-antidependency cycles**.
+
+```mermaid
+flowchart LR
+    subgraph SSICycle ["The rw-Antidependency Cycle (Dangerous Structure)"]
+        T1["Transaction 1 (Alice)"] -->|"T1 writes row read by T2 (rw-conflict)"| T2["Transaction 2 (Bob)"]
+        T2 -->|"T2 writes row read by T1 (rw-conflict)"| T1
+        Crash["💥 Serialization Cycle Detected! Engine aborts T2 with SQLState 40001!"]
+        T2 -.-> Crash
+    end
+```
+
+### Handling Serialization Failures (`40001`) in Spring Boot
+When using `Isolation.SERIALIZABLE`, applications **must expect and retry** transaction failures:
+
+```java
+@Service
+public class DoctorShiftService {
+
+    @Retryable(
+        retryFor = { CannotAcquireLockException.class, ConcurrencyFailureException.class },
+        maxAttempts = 5,
+        backoff = @Backoff(delay = 50, multiplier = 2.0)
+    )
+    @Transactional(isolation = Isolation.SERIALIZABLE)
+    public void requestLeave(Long doctorId) {
+        // Business logic protected against write skew...
+    }
+}
+```
+
+---
+
+## 6. Deadlock Detection Engine & Timeout Defenses
+
+PostgreSQL runs a background deadlock detector thread. When a process blocks waiting for a lock, it sleeps until **`deadlock_timeout`** (default $1,000\text{ ms}$). If the lock is not granted after 1 second, the engine constructs a directed **Wait-For Graph** across all blocked processes in shared memory and searches for cycles.
+
+If a cycle exists, PostgreSQL aborts the transaction with the fewest locks held:
+`ERROR: 40P01: deadlock detected`.
+
+### The Production Timeout Triad
+Never run high-throughput enterprise databases without configuring the production timeout triad:
+
+```ini
+# postgresql.conf (Production Lock Defenses)
+lock_timeout = 3s                         # Kill any statement waiting longer than 3s for a lock
+statement_timeout = 30s                   # Kill any query running longer than 30s
+idle_in_transaction_session_timeout = 10s # Terminate connections holding locks while idle!
+```
+
+---
+
+## 7. The 3 Production Concurrency Control Strategies
 
 ### Strategy 1: Atomic SQL Updates (Fastest & Simplest)
-Eliminates Java-side race conditions by letting the database execute the subtraction and validation in a single atomic statement:
-
 ```sql
 UPDATE inventory
 SET available_quantity = available_quantity - :quantity
@@ -196,97 +421,34 @@ WHERE product_id = :productId
     WHERE i.productId = :productId AND i.availableQuantity >= :qty
 """)
 int reserveStock(@Param("productId") Long productId, @Param("qty") int qty);
-
-// Usage: Check affected rows!
-int updatedRows = inventoryRepository.reserveStock(101L, 2);
-if (updatedRows == 0) {
-    throw new InsufficientStockException("Item out of stock or insufficient quantity");
-}
 ```
 
-Line by line:
-
-- `UPDATE inventory` moves the operation into PostgreSQL, where row locks and MVCC rules can protect the change.
-- `SET available_quantity = available_quantity - :quantity` subtracts from the current committed row value, not from a stale Java copy.
-- `WHERE product_id = :productId` scopes the update to one product.
-- `AND available_quantity >= :quantity` turns the business invariant into a database guard.
-- `@Modifying` tells Spring Data this query changes rows instead of selecting entities.
-- The repository returns `int` because the affected-row count is the success signal.
-- `updatedRows == 0` means the database refused the reservation because no row matched the product and stock condition at update time.
-
-Proof test:
-
-```console
-Seed product 101 with available_quantity = 2.
-Start 10 concurrent transactions, each reserving quantity 1.
-Exactly 2 calls should return updatedRows = 1.
-Exactly 8 calls should return updatedRows = 0.
-Final available_quantity must be 0, never negative.
-```
-
-Senior phrasing: "I prefer atomic SQL for simple counters because it collapses read, validation, and write into one database statement. Java never observes a stale stock value and tries to write it back later."
-
----
-
-### Strategy 2: Optimistic Locking with `@Version` (Best for Low Contention)
-Assumes concurrent collisions are rare. Hibernate checks a version counter column upon update:
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Alice
-    actor Bob
-    participant DB as PostgreSQL (Product 42, Version = 1, Stock = 5)
-
-    Alice->>DB: SELECT * FROM products WHERE id = 42 (reads version 1)
-    Bob->>DB: SELECT * FROM products WHERE id = 42 (reads version 1)
-    
-    Alice->>DB: UPDATE products SET stock=4, version=2 WHERE id=42 AND version=1
-    DB-->>Alice: Rows updated: 1 (SUCCESS!)
-
-    Bob->>DB: UPDATE products SET stock=4, version=2 WHERE id=42 AND version=1
-    DB-->>Bob: Rows updated: 0 (FAILURE!)
-    Note over Bob: Spring throws ObjectOptimisticLockingFailureException!
-```
-
+### Strategy 2: Optimistic Locking with `@Version`
 ```java
 @Entity
 public class Product {
     @Id private Long id;
     private int stock;
 
-    @Version // Hibernate increments this automatically on every update
+    @Version
     private Long version;
 }
 ```
 
----
-
-### Strategy 3: Pessimistic Locking with `SELECT ... FOR UPDATE` (Best for High Contention)
-For flash sales or ticketing where 1,000 users fight over 10 items, optimistic locking causes 990 wasteful rollback retries. 
-
-Pessimistic locking acquires an **exclusive row-level lock** at read time, forcing other transactions to wait in a clean queue:
-
+### Strategy 3: Pessimistic Locking with `SELECT ... FOR UPDATE`
 ```java
 public interface InventoryRepository extends JpaRepository<Inventory, Long> {
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @QueryHints({
-        @QueryHint(name = "jakarta.persistence.lock.timeout", value = "3000") // 3-second timeout
+        @QueryHint(name = "jakarta.persistence.lock.timeout", value = "3000")
     })
     @Query("SELECT i FROM Inventory i WHERE i.productId = :productId")
     Optional<Inventory> findByIdForUpdate(@Param("productId") Long productId);
 }
 ```
 
----
-
-## 3. High-Throughput Worker Queues: `FOR UPDATE SKIP LOCKED`
-
-If 50 background worker threads poll a database table for pending jobs:
-- Regular `FOR UPDATE` causes all 50 workers to fight over Row 1, locking each other up.
-- `SKIP LOCKED` tells PostgreSQL: *"If another worker is currently processing Row 1, skip it immediately and give me Row 2!"*
-
+### High-Throughput Worker Queues: `FOR UPDATE SKIP LOCKED`
 ```sql
 SELECT * 
 FROM background_tasks
@@ -296,28 +458,9 @@ LIMIT 1
 FOR UPDATE SKIP LOCKED;
 ```
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant W1 as Worker Thread 1
-    participant DB as PostgreSQL (Queue Table: Tasks 1, 2, 3)
-    participant W2 as Worker Thread 2
-
-    W1->>DB: SELECT FOR UPDATE SKIP LOCKED LIMIT 1
-    DB-->>W1: Grants lock on Task 1!
-    
-    W2->>DB: SELECT FOR UPDATE SKIP LOCKED LIMIT 1
-    Note over DB: Sees Task 1 is locked. Skips it instantly without waiting!
-    DB-->>W2: Grants lock on Task 2!
-    
-    Note over W1,W2: Both workers process concurrently with ZERO lock contention!
-```
-
 ---
 
-## 4. The Canonical Ordering Rule: Deadlock Elimination
-
-To mathematically guarantee that two transactions can **never** deadlock:
+## 8. The Canonical Ordering Rule: Deadlock Elimination
 
 ```java
 // ALWAYS sort IDs before acquiring multiple locks!
@@ -331,20 +474,15 @@ public void transferMoney(Long fromAccountId, Long toAccountId, BigDecimal amoun
 }
 ```
 
-Because every transaction locks in ascending order ($1 \rightarrow 2$), a circular dependency ($1 \rightarrow 2$ vs $2 \rightarrow 1$) is mathematically impossible.
-
 ---
 
-# Phase 4: Senior Interview Ace (Junior vs. Staff Phrasing)
-
-Senior interviewers ask locking and isolation questions to see if you understand the boundary between application memory and database engine locks.
+# Phase 4: Senior Interview Ace
 
 ### Q1: "What is the difference between Optimistic Locking and Pessimistic Locking, and when do you choose each?"
 
 ```diff
 - JUNIOR ANSWER:
-  "Optimistic locking uses a version column. Pessimistic locking locks the database. 
-   Optimistic locking is faster because it doesn't lock."
+  "Optimistic locking uses a version column. Pessimistic locking locks the database."
 ```
 
 ```diff
@@ -362,25 +500,25 @@ Senior interviewers ask locking and isolation questions to see if you understand
 
 ---
 
-### Q2: "How does PostgreSQL implement MVCC, and why do readers never block writers?"
+### Q2: "Why should you prefer `SELECT ... FOR NO KEY UPDATE` over `FOR UPDATE` in transactional APIs?"
 
 ```diff
 - JUNIOR ANSWER:
-  "PostgreSQL uses MVCC so readers don't block writers. It keeps copies of data in memory."
+  "FOR NO KEY UPDATE is a faster version of FOR UPDATE."
 ```
 
 ```diff
 + SENIOR / STAFF ANSWER:
-  "PostgreSQL implements MVCC by maintaining multiple physical tuple versions on disk pages using 
-   hidden system headers: 'xmin' (the creating transaction ID) and 'xmax' (the deleting/updating transaction ID).
+  "Standard 'FOR UPDATE' acquires an exclusive row lock that blocks all other row-level locks, including 
+   'FOR KEY SHARE'. When other transactions insert or delete rows in child tables with foreign keys referencing 
+   this parent row, PostgreSQL must acquire a 'FOR KEY SHARE' lock to ensure referential integrity.
    
-   When a row is updated, PostgreSQL does not overwrite data in place; it inserts a new tuple with a new xmin 
-   and marks the old tuple's xmax with the updating transaction ID. 
+   If a parent row is locked with 'FOR UPDATE', all concurrent foreign key insertions on child tables block, 
+   creating high lock contention and deadlock risks. 
    
-   When a reader executes, PostgreSQL takes a transaction snapshot recording active in-progress transaction IDs. 
-   The reader evaluates tuple visibility by comparing xmin/xmax against its snapshot, seamlessly reading the 
-   latest committed version without acquiring any row locks. Writers acquire row-level exclusive locks to mutate 
-   new tuples, allowing readers and writers to operate concurrently with zero lock blocking."
+   'FOR NO KEY UPDATE' locks the row for mutation of non-primary-key columns (like balance or status) but 
+   explicitly permits concurrent 'FOR KEY SHARE' locks. This allows child tables to validate foreign keys 
+   concurrently without blocking."
 ```
 
 ---
@@ -394,7 +532,7 @@ Senior interviewers ask locking and isolation questions to see if you understand
 
 ```diff
 + SENIOR / STAFF ANSWER:
-  "Write Skew (Anomaly A5B) occurs when two concurrent transactions read overlapping data, verify a shared 
+  "Write Skew occurs when two concurrent transactions read overlapping data, verify a shared 
    business invariant, make disjoint mutations to different rows, and both commit—destroying system integrity.
    
    A classic example is the Doctor On-Call Dilemma: The invariant requires at least 1 doctor on-call. 
@@ -404,109 +542,39 @@ Senior interviewers ask locking and isolation questions to see if you understand
    so REPEATABLE READ snapshots permitted both to commit, leaving zero doctors on duty!
    
    We prevent Write Skew by either materializing locks (locking the parent Department row with FOR UPDATE) 
-   or elevating to SERIALIZABLE isolation, which uses Serializable Snapshot Isolation (SSI) to detect 
-   read-write dependency cycles (si-locks) and abort the conflicting transaction."
+   or elevating to SERIALIZABLE isolation, which uses SSI to detect read-write dependency cycles and abort one transaction."
 ```
 
 ---
 
-### Q4: "How does `SELECT ... FOR UPDATE SKIP LOCKED` work, and why is it essential for distributed background workers?"
-
-```diff
-- JUNIOR ANSWER:
-  "SKIP LOCKED skips locked rows so you don't get errors."
-```
-
-```diff
-+ SENIOR / STAFF ANSWER:
-  "Standard 'FOR UPDATE' causes concurrent worker threads to block on the same locked row, serializing 
-   queue consumption and degrading throughput. 
-   
-   'SKIP LOCKED' instructs PostgreSQL to inspect row lock states and immediately bypass any tuple currently 
-   locked by an active transaction, acquiring an exclusive lock on the next available unlocked row matching 
-   the query predicate. 
-   
-   This enables a single database table to function as a distributed, high-throughput FIFO task queue where 
-   hundreds of worker pods can poll and dequeue tasks concurrently with zero lock contention, zero waiting, 
-   and zero duplicate task execution."
-```
-
----
-
-## Locking & Isolation Fundamentals Interview Map
-
-Transactions are not enough unless you understand what they isolate.
-
-### 1. Read phenomena in plain English
-
-| Anomaly | Meaning |
-| :--- | :--- |
-| Dirty read | You read data another transaction has not committed |
-| Non-repeatable read | You read the same row twice and get different values |
-| Phantom read | You repeat a range query and new matching rows appear |
-| Lost update | Two writers overwrite each other's change |
-| Write skew | Two transactions update different rows but break one shared rule |
-
-### 2. MVCC means readers do not block writers
-
-PostgreSQL keeps row versions. A reader sees the version visible to its snapshot.
-
-```mermaid
-flowchart LR
-    Old["Row version A<br/>xmin=10 xmax=20"] --> New["Row version B<br/>xmin=20 xmax=null"]
-    Snapshot["Reader snapshot before tx 20"] --> Old
-    Newer["Reader snapshot after tx 20"] --> New
-```
-
-An `UPDATE` creates a new tuple version; it does not overwrite the old bytes in place.
-
-### 3. Row locks protect rows, not ideas
-
-`SELECT ... FOR UPDATE` locks selected rows. It does not automatically lock rows that do not exist or a count-based invariant.
-
-For "at least one doctor must remain on call," two transactions can update different doctor rows and both commit unless you lock a shared parent row or use serializable isolation.
-
-### 4. Atomic SQL is often the simplest correctness tool
-
-Bad:
-
-```java
-Inventory inv = repo.findByProductId(id).orElseThrow();
-if (inv.available() >= qty) {
-    inv.decrease(qty);
-}
-```
-
-Better:
+## Production Debug Checklist
 
 ```sql
-UPDATE inventory
-SET available_quantity = available_quantity - :qty
-WHERE product_id = :productId
-  AND available_quantity >= :qty;
+-- 1. Inspect Blocked Processes and Lock Wait Queues
+SELECT 
+    blocked_locks.pid AS blocked_pid,
+    blocked_activity.usename AS blocked_user,
+    blocking_locks.pid AS blocking_pid,
+    blocking_activity.usename AS blocking_user,
+    blocked_activity.query AS blocked_statement,
+    blocking_activity.query AS current_statement_in_blocking_process
+FROM pg_catalog.pg_locks blocked_locks
+JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
+JOIN pg_catalog.pg_locks blocking_locks 
+    ON blocking_locks.locktype = blocked_locks.locktype
+    AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database
+    AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
+    AND blocking_locks.page IS NOT DISTINCT FROM blocked_locks.page
+    AND blocking_locks.tuple IS NOT DISTINCT FROM blocked_locks.tuple
+    AND blocking_locks.virtualxid IS NOT DISTINCT FROM blocked_locks.virtualxid
+    AND blocking_locks.transactionid IS NOT DISTINCT FROM blocked_locks.transactionid
+    AND blocking_locks.classid IS NOT DISTINCT FROM blocked_locks.classid
+    AND blocking_locks.objid IS NOT DISTINCT FROM blocked_locks.objid
+    AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid
+    AND blocking_locks.pid != blocked_locks.pid
+JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
+WHERE NOT blocked_locks.granted;
 ```
-
-If updated row count is `1`, the reservation succeeded. If `0`, it failed without overselling.
-
-### Build-Break-Fix Lab
-
-<Steps>
-  <Step title="Build">
-    Create an inventory reservation table with one product and limited stock.
-  </Step>
-  <Step title="Break">
-    Use read-then-write logic from Java under 20 concurrent requests.
-  </Step>
-  <Step title="Observe">
-    Reproduce lost update or overselling.
-  </Step>
-  <Step title="Fix">
-    Replace it with atomic SQL or optimistic/pessimistic locking.
-  </Step>
-  <Step title="Prove">
-    Add a concurrent integration test where exactly available stock count succeeds.
-  </Step>
-</Steps>
 
 ---
 
@@ -516,20 +584,19 @@ If updated row count is `1`, the reservation succeeded. If `0`, it failed withou
 | :--- | :--- | :--- | :--- |
 | **Lost Update** | Blind read-then-update in Java | Concurrent updates overwrite each other silently | Use Atomic SQL updates, `@Version` optimistic locking, or `FOR UPDATE`. |
 | **Application Deadlock** | Inconsistent lock acquisition order | Transactions abort with deadlock errors | Enforce the Canonical Ordering Rule (`Math.min()` before `Math.max()`). |
-| **Lock Timeout Saturation** | Holding row lock while executing slow remote HTTP API | Connection pool starves; API blackouts | Never execute network calls while holding database row locks. |
+| **DDL Queue Starvation** | `ALTER TABLE` queues behind slow analytical `SELECT` | All web traffic queues behind `ACCESS EXCLUSIVE` lock | Always execute `SET lock_timeout = '2s'` before running DDL. |
+| **Child FK Lockout** | Locking parent row with `FOR UPDATE` instead of `FOR NO KEY UPDATE` | Concurrent child `INSERT`s stall on foreign key checks | Use `FOR NO KEY UPDATE` when primary/unique keys are not modified. |
 | **Write Skew Invariant Loss** | Concurrent updates to different rows under REPEATABLE READ | Business rule violated despite ACID | Use `SERIALIZABLE` isolation or lock parent record with `FOR UPDATE`. |
-| **Queue Worker Bottleneck** | Workers polling tasks with plain `FOR UPDATE` | All workers block waiting for one row | Use `SELECT ... FOR UPDATE SKIP LOCKED` for lock-free queue processing. |
 
 ---
 
 ## Done Checklist
 
 <Check>
-- [ ] Understand the physical hardware race condition when multiple CPU threads mutate shared storage.
-- [ ] Diagram PostgreSQL MVCC tuple headers (`xmin`, `xmax`, `t_ctid`) and explain why `UPDATE` is `INSERT` + `DELETE`.
-- [ ] Enforce Atomic SQL updates for simple counter and balance decrements.
-- [ ] Implement Optimistic Locking with `@Version` for low-contention entities.
-- [ ] Deploy Pessimistic Locking (`FOR UPDATE`) for high-contention flash sales and ticketing systems.
-- [ ] Eliminate worker queue lock contention using `FOR UPDATE SKIP LOCKED`.
-- [ ] Mathematically eliminate deadlocks using the Canonical Ordering Rule.
+- [ ] You can construct the PostgreSQL 8 Table Lock conflict matrix from memory.
+- [ ] You can explain why `ALTER TABLE` acquires `ACCESS EXCLUSIVE` and causes the DDL lock queue trap.
+- [ ] You can choose between `FOR UPDATE` and `FOR NO KEY UPDATE` to prevent blocking foreign key checks.
+- [ ] You can implement distributed cluster coordination using PostgreSQL transactional advisory locks in Spring Boot.
+- [ ] You can explain how Serializable Snapshot Isolation (SSI) tracks `SIREAD` locks to detect dependency cycles.
+- [ ] You can mathematically eliminate deadlocks using the Canonical Ordering Rule.
 </Check>

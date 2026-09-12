@@ -4,7 +4,7 @@
   "private": true,
   "description": "Beginner to advanced backend engineering docs for Java, Spring Boot, databases, microservices, and system design.",
   "scripts": {
-    "dev": "node scripts/patch-mintlify-dev-search.mjs && cd docs && mintlify dev",
+    "dev": "node scripts/patch-mintlify-dev-search.mjs && cd docs && MINTLIFY_CLI_ACCESS_TOKEN=local-offline-dev-token MINTLIFY_CLI_SUBDOMAIN=backend-mastery mintlify dev",
     "validate": "cd docs && mintlify validate",
     "links": "cd docs && mintlify broken-links --check-anchors --check-redirects",
     "audit": "node scripts/audit-content.mjs",
