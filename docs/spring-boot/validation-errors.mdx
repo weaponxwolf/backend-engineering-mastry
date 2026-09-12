@@ -1,533 +1,600 @@
 ---
-title: "Validation And Errors"
-description: "Return clean errors from Spring Boot APIs."
+title: "Validation & Error Architecture: Jakarta Validation & RFC 9457 Problem Details"
+sidebarTitle: "Validation & Errors"
+description: "Master Spring Boot 3 validation: Jakarta Validation mechanics, @Valid vs @Validated, custom constraint validators, validation groups, cross-field validation, and RFC 9457 ProblemDetail error handling in simple English."
 ---
 
-# Validation And Errors
+## Prerequisites: Before You Begin
 
-Validation checks if request data is correct.
+Before studying API validation and error handling, make sure you understand:
+- **HTTP Status Codes**: 2xx Success, 4xx Client Errors (Bad Request, Unauthorized, Forbidden, Not Found), 5xx Server Errors.
+- **Java Annotations & Reflection**: How annotations store metadata read at runtime.
+- **Spring MVC Request Flow**: How `DispatcherServlet` routes HTTP requests to `@RestController` methods.
 
-Errors tell the client what went wrong.
+---
 
-Good APIs reject bad input early and return clean responses.
+# Phase 1: Ground Floor (Physical First Principles)
 
-## Mental Model
+## 1. Why Boundary Validation Protects Your Database
 
-```mermaid
-flowchart TD
-    A["1. Request Enters Controller"] --> B["2. Jakarta Validation Checks DTO"]
-    B -->|Valid| C["3. Controller Calls Service"]
-    B -->|Invalid| E["5. Global @RestControllerAdvice"]
-    C --> D["4. Service Enforces Business Rules & Exceptions"]
-    D --> E
-    E --> F["6. Standard RFC 9457 ProblemDetail Response"]
-```
-
-## Starter Dependency
-
-Spring Boot requires the validation starter. It is not included by default in `spring-boot-starter-web`:
-
-<Tabs>
-  <Tab title="Maven (pom.xml)">
-    ```xml
-    <dependency>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-validation</artifactId>
-    </dependency>
-    ```
-  </Tab>
-  <Tab title="Gradle (build.gradle)">
-    ```groovy
-    implementation 'org.springframework.boot:spring-boot-starter-validation'
-    ```
-  </Tab>
-</Tabs>
-
-## Request DTO Validation
-
-Use validation annotations on request DTOs from `jakarta.validation.constraints.*`:
-
-```java
-package com.example.dto;
-
-import jakarta.validation.constraints.Email;
-import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Size;
-
-public record CreateUserRequest(
-    @NotBlank(message = "Name is required")
-    @Size(max = 100, message = "Name cannot be longer than 100 characters")
-    String name,
-
-    @NotBlank(message = "Email is required")
-    @Email(message = "Email must be valid")
-    @Size(max = 150, message = "Email cannot be longer than 150 characters")
-    String email,
-
-    @NotBlank(message = "Password is required")
-    @Size(min = 8, max = 100, message = "Password must be between 8 and 100 characters")
-    String password
-) {}
-```
-
-Common annotations:
-
-| Annotation | Validation Rule |
-| :--- | :--- |
-| `@NotNull` | Value must not be `null` (accepts empty strings) |
-| `@NotBlank` | CharSequence must not be null and must contain at least one non-whitespace character |
-| `@Size` | Size of string, collection, or array must be within boundaries |
-| `@Email` | String must conform to standard email address format |
-| `@Min` / `@Max` | Numeric value must satisfy minimum/maximum limit |
-| `@Positive` | Numeric value must be strictly greater than zero |
-| `@Past` / `@Future` | Date/time must be in the past/future |
-
-## Controller
-
-Use `@Valid`.
-
-```java
-@PostMapping
-@ResponseStatus(HttpStatus.CREATED)
-public UserResponse createUser(@Valid @RequestBody CreateUserRequest request) {
-    return userService.createUser(request);
-}
-```
-
-If validation fails, controller method does not run.
-
-Spring throws `MethodArgumentNotValidException`.
-
-Line by line:
-
-- `@PostMapping` maps this method to an HTTP `POST` route supplied by the class-level `@RequestMapping`.
-- `@ResponseStatus(HttpStatus.CREATED)` returns `201 Created` when the method completes successfully.
-- `@Valid` asks Jakarta Validation to evaluate annotations on `CreateUserRequest`.
-- `@RequestBody` tells Spring to deserialize the HTTP JSON body into the request record.
-- `CreateUserRequest request` is trusted only after deserialization and validation succeed.
-- `userService.createUser(request)` should enforce business rules that annotations cannot know, such as email uniqueness.
-
-What breaks without `@Valid`:
-
-```console
-Client sends {"name":"","email":"not-email","password":"x"}.
-Spring still builds CreateUserRequest.
-Controller calls userService.
-Invalid data reaches business logic or database constraints.
-The client may receive a generic 500 instead of a clear 400.
-```
-
-Proof test:
-
-```console
-Send blank name.
-Assert HTTP 400.
-Assert service mock was never called.
-Assert response body contains field-level message for name.
-```
-
-## Nested Validation
-
-Use `@Valid` inside DTO when validating nested objects.
-
-```java
-public record CreateOrderRequest(
-    @NotEmpty(message = "Order must have at least one item")
-    List<@Valid OrderItemRequest> items
-) {}
-```
-
-```java
-public record OrderItemRequest(
-    @NotNull Long productId,
-    @Positive int quantity
-) {}
-```
-
-Line by line:
-
-- `@NotEmpty` rejects `null` and empty item lists.
-- `List<@Valid OrderItemRequest>` tells validation to descend into each list element.
-- `@NotNull Long productId` rejects missing product identity before the service tries to query the database.
-- `@Positive int quantity` rejects `0` and negative quantities.
-
-Proof test:
-
-```console
-items = [] -> 400
-items = [{"productId":null,"quantity":1}] -> 400
-items = [{"productId":42,"quantity":0}] -> 400
-items = [{"productId":42,"quantity":2}] -> controller may call service
-```
-
-## Business Validation
-
-Some rules cannot be checked by annotations.
-
-Example:
-
-- **Email uniqueness**: checked against the database (`userRepository.existsByEmail()`).
-- **Inventory availability**: checked against current stock (`product.getStock() >= requestedQty`).
-- **Resource ownership**: verified against authentication context (`note.getOwnerId().equals(userId)`).
-- **Payment balance**: checked against order grand total (`payment.getAmount().equals(order.getTotal())`).
-
-Put business validation in service layer.
-
-```java
-if (userRepository.existsByEmail(request.email())) {
-    throw new EmailAlreadyUsedException();
-}
-```
-
-## Error Response Shape
-
-Use one consistent shape.
-
-```java
-public record ErrorResponse(
-    String message,
-    Map<String, String> errors
-) {
-    public static ErrorResponse of(String message) {
-        return new ErrorResponse(message, Map.of());
-    }
-}
-```
-
-Validation response:
-
-```json
-{
-  "message": "Validation failed",
-  "errors": {
-    "email": "Email must be valid",
-    "password": "Password must be between 8 and 100 characters"
-  }
-}
-```
-
-Business error response:
-
-```json
-{
-  "message": "Email already used",
-  "errors": {}
-}
-```
-
-## Global Exception Handler
-
-```java
-@RestControllerAdvice
-public class GlobalExceptionHandler {
-    @ExceptionHandler(MethodArgumentNotValidException.class)
-    @ResponseStatus(HttpStatus.BAD_REQUEST)
-    public ErrorResponse handleValidation(MethodArgumentNotValidException exception) {
-        Map<String, String> errors = new LinkedHashMap<>();
-
-        for (FieldError fieldError : exception.getBindingResult().getFieldErrors()) {
-            errors.put(fieldError.getField(), fieldError.getDefaultMessage());
-        }
-
-        return new ErrorResponse("Validation failed", errors);
-    }
-
-    @ExceptionHandler(EmailAlreadyUsedException.class)
-    @ResponseStatus(HttpStatus.CONFLICT)
-    public ErrorResponse handleEmailAlreadyUsed(EmailAlreadyUsedException exception) {
-        return ErrorResponse.of(exception.getMessage());
-    }
-
-    @ExceptionHandler(ResourceNotFoundException.class)
-    @ResponseStatus(HttpStatus.NOT_FOUND)
-    public ErrorResponse handleNotFound(ResourceNotFoundException exception) {
-        return ErrorResponse.of(exception.getMessage());
-    }
-}
-```
-
-## Modern RFC 7807 (ProblemDetail)
-
-In Spring Boot 3 / Spring 6, Java natively supports the **RFC 7807 Specification for HTTP API Problem Details** via `org.springframework.http.ProblemDetail`.
-
-Instead of writing custom DTO classes, you can return standard problem details:
-
-```java
-package com.example.common;
-
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ProblemDetail;
-import org.springframework.web.bind.annotation.ExceptionHandler;
-import org.springframework.web.bind.annotation.RestControllerAdvice;
-
-import java.net.URI;
-import java.time.Instant;
-
-@RestControllerAdvice
-public class StandardErrorAdvice {
-
-    @ExceptionHandler(ResourceNotFoundException.class)
-    public ProblemDetail handleNotFound(ResourceNotFoundException ex) {
-        ProblemDetail problem = ProblemDetail.forStatusAndDetail(
-            HttpStatus.NOT_FOUND,
-            ex.getMessage()
-        );
-        problem.setTitle("Resource Not Found");
-        problem.setType(URI.create("https://api.example.com/errors/not-found"));
-        problem.setProperty("timestamp", Instant.now());
-        return problem;
-    }
-}
-```
-
-RFC 7807 JSON output:
-
-```json
-{
-  "type": "https://api.example.com/errors/not-found",
-  "title": "Resource Not Found",
-  "status": 404,
-  "detail": "Note with id 55 does not exist",
-  "instance": "/api/notes/55",
-  "timestamp": "2026-09-10T19:30:00Z"
-}
-```
-
-<Tip>
-Use custom `ErrorResponse` records if your frontend team has an existing contract. Use `ProblemDetail` if you are building a new greenfield API following modern IETF standards.
-</Tip>
-
-## Status Codes
-
-Use status codes honestly.
-
-| Status Code | Meaning | Backend Use Case |
-| :--- | :--- | :--- |
-| **`400 Bad Request`** | Request shape or validation failed | Missing required DTO fields, blank title |
-| **`401 Unauthorized`** | Authentication missing or invalid | Missing or expired JWT bearer token |
-| **`403 Forbidden`** | Authenticated, but lacks permission | User attempting to edit another user's note |
-| **`404 Not Found`** | Resource does not exist | ID does not match any existing database row |
-| **`409 Conflict`** | State conflict or duplicate data | Attempting to register an already taken email |
-| **`422 Unprocessable`** | Valid JSON syntax, but invariant violated | Domain semantic failure |
-| **`500 Server Error`** | Unexpected backend bug | Uncaught runtime exception or database crash |
-
-Many Spring APIs use `400` for validation and `409` for duplicate data.
-
-Be consistent.
-
-## Field Error Names
-
-Return field names the client understands.
-
-Good:
-
-```json
-{
-  "errors": {
-    "email": "Email must be valid"
-  }
-}
-```
-
-Bad:
-
-```json
-{
-  "errors": {
-    "createUserRequest.email": "Email must be valid"
-  }
-}
-```
-
-## Logging Errors
-
-Do not log every validation error as server failure.
-
-Validation errors are usually client mistakes.
-
-Log unexpected errors with request ID.
-
-```java
-log.error("Unexpected API error requestId={}", requestId, exception);
-```
-
-Do not log passwords, tokens, or secrets.
-
-## API Test
-
-```java
-@WebMvcTest(UserController.class)
-class UserControllerTest {
-    @Autowired
-    MockMvc mockMvc;
-
-    @MockBean
-    UserService userService;
-
-    @Test
-    void shouldReturnValidationErrors() throws Exception {
-        mockMvc.perform(post("/api/users")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("""
-                    {
-                      "name": "",
-                      "email": "bad-email",
-                      "password": "123"
-                    }
-                    """))
-            .andExpect(status().isBadRequest())
-            .andExpect(jsonPath("$.message").value("Validation failed"))
-            .andExpect(jsonPath("$.errors.email").exists())
-            .andExpect(jsonPath("$.errors.password").exists());
-    }
-}
-```
-
-Test the error shape.
-
-Frontend depends on it.
-
-## Common Mistakes
-
-- Forgetting `@Valid`
-- Validating entity instead of request DTO
-- Returning stack trace
-- Returning different error shapes from different controllers
-- Sending `200 OK` for failed requests
-- Logging passwords in error logs
-- Treating business rule errors as unexpected `500`
-- Only testing happy path
-
-## Debug Checklist
-
-When validation does not work:
-
-- Is `spring-boot-starter-validation` installed?
-- Is `@Valid` on controller parameter?
-- Are annotations on request DTO?
-- Is request body JSON correct?
-- Is global exception handler catching the right exception?
-- Is security blocking request before validation?
-
-## Practice Task
-
-Add validation and clean errors for Todo API:
-
-- blank title returns `400`
-- title longer than 200 returns `400`
-- missing todo returns `404`
-- duplicate title for same user returns `409`
-
-Write API tests for each case.
-
-## Validation Fundamentals Interview Map
-
-Validation has three layers. Do not mix them.
-
-| Layer | Example | Failure Status |
-| :--- | :--- | :--- |
-| Syntax parsing | malformed JSON | `400 Bad Request` |
-| DTO validation | blank title, invalid email | `400 Bad Request` |
-| Business validation | duplicate title for same user | `409 Conflict` or domain-specific `400` |
-| Authorization | user edits another user's note | `403 Forbidden` or hidden `404 Not Found` |
-
-### 1. DTO Validation vs Business Validation
-
-DTO validation checks the shape of the request:
-
-```java
-public record CreateNoteRequest(
-    @NotBlank @Size(max = 200) String title,
-    @Size(max = 10_000) String content
-) {}
-```
-
-Business validation checks current system state:
-
-```java
-if (noteRepository.existsByOwnerIdAndTitle(userId, request.title())) {
-    throw new DuplicateNoteTitleException(request.title());
-}
-```
-
-The first does not need the database. The second usually does.
-
-### 2. Why validation belongs at the boundary
-
-Invalid input should fail before it reaches domain logic:
+In backend engineering, **never trust client input**. An HTTP request body is just an unverified stream of raw bytes arriving over a TCP network socket.
 
 ```mermaid
 flowchart LR
-    Json["JSON"] --> Dto["DTO"]
-    Dto --> BeanValidation["Bean Validation"]
-    BeanValidation --> Service["Service receives trusted shape"]
-    Service --> BusinessRule["Business rule checks state"]
+    Client["Untrusted Client<br/>(Browser / Mobile / Hacker)"] -->|"Raw JSON Bytes over TCP"| Controller["@RestController Boundary"]
+    Controller -->|"1. Validate DTO"| Validator["Jakarta / Hibernate Validator"]
+    Validator -->|Valid| Service["Domain Business Logic"]
+    Validator -->|Invalid (400)| ErrorHandler["RFC 9457 ProblemDetail Handler"]
+    Service -->|"2. Safe Clean Data"| DB[(PostgreSQL Database)]
 ```
 
-Boundary validation reduces null checks, protects domain code, and produces consistent client errors.
+If your application does not validate data at the HTTP entry boundary:
+1. **Database Corruption**: Missing fields or negative prices slip into tables, corrupting financial ledgers and analytical reports.
+2. **Security Vulnerabilities**: Malicious payloads, script injections (`XSS`), and buffer overflows can bypass weak checks.
+3. **Wasted Compute**: Deep service calls, database connection checkouts, and external payment network calls execute only to crash on a missing `customerId` seconds later.
 
-### 3. Common exception mapping
+---
 
-| Exception | Meaning | Response |
-| :--- | :--- | :--- |
-| `HttpMessageNotReadableException` | JSON cannot be parsed | `400` |
-| `MethodArgumentNotValidException` | `@Valid @RequestBody` failed | `400` |
-| `ConstraintViolationException` | method/path/query constraint failed | `400` |
-| `ResponseStatusException` | explicit web error | configured status |
-| custom duplicate exception | state conflict | `409` |
+## 2. Jakarta Validation Under the Hood
 
-### 4. Field error response contract
+Spring Boot uses **Hibernate Validator** (the reference implementation of Jakarta Bean Validation 3.0 / JSR-380).
 
-A frontend needs stable field names:
+### Starter Dependency
 
-```json
-{
-  "type": "https://api.example.com/errors/validation",
-  "title": "Validation failed",
-  "status": 400,
-  "errors": {
-    "title": "must not be blank",
-    "email": "must be a well-formed email address"
-  }
+Validation is not included by default in `spring-boot-starter-web`. You must add `spring-boot-starter-validation`:
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-validation</artifactId>
+</dependency>
+```
+
+When Spring Boot initializes, it configures a `LocalValidatorFactoryBean`. This bean:
+1. Inspects your DTO classes using Java reflection and cached `MethodHandle` metadata.
+2. Discovers constraint annotations (`@NotNull`, `@Size`, `@Email`).
+3. Executes the corresponding `ConstraintValidator` logic whenever an incoming request is deserialized.
+
+---
+
+# Phase 2: The Naive Code (The Production Crash)
+
+---
+
+## Catastrophe 1: The Missing `@Valid` on Nested Objects
+
+A developer built a checkout endpoint accepting an order with multiple items:
+
+```java
+// NAIVE CODE: NESTED ITEMS ARE SILENTLY NEVER VALIDATED!
+public record CreateOrderRequest(
+    @NotNull(message = "Customer ID is required")
+    Long customerId,
+
+    @NotEmpty(message = "Order must contain at least one item")
+    List<OrderItemRequest> items // FATAL MISTAKE: Missing @Valid on the collection!
+) {}
+
+public record OrderItemRequest(
+    @NotNull(message = "Product ID is required")
+    Long productId,
+
+    @Min(value = 1, message = "Quantity must be at least 1")
+    int quantity,
+
+    @Positive(message = "Price must be positive")
+    BigDecimal price
+) {}
+
+@RestController
+@RequestMapping("/api/orders")
+public class OrderController {
+
+    @PostMapping
+    public ResponseEntity<Void> checkout(@Valid @RequestBody CreateOrderRequest request) {
+        orderService.processOrder(request);
+        return ResponseEntity.ok().build();
+    }
 }
 ```
 
-Never return raw Java exception names as the user-facing contract.
+### Why Production Crashes
 
-### Build-Break-Fix Lab
+The developer placed `@Valid` on `@RequestBody CreateOrderRequest`.
 
-<Steps>
-  <Step title="Build">
-    Add DTO validation and a global handler returning one error shape.
-  </Step>
-  <Step title="Break">
-    Send malformed JSON, missing fields, invalid types, and duplicate business values.
-  </Step>
-  <Step title="Observe">
-    Confirm which errors are parser errors, DTO errors, business errors, and security errors.
-  </Step>
-  <Step title="Fix">
-    Map each exception type to a deliberate status code and response schema.
-  </Step>
-  <Step title="Prove">
-    Add MockMvc tests for every error class and assert no stack trace is exposed.
-  </Step>
-</Steps>
+However, the client sends this JSON:
+```json
+{
+  "customerId": 100,
+  "items": [
+    { "productId": null, "quantity": -5, "price": -50.00 }
+  ]
+}
+```
+
+**The Disaster**: Jakarta Validation evaluates `customerId` (valid) and `items` (not empty). **It does NOT inspect the fields inside `OrderItemRequest`!**
+
+Without `@Valid` directly on the collection property, validation does **not cascade**. Negative quantities and null product IDs pass directly to the database, corrupting stock counts and selling items for negative money!
+
+### The Fix: Explicit Cascading Validation
+
+```java
+public record CreateOrderRequest(
+    @NotNull(message = "Customer ID is required")
+    Long customerId,
+
+    @NotEmpty(message = "Order must contain at least one item")
+    List<@Valid OrderItemRequest> items // CASCADES validation into every item!
+) {}
+```
+
+Line by line:
+- `List<@Valid OrderItemRequest> items`: Instructs Hibernate Validator to cascade validation down into each individual element in the list. Any invalid item immediately halts execution with a 400 Bad Request.
+
+---
+
+## Catastrophe 2: `@Valid` vs `@Validated` on Query & Path Parameters
+
+A developer added path and query parameter constraints to a user search endpoint:
+
+```java
+// NAIVE CODE: PATH AND QUERY CONSTRAINTS ARE SILENTLY IGNORED!
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+
+    @GetMapping("/{id}")
+    public UserResponse getUser(
+        @PathVariable @Min(1) Long id // FATAL MISTAKE: @Min is completely ignored!
+    ) {
+        return userService.findById(id);
+    }
+
+    @GetMapping
+    public List<UserResponse> searchUsers(
+        @RequestParam @Size(min = 3, max = 50) String query // FATAL MISTAKE: Ignored!
+    ) {
+        return userService.search(query);
+    }
+}
+```
+
+### Why Production Fails
+
+A user requests `GET /api/users/-99` or `GET /api/users?query=a`.
+
+The developer expected `@Min(1)` and `@Size(min = 3)` to reject the requests with `400 Bad Request`. Instead, **the methods execute normally**!
+
+#### Why It Failed
+- `@Valid` and method argument validation only work automatically on **`@RequestBody` DTOs** dispatched by `HandlerMethodArgumentResolver`.
+- Query parameters (`@RequestParam`) and Path variables (`@PathVariable`) are simple Java types (`Long`, `String`). Spring MVC does **not** validate them unless the controller class itself is advised by Spring's `MethodValidationPostProcessor`.
+
+### The Fix: Add `@Validated` at Class Level
+
+```java
+@RestController
+@RequestMapping("/api/users")
+@Validated // MANDATORY: Activates AOP method validation proxy on controller methods!
+public class UserController {
+
+    @GetMapping("/{id}")
+    public UserResponse getUser(@PathVariable @Min(1) Long id) {
+        return userService.findById(id);
+    }
+
+    @GetMapping
+    public List<UserResponse> searchUsers(
+        @RequestParam @NotBlank @Size(min = 3, max = 50) String query
+    ) {
+        return userService.search(query);
+    }
+}
+```
+
+<Warning>
+**The Critical Exception Type Difference**:
+- Validating `@RequestBody` with `@Valid` throws **`MethodArgumentNotValidException`**.
+- Validating `@PathVariable` or `@RequestParam` with class-level `@Validated` throws **`ConstraintViolationException`**!
+Your global exception handler must handle **both** exception types, otherwise parameter violations will return `500 Internal Server Error` instead of `400 Bad Request`!
+</Warning>
+
+---
+
+# Phase 3: Under the Hood (Mechanics & Custom Validators)
+
+## 1. Creating Production-Grade Custom Constraint Validators
+
+Standard annotations (`@NotNull`, `@Size`) cannot validate domain-specific formats like strong passwords, phone numbers, or tax IDs.
+
+Here is how to build a production-grade `@StrongPassword` validator:
+
+### Step 1: Define the Annotation
+
+```java
+package com.example.validation;
+
+import jakarta.validation.Constraint;
+import jakarta.validation.Payload;
+import java.lang.annotation.*;
+
+@Documented
+@Constraint(validatedBy = StrongPasswordValidator.class) // Links to the physical validator
+@Target({ ElementType.FIELD, ElementType.PARAMETER, ElementType.RECORD_COMPONENT })
+@Retention(RetentionPolicy.RUNTIME)
+public @interface StrongPassword {
+
+    String message() default "Password must be at least 8 characters long, contain at least 1 digit, 1 uppercase letter, and 1 special symbol";
+
+    Class<?>[] groups() default {};
+
+    Class<? extends Payload>[] payload() default {};
+}
+```
+
+### Step 2: Implement `ConstraintValidator`
+
+```java
+package com.example.validation;
+
+import jakarta.validation.ConstraintValidator;
+import jakarta.validation.ConstraintValidatorContext;
+import java.util.regex.Pattern;
+
+public class StrongPasswordValidator implements ConstraintValidator<StrongPassword, String> {
+
+    // Regex: >= 8 chars, >= 1 uppercase, >= 1 digit, >= 1 special character
+    private static final Pattern PASSWORD_PATTERN = Pattern.compile(
+        "^(?=.*[0-9])(?=.*[A-Z])(?=.*[@#$%^&+=!])(?=\\S+$).{8,}$"
+    );
+
+    @Override
+    public boolean isValid(String value, ConstraintValidatorContext context) {
+        // In Jakarta Bean Validation, null checks should be handled by @NotNull
+        if (value == null) {
+            return true;
+        }
+
+        return PASSWORD_PATTERN.matcher(value).matches();
+    }
+}
+```
+
+### Step 3: Use in DTO
+
+```java
+public record RegisterUserRequest(
+    @NotBlank String email,
+    @NotNull @StrongPassword String password
+) {}
+```
+
+---
+
+## 2. Cross-Field Validation (Class-Level Constraints)
+
+Sometimes a rule involves two fields (e.g. `startDate` must be before `endDate`, or `password` must match `confirmPassword`):
+
+```java
+package com.example.validation;
+
+import jakarta.validation.Constraint;
+import jakarta.validation.Payload;
+import java.lang.annotation.*;
+
+@Documented
+@Constraint(validatedBy = DateRangeValidator.class)
+@Target({ ElementType.TYPE }) // Class-level constraint!
+@Retention(RetentionPolicy.RUNTIME)
+public @interface ValidDateRange {
+    String message() default "Start date must be strictly before end date";
+    Class<?>[] groups() default {};
+    Class<? extends Payload>[] payload() default {};
+}
+```
+
+```java
+package com.example.validation;
+
+import com.example.dto.BookingRequest;
+import jakarta.validation.ConstraintValidator;
+import jakarta.validation.ConstraintValidatorContext;
+
+public class DateRangeValidator implements ConstraintValidator<ValidDateRange, BookingRequest> {
+
+    @Override
+    public boolean isValid(BookingRequest booking, ConstraintValidatorContext context) {
+        if (booking == null || booking.startDate() == null || booking.endDate() == null) {
+            return true;
+        }
+
+        boolean isValid = booking.startDate().isBefore(booking.endDate());
+
+        if (!isValid) {
+            // Attach the error specifically to the "endDate" property for clean UI mapping
+            context.disableDefaultConstraintViolation();
+            context.buildConstraintViolationWithTemplate(context.getDefaultConstraintMessageTemplate())
+                .addPropertyNode("endDate")
+                .addConstraintViolation();
+        }
+
+        return isValid;
+    }
+}
+```
+
+---
+
+## 3. Validation Groups (Conditional Validation without Duplicate DTOs)
+
+In REST APIs, creating a resource often requires fields that are forbidden or optional during an update (e.g., `id` is null on `POST`, but mandatory on `PUT`):
+
+Instead of maintaining duplicate `CreateUserRequest` and `UpdateUserRequest` classes, use **Validation Groups**:
+
+### Step 1: Define Marker Interfaces
+
+```java
+package com.example.validation;
+
+public interface ValidationGroups {
+    interface OnCreate {}
+    interface OnUpdate {}
+}
+```
+
+### Step 2: Annotate DTO Fields with Groups
+
+```java
+public record UserDto(
+    @Null(groups = ValidationGroups.OnCreate.class, message = "ID must be null when creating a user")
+    @NotNull(groups = ValidationGroups.OnUpdate.class, message = "ID is required when updating a user")
+    Long id,
+
+    @NotBlank(groups = {ValidationGroups.OnCreate.class, ValidationGroups.OnUpdate.class})
+    String name,
+
+    @NotBlank(groups = ValidationGroups.OnCreate.class)
+    @Null(groups = ValidationGroups.OnUpdate.class, message = "Email cannot be updated")
+    String email
+) {}
+```
+
+### Step 3: Activate in Controller using `@Validated`
+
+```java
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+
+    @PostMapping
+    public ResponseEntity<Void> createUser(
+        @Validated(ValidationGroups.OnCreate.class) @RequestBody UserDto dto
+    ) {
+        userService.create(dto);
+        return ResponseEntity.status(HttpStatus.CREATED).build();
+    }
+
+    @PutMapping("/{id}")
+    public ResponseEntity<Void> updateUser(
+        @PathVariable Long id,
+        @Validated(ValidationGroups.OnUpdate.class) @RequestBody UserDto dto
+    ) {
+        userService.update(id, dto);
+        return ResponseEntity.ok().build();
+    }
+}
+```
+
+---
+
+## 4. RFC 9457 / RFC 7807 `ProblemDetail` Architecture
+
+Spring Boot 3 natively adopts **RFC 9457** (the successor to RFC 7807) for standardized HTTP API problem details.
+
+### Enabling Problem Details Globally
+
+In `application.yml`:
+```yaml
+spring:
+  mvc:
+    problemdetails:
+      enabled: true
+```
+
+### Production Global Exception Handler (`ResponseEntityExceptionHandler`)
+
+Instead of writing custom ad-hoc error response classes, extend Spring's `ResponseEntityExceptionHandler` to standardize all errors into RFC 9457 `ProblemDetail`:
+
+```java
+package com.example.exception;
+
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.validation.ConstraintViolation;
+import jakarta.validation.ConstraintViolationException;
+import org.slf4j.MDC;
+import org.springframework.http.*;
+import org.springframework.validation.FieldError;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.ServletWebRequest;
+import org.springframework.web.context.request.WebRequest;
+import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
+
+import java.net.URI;
+import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+@RestControllerAdvice
+public class GlobalApiExceptionHandler extends ResponseEntityExceptionHandler {
+
+    // 1. Handle DTO validation failures (@Valid @RequestBody)
+    @Override
+    protected ResponseEntity<Object> handleMethodArgumentNotValid(
+        MethodArgumentNotValidException ex,
+        HttpHeaders headers,
+        HttpStatusCode status,
+        WebRequest request
+    ) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(
+            HttpStatus.BAD_REQUEST,
+            "One or more fields in the request failed validation."
+        );
+        problem.setTitle("Validation Failed");
+        problem.setType(URI.create("https://api.example.com/errors/validation-failed"));
+
+        // Extract clean field-level errors
+        Map<String, String> fieldErrors = new LinkedHashMap<>();
+        for (FieldError fieldError : ex.getBindingResult().getFieldErrors()) {
+            fieldErrors.put(fieldError.getField(), fieldError.getDefaultMessage());
+        }
+
+        problem.setProperty("invalidFields", fieldErrors);
+        problem.setProperty("timestamp", Instant.now());
+        problem.setProperty("traceId", MDC.get("traceId"));
+
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(problem);
+    }
+
+    // 2. Handle Path/Query parameter validation failures (@Validated on Controller)
+    @ExceptionHandler(ConstraintViolationException.class)
+    public ResponseEntity<ProblemDetail> handleConstraintViolation(
+        ConstraintViolationException ex,
+        HttpServletRequest request
+    ) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(
+            HttpStatus.BAD_REQUEST,
+            "One or more query parameters or path variables are invalid."
+        );
+        problem.setTitle("Parameter Constraint Violation");
+        problem.setType(URI.create("https://api.example.com/errors/constraint-violation"));
+
+        Map<String, String> errors = new LinkedHashMap<>();
+        for (ConstraintViolation<?> violation : ex.getConstraintViolations()) {
+            errors.put(violation.getPropertyPath().toString(), violation.getMessage());
+        }
+
+        problem.setProperty("invalidParameters", errors);
+        problem.setProperty("timestamp", Instant.now());
+        problem.setProperty("traceId", MDC.get("traceId"));
+
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(problem);
+    }
+
+    // 3. Handle Resource Not Found
+    @ExceptionHandler(ResourceNotFoundException.class)
+    public ResponseEntity<ProblemDetail> handleNotFound(ResourceNotFoundException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+        problem.setTitle("Resource Not Found");
+        problem.setType(URI.create("https://api.example.com/errors/not-found"));
+        problem.setProperty("timestamp", Instant.now());
+        problem.setProperty("traceId", MDC.get("traceId"));
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(problem);
+    }
+
+    // 4. Catch-all for unexpected internal server errors (Fail-safe)
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ProblemDetail> handleGenericException(Exception ex) {
+        // In production: Log the full stack trace with trace ID
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(
+            HttpStatus.INTERNAL_SERVER_ERROR,
+            "An unexpected internal server error occurred. Please contact support with the trace ID."
+        );
+        problem.setTitle("Internal Server Error");
+        problem.setType(URI.create("https://api.example.com/errors/internal-error"));
+        problem.setProperty("timestamp", Instant.now());
+        problem.setProperty("traceId", MDC.get("traceId"));
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(problem);
+    }
+}
+```
+
+### The Standard RFC 9457 JSON Output
+
+```json
+{
+  "type": "https://api.example.com/errors/validation-failed",
+  "title": "Validation Failed",
+  "status": 400,
+  "detail": "One or more fields in the request failed validation.",
+  "instance": "/api/users",
+  "invalidFields": {
+    "email": "Email must be a well-formed address",
+    "password": "Password must be at least 8 characters long"
+  },
+  "timestamp": "2026-09-12T10:15:30Z",
+  "traceId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+}
+```
+
+---
+
+# Phase 4: Senior Interview Ace & Verification
+
+## The Senior Engineer vs Junior Engineer Mindset
+
+| Scenario | Junior Engineer Answer | Staff / Senior Engineer Answer |
+| :--- | :--- | :--- |
+| **What is the difference between `@Valid` and `@Validated`?** | "They do the exact same thing; one is from Java and one is from Spring." | "`@Valid` is the standard Jakarta JSR-380 annotation used to trigger validation on method arguments (`@RequestBody`) and enable cascading validation on child objects. `@Validated` is a Spring-specific annotation that supports **Validation Groups** and activates Spring's `MethodValidationPostProcessor` AOP proxy at the class level to validate `@PathVariable` and `@RequestParam` parameters." |
+| **How do you format error messages in production REST APIs?** | "I return a custom `Map<String, String>` or custom `ErrorResponse` class." | "In Spring Boot 3, modern backends adopt **RFC 9457 Problem Details** via `org.springframework.http.ProblemDetail`. By extending `ResponseEntityExceptionHandler`, we emit a standardized JSON schema containing `type`, `title`, `status`, `detail`, `instance`, and custom properties such as field error maps and distributed `traceId` values." |
+| **Why didn't validation execute on my nested collection?** | "Hibernate Validator probably has a bug with lists." | "Validation does not cascade into nested objects or collections by default. You must explicitly place `@Valid` on the field or type argument: `List<@Valid OrderItemRequest> items`." |
+
+---
+
+## Active Recall & Interview Mastery
+
+<AccordionGroup>
+  <Accordion title="1. What is the fundamental difference between MethodArgumentNotValidException and ConstraintViolationException?">
+    `MethodArgumentNotValidException` is thrown by Spring MVC when `@Valid @RequestBody` fails validation during Jackson deserialization in `RequestResponseBodyMethodProcessor`. `ConstraintViolationException` is thrown by Hibernate Validator via Spring's AOP `MethodValidationPostProcessor` when `@Validated` is placed on a controller class to validate individual `@PathVariable` or `@RequestParam` parameters. They require separate handler methods in `@RestControllerAdvice`.
+  </Accordion>
+
+  <Accordion title="2. How do you implement cascading validation on nested objects and collections?">
+    To cascade validation down into child objects or collections, you must annotate the member field or collection type parameter with `@Valid`. For example: `List<@Valid ItemDto> items` or `@Valid AddressDto shippingAddress`. Without `@Valid`, the validator only inspects top-level annotations (like `@NotNull` or `@NotEmpty`) and skips the internal fields of the child objects entirely.
+  </Accordion>
+
+  <Accordion title="3. What is RFC 9457 ProblemDetail, and why should modern Spring Boot 3 APIs use it?">
+    RFC 9457 (which obsoletes RFC 7807) defines a standardized, machine-readable HTTP response format for reporting errors. It standardizes five core fields: `type` (URI reference), `title` (summary), `status` (HTTP code), `detail` (explanation), and `instance` (request URI). Adopting ProblemDetail avoids creating fragmented custom error formats, enabling API gateways, web clients, and third-party SDKs to parse and handle errors consistently across microservices.
+  </Accordion>
+
+  <Accordion title="4. How do Validation Groups work, and when should you use them?">
+    Validation Groups allow applying different validation rules to the same DTO based on context (e.g. `OnCreate` vs `OnUpdate`). You define marker interfaces and assign them to constraints: `@Null(groups = OnCreate.class)` and `@NotNull(groups = OnUpdate.class)`. In the controller, you annotate the DTO with `@Validated(OnCreate.class)`. This eliminates the need to maintain redundant, duplicate request DTO classes for create and update operations.
+  </Accordion>
+
+  <Accordion title="5. How do you implement cross-field validation in Spring Boot?">
+    Cross-field validation (e.g., verifying `startDate` is before `endDate`) is implemented by creating a custom constraint annotation with `@Target(ElementType.TYPE)` placed at the class level of the DTO. The corresponding `ConstraintValidator` receives the entire DTO instance in `isValid(dto, context)`, allowing it to compare multiple fields and attach custom property violations to specific nodes using `context.buildConstraintViolationWithTemplate()`.
+  </Accordion>
+
+  <Accordion title="6. Why should you extend ResponseEntityExceptionHandler instead of writing ad-hoc @ExceptionHandler methods?">
+    `ResponseEntityExceptionHandler` is Spring MVC's official base class containing pre-built handling for all 15 standard Spring MVC exceptions (e.g. `HttpRequestMethodNotSupportedException`, `HttpMediaTypeNotSupportedException`, `MissingServletRequestParameterException`, `MethodArgumentNotValidException`). Extending it ensures that all framework-level routing and binding errors are consistently caught and transformed into standard `ProblemDetail` responses rather than slipping through as unformatted 500 errors.
+  </Accordion>
+
+  <Accordion title="7. Why should validation messages avoid leaking internal database column names or raw exception details?">
+    Leaking database column names, raw SQL fragments, or unhandled stack traces exposes internal system implementation details to attackers, aiding SQL injection and schema reconnaissance. Furthermore, clients expect API errors mapped to the JSON contract field names they sent (`firstName`), not internal database column names (`usr_fst_nm_txt`).
+  </Accordion>
+
+  <Accordion title="8. How do you inject a distributed trace ID into RFC 9457 ProblemDetail responses?">
+    By using SLF4J's Mapped Diagnostic Context (`MDC`) populated by an incoming HTTP filter or Spring Cloud Sleuth / Micrometer Tracing. Inside `@RestControllerAdvice`, retrieve the trace ID via `MDC.get("traceId")` and attach it to the `ProblemDetail` object via `problem.setProperty("traceId", traceId)`. This allows frontend users and customer support to correlate UI errors directly with backend logs in Datadog or Grafana Tempo.
+  </Accordion>
+</AccordionGroup>
+
+---
 
 ## Done Checklist
 
-- Request DTOs have validation annotations
-- Controllers use `@Valid`
-- Business rules throw custom exceptions
-- Global handler returns one error shape
-- Validation tests check JSON response
-- No stack trace reaches user
-- Logs do not contain secrets
-
-## Interview Questions
-
-1. What is validation?
-2. What is the difference between DTO validation and business validation?
-3. Why use global exception handler?
-4. Why should APIs not return stack traces?
-5. When should you return `409 Conflict`?
+<Check>
+- [ ] Add `spring-boot-starter-validation` to project dependencies.
+- [ ] Understand the role of Hibernate Validator and `LocalValidatorFactoryBean`.
+- [ ] Differentiate `@Valid` (Jakarta JSR-380) from `@Validated` (Spring AOP & Groups).
+- [ ] Annotate controller classes with `@Validated` to enforce path and query parameter constraints.
+- [ ] Handle both `MethodArgumentNotValidException` and `ConstraintViolationException` in `@RestControllerAdvice`.
+- [ ] Enforce cascading validation on nested objects and collections using `List<@Valid ChildDto>`.
+- [ ] Build custom constraint annotations (`@Constraint`) and `ConstraintValidator` classes.
+- [ ] Implement class-level constraints for cross-field validation (`startDate` before `endDate`).
+- [ ] Utilize Validation Groups (`OnCreate`, `OnUpdate`) to avoid redundant create/update DTOs.
+- [ ] Enable global RFC 9457 problem details via `spring.mvc.problemdetails.enabled=true`.
+- [ ] Extend `ResponseEntityExceptionHandler` to standardize all Spring MVC framework errors.
+- [ ] Attach custom metadata (`traceId`, `timestamp`, `invalidFields`) to `ProblemDetail` responses.
+- [ ] Ensure error messages expose JSON field names, never internal database column names.
+- [ ] Distinguish client validation errors (400 Bad Request) from domain conflicts (409 Conflict).
+- [ ] Write MockMvc slice tests verifying that invalid payloads receive 400 Bad Request with ProblemDetail bodies.
+</Check>

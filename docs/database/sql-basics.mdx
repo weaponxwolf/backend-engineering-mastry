@@ -230,6 +230,52 @@ SET work_mem = '64MB';
 
 ---
 
+### 4. Physical Set Operators: `UNION` vs `UNION ALL`, `INTERSECT`, and `EXCEPT`
+
+Set operations combine the result sets of two independent queries. Choosing the wrong set operator in production introduces severe hidden sorting and memory penalties.
+
+```mermaid
+flowchart LR
+    subgraph UnionAllPlan ["UNION ALL: Instant O(1) Streaming"]
+        Q1A["Query A (100,000 rows)"] & Q2A["Query B (100,000 rows)"] --> Append["Append Node (Zero Memory / Zero Deduplication)"]
+        Append --> ClientA["Stream 200,000 rows directly to client socket!"]
+    end
+
+    subgraph UnionPlan ["UNION: O(N log N) Memory Sorting Trap"]
+        Q1B["Query A (100,000 rows)"] & Q2B["Query B (100,000 rows)"] --> AppendB["Append Node"]
+        AppendB --> Sort["Unique / Sort Node (or HashAggregate in work_mem)"]
+        Sort -.->|"Spills to disk if > work_mem!"| Disk["pgsql_tmp/ Disk Spill"]
+        Sort --> ClientB["Return deduplicated rows"]
+    end
+```
+
+#### The Hidden Cost of Naive `UNION`:
+Many developers write `UNION` when they simply mean *"combine these two lists"*.
+- **`UNION` (Implicit Deduplication)**: Forces the database engine to eliminate duplicate rows across all projected columns. To do this, PostgreSQL must inject an expensive `Sort -> Unique` operator or a memory-hungry `HashAggregate` operator. If the combined datasets exceed `work_mem`, the sort spills to temporary disk files, turning a sub-millisecond query into a multi-second I/O bottleneck.
+- **`UNION ALL` (Zero-Copy Append)**: Concatenates the two result sets without checking for duplicates. It compiles down to a lightweight **`Append`** node that immediately streams rows directly from the first query then the second query into the client socket with **zero memory allocation and zero CPU overhead**.
+
+```sql
+-- DANGEROUS IN HIGH-VOLUME OLTP: Spills to disk to deduplicate 2M rows!
+SELECT user_id, email FROM archived_users
+UNION
+SELECT user_id, email FROM active_users;
+
+-- PRODUCTION-GRADE STANDARD: Zero-overhead streaming append
+SELECT user_id, email FROM archived_users
+UNION ALL
+SELECT user_id, email FROM active_users;
+```
+
+#### `INTERSECT` and `EXCEPT` Under the Hood:
+- **`INTERSECT`**: Returns only rows that appear in **both** query result sets. The executor implements this using a **`HashSetOp Intersect`** node or rewrites it internally to an inner join / semi-join (`WHERE EXISTS (...)`).
+- **`EXCEPT` (or `MINUS`)**: Returns rows that exist in the first query but do **not** exist in the second query. The executor processes this via **`HashSetOp Except`** or an anti-join (`WHERE NOT EXISTS (...)`).
+
+<Tip>
+**Staff Rule**: Prefer explicit **`WHERE NOT EXISTS`** anti-joins over `EXCEPT` whenever possible. The query planner has significantly greater flexibility to choose covering index scans and nested loop joins for `NOT EXISTS` than it does for rigid set operators.
+</Tip>
+
+---
+
 ## PostgreSQL Physical Storage Anatomy: The 8 KB Database Page
 
 Relational databases do not write individual rows directly to disk files. PostgreSQL organizes all tables and indexes into **$8\text{ KB}$ fixed-size blocks (pages)**:
@@ -345,6 +391,86 @@ Alternatively, store currency as an integer of atomic micro-units (`BIGINT price
 -- Always use TIMESTAMPTZ in production:
 created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 ```
+
+---
+
+### 3. Text Storage, Collation Mechanics & The `varchar_pattern_ops` Prefix Trap
+
+In PostgreSQL, `TEXT`, `VARCHAR`, and `VARCHAR(N)` are physically identical on disk (implemented using the variable-length header struct `varlena`). `VARCHAR(255)` does not save a single byte of disk space; it merely introduces an in-memory check constraint check.
+
+#### The Collation B-Tree Trap: Why `LIKE 'prefix%'` Abandons Indexes
+When a database is initialized with standard localized collations (such as `en_US.UTF-8`), PostgreSQL sorts text according to complex linguistic rules (e.g., lowercase and uppercase letters interleaved, accents normalized).
+
+```sql
+-- Developer creates a standard B-Tree index:
+CREATE INDEX idx_users_email ON users (email);
+
+-- Query with leading prefix:
+SELECT id, name FROM users WHERE email LIKE 'alice@%';
+```
+
+**The Disaster**: In PostgreSQL, the Cost-Based Optimizer **will NOT use `idx_users_email` for this query!** It will abandon the index and perform a full **Sequential Scan** (`Seq Scan`) across millions of rows!
+
+#### Why the Optimizer Refuses the Index:
+Under `en_US.UTF-8`, character ordering is non-deterministic at the raw byte level (for example, `'a'` and `'A'` might have identical primary collation weights). Because the B-Tree was sorted using linguistic collation, the engine cannot mathematically guarantee that all strings starting with byte `'a'` are clustered together in contiguous leaf pages!
+
+#### The Two Production Solutions:
+1. **Operator Classes (`varchar_pattern_ops` / `text_pattern_ops`)**:
+   Tell PostgreSQL to sort the B-Tree strictly by **raw byte order** rather than linguistic rules:
+   ```sql
+   CREATE INDEX idx_users_email_prefix ON users (email varchar_pattern_ops);
+   ```
+   Now `WHERE email LIKE 'alice@%'` executes as an instant $O(\log N)$ **Index Scan**!
+2. **Deterministic C Collation**:
+   Specify `COLLATE "C"` explicitly:
+   ```sql
+   CREATE INDEX idx_users_email_c ON users (email COLLATE "C");
+   ```
+
+---
+
+### 4. Generated Columns (`STORED`) vs. Functional / Expression Indexes
+
+Modern relational applications frequently perform queries on derived or normalized expressions (such as case-insensitive lookups or calculated totals).
+
+```mermaid
+flowchart TD
+    subgraph StoredGen ["STORED Generated Column"]
+        S1["INSERT: writes 8KB heap tuple"] --> S2["Calculates expression on write"]
+        S2 --> S3["Stores derived value ON DISK inside 8KB Heap Page<br/>(Increases physical table size & decreases cache density)"]
+    end
+
+    subgraph ExprIndex ["Functional / Expression Index"]
+        E1["INSERT: writes 8KB heap tuple (clean)"] --> E2["Computes expression"]
+        E2 --> E3["Stores derived value ONLY in B-Tree Leaf Node!<br/>(Heap table remains compact; zero duplicate disk storage!)"]
+    end
+```
+
+#### Generated Columns (`GENERATED ALWAYS AS ... STORED`):
+```sql
+CREATE TABLE orders (
+    id BIGINT PRIMARY KEY,
+    unit_price NUMERIC(12, 2) NOT NULL,
+    quantity INT NOT NULL,
+    -- Physically stored inside the 8KB heap page for every row:
+    total_price NUMERIC(12, 2) GENERATED ALWAYS AS (unit_price * quantity) STORED
+);
+```
+- **Advantage**: Simpler application queries (`SELECT total_price FROM orders`); PostgreSQL automatically collects statistics on the column.
+- **Disadvantage**: Consumes physical heap storage and disk I/O on every insert and update. (PostgreSQL does not currently support non-stored virtual columns).
+
+#### Functional / Expression Indexes:
+When the goal is purely fast search without altering table heap geometry, use an expression index:
+
+```sql
+-- Creates an index strictly on the lowercased email expression:
+CREATE INDEX idx_users_lower_email ON users (lower(email));
+
+-- Fast O(log N) Index Scan:
+SELECT id, name FROM users WHERE lower(email) = 'alice@example.com';
+```
+- **Advantage**: Zero extra bytes written to the table heap. The lowercased string exists only in B-Tree leaf pages.
+- **Caveat**: The query predicate must match the indexed expression **character-for-character**. `WHERE lower(email) = ?` will use the index; `WHERE email = ?` will not!
 
 ---
 
@@ -682,6 +808,101 @@ graph TD
 
 ---
 
+## Interactive SQL Hands-On Verification Sandbox
+
+Test these physical behaviors directly in `psql` or your database GUI. This self-contained verification script proves the 3VL collapse, the window frame peer-sum bug, and recursive cycle detection:
+
+```sql
+-- ============================================================================
+-- BACKEND MASTERY: SQL PHYSICAL INTERNALS LAB SANDBOX
+-- ============================================================================
+
+BEGIN;
+
+-- ----------------------------------------------------------------------------
+-- PROOF 1: The Three-Valued Logic (3VL) NULL Omission Trap
+-- ----------------------------------------------------------------------------
+CREATE TEMP TABLE test_orders (
+    id INT PRIMARY KEY,
+    status VARCHAR(20)
+);
+
+INSERT INTO test_orders VALUES (1, 'PAID'), (2, 'CANCELLED'), (3, NULL);
+
+-- Naive query: Expects 2 rows (id 1 and 3), but returns ONLY id 1!
+SELECT * FROM test_orders WHERE status != 'CANCELLED';
+-- Proof output: Row 3 is silently excluded because (NULL != 'CANCELLED') evaluates to UNKNOWN!
+
+-- Correct production query:
+SELECT * FROM test_orders WHERE status IS DISTINCT FROM 'CANCELLED';
+-- Proof output: Correctly returns id 1 and id 3!
+
+-- ----------------------------------------------------------------------------
+-- PROOF 2: The Default Window Frame Range Peer-Sum Trap
+-- ----------------------------------------------------------------------------
+CREATE TEMP TABLE test_ledger (
+    tx_time DATE,
+    amount INT
+);
+
+-- Note: Two transactions share the EXACT same date ('2026-03-02')
+INSERT INTO test_ledger VALUES 
+    ('2026-03-01', 100),
+    ('2026-03-02', 200),
+    ('2026-03-02', 300),
+    ('2026-03-03', 400);
+
+SELECT 
+    tx_time, 
+    amount,
+    -- DANGEROUS DEFAULT: Uses RANGE (jumps to 600 prematurely for both March 2 rows!)
+    SUM(amount) OVER (ORDER BY tx_time) AS dangerous_range_sum,
+    -- SAFE PRODUCTION STANDARD: Uses ROWS (correctly yields 300 then 600!)
+    SUM(amount) OVER (ORDER BY tx_time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS true_cumulative_sum
+FROM test_ledger;
+
+-- ----------------------------------------------------------------------------
+-- PROOF 3: UNION vs UNION ALL Execution Plan Inspection
+-- ----------------------------------------------------------------------------
+-- Notice the "Unique -> Sort" node in UNION versus the instant "Append" in UNION ALL:
+EXPLAIN (COSTS OFF)
+SELECT status FROM test_orders
+UNION
+SELECT status FROM test_orders;
+
+EXPLAIN (COSTS OFF)
+SELECT status FROM test_orders
+UNION ALL
+SELECT status FROM test_orders;
+
+-- ----------------------------------------------------------------------------
+-- PROOF 4: Recursive CTE with Cycle Detection Defense
+-- ----------------------------------------------------------------------------
+CREATE TEMP TABLE test_graph (
+    node_id INT,
+    next_node INT
+);
+
+-- Graph with an intentional infinite loop: 1 -> 2 -> 3 -> 1
+INSERT INTO test_graph VALUES (1, 2), (2, 3), (3, 1);
+
+-- Cycle detection stops infinite loop safely:
+WITH RECURSIVE traverse AS (
+    SELECT node_id, next_node, ARRAY[node_id] AS path, false AS is_cycle
+    FROM test_graph WHERE node_id = 1
+    UNION ALL
+    SELECT g.node_id, g.next_node, path || g.node_id, g.node_id = ANY(path)
+    FROM test_graph g
+    JOIN traverse t ON g.node_id = t.next_node
+    WHERE NOT t.is_cycle
+)
+SELECT * FROM traverse;
+
+ROLLBACK; -- Clean rollback: leaves zero temporary data behind!
+```
+
+---
+
 ## SQL Fundamentals Interview Map
 
 ### 1. `WHERE` vs `HAVING`
@@ -750,4 +971,34 @@ HAVING COUNT(*) >= 3;
   <Accordion title="6. What is the difference between INSERT ... ON CONFLICT and standard SQL MERGE under high concurrency?">
     `INSERT ... ON CONFLICT` is atomic and explicitly engineered for high-concurrency OLTP workloads; if two threads attempt concurrent inserts on the same unique key, PostgreSQL safely pivots one into an update without failing. Standard SQL `MERGE` evaluates join conditions over an entire dataset and is susceptible to concurrent race conditions and serialization deadlocks if multiple threads run `MERGE` concurrently on overlapping rows.
   </Accordion>
+
+  <Accordion title="7. Why does naive UNION cause massive performance degradation compared to UNION ALL?">
+    `UNION` implies strict duplicate elimination across all projected columns. The query planner must inject a `Sort -> Unique` operator or a memory-intensive `HashAggregate` operator. If the combined datasets exceed `work_mem`, the sort spills multi-megabyte temporary run files to disk (`pgsql_tmp/`), causing heavy disk I/O. In contrast, `UNION ALL` performs zero deduplication; it compiles to an instantaneous $O(1)$ `Append` operator that streams rows directly to the client socket without CPU sorting or memory overhead.
+  </Accordion>
+
+  <Accordion title="8. Why does LIKE 'prefix%' fail to use a B-Tree index under default localized collations, and how do you fix it?">
+    Under standard Unicode locales (such as `en_US.UTF-8`), PostgreSQL sorts text according to complex linguistic rules where lowercase and uppercase characters interleave. Because the physical B-Tree ordering does not match byte-by-byte string boundaries, the Cost-Based Optimizer cannot guarantee that all strings starting with the prefix lie in contiguous leaf pages, causing it to abandon the index for a full Sequential Scan. To fix this, create the index using an operator class (`CREATE INDEX ON table (column varchar_pattern_ops)`) or specify raw byte collation (`COLLATE "C"`).
+  </Accordion>
 </AccordionGroup>
+
+---
+
+## Done Checklist
+
+<Check>
+- [ ] Understand the physical 11 steps of the logical query processing order and explain why aliases fail in `WHERE`.
+- [ ] Master SQL Three-Valued Logic (3VL) truth tables and eliminate silent NULL row omission in `!=` queries.
+- [ ] Replace dangerous `NOT IN (NULL)` subqueries with safe `NOT EXISTS` anti-joins.
+- [ ] Differentiate the 4 physical scan operators (`Seq Scan`, `Index Scan`, `Index-Only Scan`, `Bitmap Scan`) and bitmap lossy memory fallbacks.
+- [ ] Diagnose sort and hash disk spills in `pgsql_tmp/` and tune session-level `work_mem`.
+- [ ] Replace expensive CPU-bound `UNION` operators with zero-copy streaming `UNION ALL` appends.
+- [ ] Master PostgreSQL 8 KB page storage geometry: PageHeaderData, ItemIDs, Free Space Hole, and Heap Tuples.
+- [ ] Explain the TOAST out-of-line storage engine threshold (2 KB) and avoid high-cost TOAST seeks.
+- [ ] Eliminate binary floating-point financial corruption by using arbitrary-precision `NUMERIC` or atomic integer micro-units.
+- [ ] Prevent index abandonment on `LIKE 'prefix%'` queries using `varchar_pattern_ops` or `COLLATE "C"`.
+- [ ] Implement advanced analytical window functions (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`, `LEAD`).
+- [ ] Defend against the default window frame peer-sum trap by explicitly defining `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`.
+- [ ] Build hierarchical recursive CTEs with array-based cycle detection guards.
+- [ ] Execute atomic concurrency-safe upserts using `INSERT ... ON CONFLICT (key) DO UPDATE`.
+- [ ] Understand SQL injection AST manipulation and explain how Prepared Statements separate compilation from parameter assignment.
+</Check>

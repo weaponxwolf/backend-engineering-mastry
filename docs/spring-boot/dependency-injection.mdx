@@ -1,19 +1,21 @@
 ---
 title: "Spring IoC Architecture, Bean Lifecycle & Dependency Injection"
 sidebarTitle: "Dependency Injection & IoC"
-description: "From heap object allocation to staff-level container internals: The definitive guide to Spring IoC, BeanFactory vs ApplicationContext, the 12-step Bean Lifecycle, and thread-safe design."
+description: "From heap object allocation to staff-level container internals: The definitive guide to Spring IoC, BeanFactory vs ApplicationContext, the 12-step Bean Lifecycle, scoped proxies, and thread-safe design."
 ---
 
 ## Prerequisites: Before You Begin
 
 Before studying Spring IoC and Dependency Injection internals, ensure you understand:
-- Java OOP: memory allocation with `new`, constructors, interfaces, and reference pointers.
-- Java Multithreading: how multiple threads execute code concurrently and access shared heap memory.
-- Basic Spring Boot component annotations (`@Component`, `@Service`, `@Repository`).
+- **Java OOP**: Memory allocation with `new`, constructors, interfaces, and reference pointers in RAM.
+- **Java Multithreading**: How multiple OS threads execute code concurrently and access shared heap memory.
+- **Basic Spring Annotations**: What `@Component`, `@Service`, and `@Repository` mean.
 
 ---
 
 # Phase 1: Ground Floor (Physical First Principles)
+
+## 1. The Concrete Construction Gridlock in RAM
 
 To understand why Inversion of Control (IoC) exists, you must look at how computer memory (RAM) allocates objects and why hardcoded creation causes architectural gridlock.
 
@@ -26,7 +28,6 @@ flowchart TD
     end
 ```
 
-### 1. The Concrete Construction Gridlock
 In basic Java, if class A needs class B, class A manually creates it using the `new` operator:
 
 ```java
@@ -40,7 +41,7 @@ public class UserService {
 
 What happens when your project grows to 50 real-world classes?
 - `UserService` needs `OrderRepository`, which needs `DatabaseConfig`, which needs `VaultSecretsClient`, which needs `HttpClient`.
-- To create a `UserService`, every caller must write:
+- To instantiate `UserService`, every caller must write:
   ```java
   UserService service = new UserService(
       new OrderRepository(
@@ -55,8 +56,28 @@ What happens when your project grows to 50 real-world classes?
 - **The Construction Gridlock**: If the developer of `DatabaseConfig` adds a `timeoutSeconds` parameter to its constructor, **every single `new` call across your entire application and test suite breaks simultaneously**!
 - Furthermore, you cannot unit test `UserService` in isolation. Because `OrderRepository` is hardcoded with `new`, running a unit test physically attempts to open a network socket to `localhost:5432`!
 
-### 2. Inversion of Control: The Automobile Factory
+---
+
+## 2. Inversion of Control: The Automobile Assembly Factory
+
 Inversion of Control (IoC) flips this responsibility using the **Hollywood Principle**: *"Don't call us, we'll call you."*
+
+```mermaid
+flowchart TD
+    subgraph Manual ["1. Without IoC (Manual Creation)"]
+        Driver["Client Code"] -->|"Calls new Engine()"| Engine["Engine Object"]
+        Driver -->|"Calls new Transmission()"| Trans["Transmission Object"]
+        Driver -->|"Calls new Car(Engine, Trans)"| Car["Car Object"]
+    end
+
+    subgraph WithIoC ["2. With Spring IoC Container"]
+        Factory["Spring IoC Container (ApplicationContext)"]
+        Factory -->|"Instantiates & Wires"| E["Engine Bean"]
+        Factory -->|"Instantiates & Wires"| T["Transmission Bean"]
+        Factory -->|"Drops Dependencies into Constructor"| C["Car Bean"]
+        C -->|"Delivered Ready-to-Drive"| App["Business Logic"]
+    end
+```
 
 Instead of classes calling `new`, an external entity—the **Spring IoC Container**—acts like an automobile assembly factory:
 1. It manufactures the engine (`DatabaseConfig`).
@@ -68,9 +89,11 @@ Instead of classes calling `new`, an external entity—the **Spring IoC Containe
 
 # Phase 2: The Naive Code (The Production Crash)
 
-When a developer uses Spring without understanding container internals, they introduce subtle, dangerous bugs that pass code review but cause catastrophic data breaches in production.
+When developers use Spring without understanding container internals, they introduce subtle, dangerous bugs that pass code review but cause catastrophic data breaches in production.
 
-### Catastrophe 1: The Mutable Singleton Data Breach (Thread Safety Disaster)
+---
+
+## Catastrophe 1: The Mutable Singleton Data Breach (Thread Safety Disaster)
 
 By default, **all Spring beans are Singletons**. The container creates **exactly one instance** of `UserService` in JVM heap memory. That single instance is shared simultaneously across all 200 Tomcat web worker threads handling incoming HTTP traffic.
 
@@ -97,60 +120,91 @@ public class ReportService {
 }
 ```
 
+### Why Production Crashes Under Load
+
 ```mermaid
 sequenceDiagram
     autonumber
-    participant ThreadA as Tomcat Thread A (Alice's Request)
-    participant Bean as ReportService (Single Instance in RAM: 0x7E)
-    participant ThreadB as Tomcat Thread B (Bob's Request)
+    participant T1 as Thread 1 (Patient Alice)
+    participant Bean as Singleton ReportService in RAM (0x1A)
+    participant T2 as Thread 2 (Patient Bob)
 
-    ThreadA->>Bean: generatePatientMedicalReport(Alice)
-    Note over Bean: this.currentUser is set to Alice!
-    ThreadA->>ThreadA: Fetching Alice's medical history (Takes 50ms)...
-    Note over ThreadB: Bob makes a request at the exact same millisecond!
-    ThreadB->>Bean: generatePatientMedicalReport(Bob)
-    Note over Bean: FATAL RACE CONDITION!<br/>this.currentUser is OVERWRITTEN to Bob!
-    ThreadA->>Bean: Reads this.currentUser.getEmail()
-    Note over ThreadA: Thread A reads Bob's email address!
-    ThreadA->>ThreadA: Sends Alice's confidential medical records to Bob's inbox!
+    T1->>Bean: generatePatientMedicalReport(Alice)
+    Note over Bean: currentUser field = Alice
+    T1->>Bean: fetchMedicalDataFromDatabase(Alice) [Takes 50ms]
+    
+    Note over T2: Bob makes request 20ms later!
+    T2->>Bean: generatePatientMedicalReport(Bob)
+    Note over Bean: 💥 OVERWRITTEN: currentUser field = Bob!
+    
+    T1->>Bean: sendConfidentialEmail(currentUser.getEmail(), summary)
+    Note over T1: Reads currentUser (Bob)! Emails Alice's medical records to Bob!
+    
+    T2->>Bean: fetchMedicalDataFromDatabase(Bob)
+    T2->>Bean: sendConfidentialEmail(currentUser.getEmail(), summary)
 ```
 
-#### The Production Impact:
-- **Catastrophic HIPAA / GDPR Data Breach**: Because all threads share the same instance variables in heap memory, Thread B overwrote `this.currentUser` while Thread A was mid-execution. 
-- Alice's confidential medical records were emailed to Bob.
-- **Rule**: Spring Singleton beans must be **100% stateless**. All data must pass strictly through local method arguments and return values (which live on the thread's private stack), never stored in instance fields.
+1. Tomcat Thread 1 receives a request from **Patient Alice**. It sets `this.currentUser = Alice`.
+2. While Thread 1 is waiting 50 milliseconds for the database, Tomcat Thread 2 receives a request from **Patient Bob**.
+3. Thread 2 executes `this.currentUser = Bob`, **overwriting Alice's pointer in shared heap memory**!
+4. Thread 1 resumes and sends the email to `this.currentUser.getEmail()`. Because the field was overwritten, **Alice's confidential medical records are emailed directly to Bob!**
 
----
+### Production Fix: Complete Statelessness
 
-### Catastrophe 2: The Field Injection Trap (`@Autowired` on Fields)
-
-A beginner uses field injection because it requires less typing:
+Singleton beans must be **100% stateless**. Never store user, request, or transaction data in instance variables. Pass data strictly through local method arguments allocated on the thread's private stack:
 
 ```java
-// DANGEROUS ANTI-PATTERN: Field Injection
 @Service
-public class OrderService {
+public class ReportService {
 
-    @Autowired
-    private OrderRepository orderRepository; // Injected via reflection
+    private final MedicalRecordRepository repository;
+    private final EmailClient emailClient;
 
-    public void processOrder(Order order) {
-        orderRepository.save(order);
+    // Constructor injection: Dependencies are immutable final references
+    public ReportService(MedicalRecordRepository repository, EmailClient emailClient) {
+        this.repository = repository;
+        this.emailClient = emailClient;
+    }
+
+    // Thread-safe: User is a local reference on the thread stack frame!
+    public void generatePatientMedicalReport(User user) {
+        String medicalSummary = repository.fetchSummary(user.getId());
+        emailClient.sendEmail(user.getEmail(), medicalSummary);
     }
 }
 ```
 
-#### Why Field Injection Fails in Production:
-1. **Un-testable without Reflection**: If you write a unit test with Mockito:
-   ```java
-   OrderService service = new OrderService();
-   service.processOrder(new Order()); // THROWS NullPointerException!
-   ```
-   Because `orderRepository` has no constructor or setter, it is `null`. You cannot pass a mock without using slow, brittle reflection frameworks.
-2. **Hidden Bloat (SRP Violation)**: With field injection, adding 15 dependencies looks like 15 short lines. With constructor injection, a constructor with 15 parameters immediately triggers code smell alarms that the class violates the Single Responsibility Principle.
-3. **Broken Immutability**: Field injection cannot be declared `final`. Dependencies can be mutated or reassigned at runtime.
+---
 
-#### Production Fix: Constructor Injection With Final Dependencies
+## Catastrophe 2: Field Injection (`@Autowired`) & Test Paralysis
+
+A beginner injects dependencies directly into private fields:
+
+```java
+// NAIVE CODE: UNTESTABLE & BRITTLE FIELD INJECTION!
+@Service
+public class OrderService {
+
+    @Autowired
+    private OrderRepository orderRepository;
+
+    @Autowired
+    private PaymentClient paymentClient;
+
+    public void processOrder(Order order) {
+        orderRepository.save(order);
+        paymentClient.authorize(order.paymentRequest());
+    }
+}
+```
+
+### Why Field Injection Is Dangerous
+
+1. **Test Paralysis**: In a plain JUnit test, you cannot instantiate `OrderService` without spinning up a heavy Spring context or using Java reflection to violently break private field encapsulation (`ReflectionTestUtils`).
+2. **Hidden Bloat (SRP Violation)**: Adding 15 dependencies via `@Autowired private ...` looks like 15 short lines. With constructor injection, a constructor with 15 parameters immediately rings alarm bells that the class violates the Single Responsibility Principle.
+3. **Broken Immutability**: Fields cannot be declared `final`. Dependencies can be mutated or reassigned at runtime.
+
+### Production Fix: Constructor Injection With Final Fields
 
 ```java
 @Service
@@ -172,34 +226,13 @@ public class OrderService {
 ```
 
 Line by line:
-
-- `@Service` makes the class a Spring bean candidate during component scanning.
-- `private final OrderRepository orderRepository` makes the dependency mandatory and impossible to replace after construction.
-- `private final PaymentClient paymentClient` declares the external collaborator explicitly.
-- The constructor is the only way to create a valid `OrderService`.
-- Spring sees one constructor and automatically resolves both parameters from the application context.
-- `processOrder(...)` uses dependencies that are guaranteed non-null after startup.
-
-Test proof:
-
-```java
-OrderRepository repository = mock(OrderRepository.class);
-PaymentClient paymentClient = mock(PaymentClient.class);
-OrderService service = new OrderService(repository, paymentClient);
-
-service.processOrder(order);
-
-verify(repository).save(order);
-verify(paymentClient).authorize(order.paymentRequest());
-```
-
-This test uses plain Java construction. No Spring container, reflection, or database socket is required.
+- `private final OrderRepository orderRepository`: The `final` keyword guarantees reference immutability once created.
+- Constructor parameters are automatically resolved by Spring without requiring `@Autowired` (when there is a single constructor).
+- The class can be tested in 1 millisecond using plain Java: `new OrderService(mockRepo, mockPayment)`.
 
 ---
 
-# Phase 3: Under the Hood (Mechanics & Bytecode)
-
-To understand how Spring manages your application, you must explore the internal container architecture.
+# Phase 3: Under the Hood (Container Mechanics & Bytecode)
 
 ## 1. Container Hierarchy: `BeanFactory` vs `ApplicationContext`
 
@@ -220,10 +253,10 @@ graph TD
 
 | Dimension | `BeanFactory` | `ApplicationContext` (Spring Boot Default) |
 | :--- | :--- | :--- |
-| **Instantiation Strategy** | **Lazy**: Beans are instantiated only when `getBean()` is explicitly requested | **Eager**: All singletons are pre-instantiated and validated at application startup |
-| **Fail-Fast Detection** | Slow: Missing dependencies fail at runtime during real user requests | **Immediate**: Misconfigured dependencies fail fast during startup before opening HTTP ports |
-| **AOP & Proxies** | Requires manual post-processor registration | Fully automated support for `@Transactional`, `@Async`, `@Cacheable` |
-| **Enterprise Features** | Minimal: Bare-bones object graph | Internationalization (i18n), Event publishing, Web application scopes |
+| **Instantiation Strategy** | **Lazy**: Beans are instantiated only when `getBean()` is explicitly requested. | **Eager**: All singletons are pre-instantiated and validated at application startup. |
+| **Fail-Fast Detection** | Slow: Missing dependencies fail at runtime during real user requests. | **Immediate**: Misconfigured dependencies fail fast during startup before opening HTTP ports. |
+| **AOP & Proxies** | Requires manual post-processor registration. | Fully automated support for `@Transactional`, `@Async`, `@Cacheable`. |
+| **Enterprise Features** | Minimal: Bare-bones object graph. | Internationalization (i18n), Event publishing, Web application scopes. |
 
 ---
 
@@ -236,35 +269,181 @@ sequenceDiagram
     autonumber
     participant Scanner as Component Scanner (@ComponentScan)
     participant Reg as BeanDefinitionRegistry
-    participant Inst as Instantiation (Reflection / Constructor)
+    participant BFPP as BeanFactoryPostProcessor
+    participant Inst as Instantiation (Constructor)
     participant Populate as Property Population (DI)
-    participant Aware as Aware Interfaces (BeanNameAware, etc.)
+    participant Aware as Aware Interfaces (BeanNameAware)
     participant BPP_Pre as BeanPostProcessor (Before Init)
     participant Init as @PostConstruct & afterPropertiesSet()
-    participant BPP_Post as BeanPostProcessor (After Init / Dynamic Proxy!)
+    participant BPP_Post as BeanPostProcessor (After Init / CGLIB Proxy!)
     participant Ready as Singleton Cache (ConcurrentHashMap)
     participant Destroy as @PreDestroy & DisposableBean
 
-    Scanner->>Reg: 1. Discovers classes & creates BeanDefinition metadata
-    Reg->>Inst: 2. Calls constructor to allocate object in heap
-    Inst->>Populate: 3. Injects dependencies into constructor / setters
-    Populate->>Aware: 4. Injects Aware interfaces (BeanNameAware, ApplicationContextAware)
-    Aware->>BPP_Pre: 5. postProcessBeforeInitialization()
-    BPP_Pre->>Init: 6. Executes @PostConstruct custom init logic
-    Init->>BPP_Post: 7. postProcessAfterInitialization()
+    Scanner->>Reg: 1. Discovers classes & registers BeanDefinitions
+    Reg->>BFPP: 2. BFPP modifies BeanDefinitions (e.g. resolves ${...} placeholders)
+    BFPP->>Inst: 3. Calls constructor to allocate object in heap
+    Inst->>Populate: 4. Injects dependencies into constructor / setters
+    Populate->>Aware: 5. Injects Aware interfaces (BeanNameAware, ApplicationContextAware)
+    Aware->>BPP_Pre: 6. postProcessBeforeInitialization()
+    BPP_Pre->>Init: 7. Executes @PostConstruct & InitializingBean
+    Init->>BPP_Post: 8. postProcessAfterInitialization()
     Note over BPP_Post: CRITICAL: Wraps bean in CGLIB dynamic proxy<br/>for @Transactional, @Async, @Secured!
-    BPP_Post->>Ready: 8. Bean stored in singleton cache (Ready for traffic)
+    BPP_Post->>Ready: 9. Fully initialized bean stored in singletonObjects cache
     Note over Ready: Application serves production traffic...
-    Ready->>Destroy: 9. On shutdown, executes @PreDestroy cleanup
+    Ready->>Destroy: 10. On shutdown, executes @PreDestroy cleanup
 ```
 
-<Tip>
-**Step 7 is Where Spring's Magic Happens**: If your class is annotated with `@Transactional`, `AnnotationAwareAspectJAutoProxyCreator` (a built-in `BeanPostProcessor`) intercepts your bean in Step 7 and wraps it in a **CGLIB Dynamic Proxy subclass**. Other beans that inject your service receive this proxy wrapper!
-</Tip>
+### The 12 Steps Explained in Plain English
+
+1. **BeanDefinition Parsing**: Spring scans the classpath for `@Component`, `@Service`, and `@Bean` definitions and creates an in-memory catalog of `BeanDefinition` metadata.
+2. **BeanFactoryPostProcessor Execution**: Before any bean is instantiated, beans implementing `BeanFactoryPostProcessor` (like `PropertySourcesPlaceholderConfigurer`) run to resolve property placeholders (`${database.url}`).
+3. **Instantiation**: Spring uses reflection or Constructor MethodHandles to allocate memory for the raw object on the JVM heap.
+4. **Populate Bean (Dependency Injection)**: Spring resolves and injects required dependencies into the constructor or setters.
+5. **Aware Callbacks**: If the bean implements `BeanNameAware`, `BeanFactoryAware`, or `ApplicationContextAware`, Spring passes references to the container itself.
+6. **BeanPostProcessor (Before Initialization)**: Custom interceptors execute `postProcessBeforeInitialization()`. This is where `CommonAnnotationBeanPostProcessor` discovers and runs `@PostConstruct` methods.
+7. **InitializingBean (`afterPropertiesSet`)**: Spring invokes `InitializingBean.afterPropertiesSet()` or custom `initMethod` attributes.
+8. **BeanPostProcessor (After Initialization - PROXY CREATION)**: `AnnotationAwareAspectJAutoProxyCreator` checks if the bean has `@Transactional`, `@Async`, or `@PreAuthorize`. If so, it wraps the raw bean in a **CGLIB Dynamic Proxy subclass** and returns the proxy!
+9. **Singleton Cache Registration**: The completed bean (or its proxy wrapper) is placed into `DefaultSingletonBeanRegistry.singletonObjects` (a thread-safe `ConcurrentHashMap`).
+10. **Application Running**: The bean serves incoming production traffic.
+11. **Pre-Destruction**: On JVM shutdown hook, `CommonAnnotationBeanPostProcessor` invokes `@PreDestroy` methods.
+12. **Destruction Callbacks**: Spring calls `DisposableBean.destroy()`, closes network sockets, flushes buffers, and releases resources.
 
 ---
 
-## 3. Circular Dependencies & The 3-Level Cache
+## 3. Bean Scopes & The Scoped Proxy Trap
+
+Spring provides 6 standard bean scopes:
+
+| Scope | Lifecycle Duration | Where It Lives |
+| :--- | :--- | :--- |
+| **Singleton** (Default) | Exactly 1 instance per `ApplicationContext`. | JVM Heap (`singletonObjects` map). |
+| **Prototype** | Fresh instance created on every single injection or `getBean()`. | Ephemeral. Garbage collected when dereferenced. |
+| **Request** | 1 instance per HTTP request lifecycle. | Tied to current HTTP thread stack. |
+| **Session** | 1 instance per HTTP Session. | Stored in Tomcat session storage. |
+| **Application** | 1 instance per `ServletContext`. | Web application context. |
+| **Websocket** | 1 instance per WebSocket session. | WebSocket session attributes. |
+
+### The Scoped Proxy Trap
+
+What happens if a Singleton bean injects a `@RequestScope` bean?
+
+```java
+// HAZARD: INJECTING REQUEST SCOPE INTO SINGLETON!
+@Component
+@RequestScope
+public class UserRequestContext {
+    private String tenantId;
+    private String userId;
+    // getters and setters
+}
+
+@Service // SINGLETON BEAN!
+public class OrderService {
+
+    // FATAL MISTAKE: Injected once at startup!
+    private final UserRequestContext requestContext;
+
+    public OrderService(UserRequestContext requestContext) {
+        this.requestContext = requestContext;
+    }
+
+    public void process() {
+        // Reads stale or crashed context from the first request!
+        String tenant = requestContext.getTenantId();
+    }
+}
+```
+
+Because `OrderService` is a Singleton, it is instantiated **once at startup**. It resolves its dependencies once. The `UserRequestContext` injected into it remains frozen forever, causing cross-request data corruption!
+
+### The Production Fix: Scoped Proxies
+
+Configure `proxyMode = ScopedProxyMode.TARGET_CLASS`:
+
+```java
+@Component
+@Scope(value = WebApplicationContext.SCOPE_REQUEST, proxyMode = ScopedProxyMode.TARGET_CLASS)
+public class UserRequestContext {
+    private String tenantId;
+    private String userId;
+}
+```
+
+```mermaid
+flowchart LR
+    Singleton["Singleton OrderService"] -->|"Calls getTenantId()"| Proxy["CGLIB Scoped Proxy"]
+    Proxy -->|"Looks up ThreadLocal in RequestContextHolder"| Req1["Request 1 Context (Thread 1)"]
+    Proxy -->|"Looks up ThreadLocal in RequestContextHolder"| Req2["Request 2 Context (Thread 2)"]
+```
+
+Spring injects a dynamic CGLIB proxy into `OrderService`. When `orderService.process()` calls `requestContext.getTenantId()`, the proxy intercepts the call, fetches the current thread's `HttpServletRequest` from `RequestContextHolder`, and delegates to the request-specific instance!
+
+---
+
+## 4. Disambiguation: `@Primary`, `@Qualifier` & Dynamic Strategy Maps
+
+When multiple beans implement the same interface, Spring cannot guess which bean you want:
+
+```java
+public interface PaymentProcessor { void process(BigDecimal amount); }
+
+@Component public class StripeProcessor implements PaymentProcessor { ... }
+@Component public class PaypalProcessor implements PaymentProcessor { ... }
+```
+
+Injecting `PaymentProcessor` without disambiguation crashes on startup with:
+```console
+NoUniqueBeanDefinitionException: expected single matching bean but found 2: paypalProcessor,stripeProcessor
+```
+
+### 1. `@Primary` vs `@Qualifier`
+
+```java
+// @Primary defines the default fallback bean
+@Component
+@Primary
+public class StripeProcessor implements PaymentProcessor { ... }
+
+// @Qualifier explicitly targets a named bean
+@Service
+public class CheckoutService {
+    private final PaymentProcessor processor;
+
+    public CheckoutService(@Qualifier("paypalProcessor") PaymentProcessor processor) {
+        this.processor = processor;
+    }
+}
+```
+
+### 2. Eliminating `switch` Statements with Dynamic Strategy Maps
+
+Instead of hardcoded `if-else` blocks, Spring can automatically discover all strategy beans and inject them into a `Map<String, Strategy>` where the map keys match the bean names:
+
+```java
+@Service
+public class PaymentDispatcherService {
+
+    // Spring automatically populates this map with ALL PaymentProcessor beans!
+    private final Map<String, PaymentProcessor> processors;
+
+    public PaymentDispatcherService(Map<String, PaymentProcessor> processors) {
+        this.processors = processors;
+    }
+
+    public void dispatch(String provider, BigDecimal amount) {
+        // provider: "stripeProcessor" or "paypalProcessor"
+        PaymentProcessor processor = processors.get(provider);
+        if (processor == null) {
+            throw new IllegalArgumentException("Unsupported payment gateway: " + provider);
+        }
+        processor.process(amount); // O(1) dynamic dispatch! Zero switch statements!
+    }
+}
+```
+
+---
+
+## 5. Circular Dependencies & Spring 3-Level Cache
 
 What happens if Service A requires Service B in its constructor, and Service B requires Service A?
 
@@ -274,28 +453,40 @@ flowchart LR
     ServiceB -->|"Requires in Constructor"| ServiceA
 ```
 
-In Spring Boot 2.6+, constructor circular dependencies are **forbidden by default** and cause immediate startup failure with:
-`BeanCurrentlyInCreationException: Is there an unresolvable circular reference?`
+In Spring Boot 2.6+ and 3.x, constructor circular references are **strictly forbidden by default** and crash application startup with:
+```console
+BeanCurrentlyInCreationException: Error creating bean with name 'orderService': 
+Requested bean is currently in creation: Is there an unresolvable circular reference?
+```
 
-### How Spring Resolves Setter Circular Dependencies: The Three-Level Cache
-Inside `DefaultSingletonBeanRegistry`, Spring maintains three internal hash maps:
-1. `singletonObjects` (First-Level Cache): Fully initialized beans ready for production use.
-2. `earlySingletonObjects` (Second-Level Cache): Raw instantiated objects exposed before property injection to break circular references.
-3. `singletonFactories` (Third-Level Cache): Factory lambdas (`ObjectFactory<?>`) that create early proxy references.
+### How Spring Historically Resolved Setter Circular References (The 3-Level Cache)
 
-### Why `@Lazy` is a Toxic Architectural Band-Aid
-Adding `@Lazy` tells Spring to inject a synthetic placeholder proxy to bypass constructor circularity. 
+Inside `DefaultSingletonBeanRegistry`, Spring maintains 3 internal `Map` caches:
 
-While it allows the application to start, it is an **anti-pattern**:
-- It masks high coupling and violates the Single Responsibility Principle.
-- It can cause subtle runtime deadlocks during multi-threaded initialization.
+1. `singletonObjects` (First-Level Cache): Stores fully initialized, ready-to-use beans.
+2. `earlySingletonObjects` (Second-Level Cache): Stores partially created beans (allocated in heap, but properties not yet injected).
+3. `singletonFactories` (Third-Level Cache): Stores factory lambdas (`ObjectFactory<?>`) that can expose early proxy references.
 
-### The Clean Refactoring: Decoupling with Domain Events
+### Why `@Lazy` Is an Architectural Anti-Pattern
+
+Adding `@Lazy` tells Spring to inject a synthetic placeholder proxy:
 ```java
-// OrderService publishes an event instead of directly depending on CustomerService
 @Service
 public class OrderService {
+    public OrderService(@Lazy CustomerService customerService) { ... }
+}
+```
 
+While this allows the application to boot, **`@Lazy` is a code smell**:
+- It hides high coupling and violates the Single Responsibility Principle.
+- It introduces runtime concurrency deadlocks if both beans initialize simultaneously under multi-threaded traffic.
+
+**The Clean Fix**: Decouple the beans using **Spring Domain Events**:
+
+```java
+// OrderService publishes an event instead of calling CustomerService directly
+@Service
+public class OrderService {
     private final ApplicationEventPublisher eventPublisher;
 
     public OrderService(ApplicationEventPublisher eventPublisher) {
@@ -303,296 +494,99 @@ public class OrderService {
     }
 
     public void completeOrder(Long orderId, Long customerId) {
-        // Business logic...
         eventPublisher.publishEvent(new OrderCompletedEvent(orderId, customerId));
     }
 }
 
-// CustomerService listens to the event: ZERO circular dependencies!
+// CustomerService listens to the event: ZERO circular references!
 @Service
 public class CustomerService {
-
     @EventListener
     public void onOrderCompleted(OrderCompletedEvent event) {
-        addLoyaltyPoints(event.customerId());
+        addRewardPoints(event.customerId());
     }
 }
 ```
 
 ---
 
-## 4. Eliminating `switch` Statements with Dynamic Strategy Maps
+# Phase 4: Senior Interview Ace & Verification
 
-A common junior anti-pattern is using giant `switch` or `if-else` blocks to select payment gateways or business algorithms:
+## The Senior Engineer vs Junior Engineer Mindset
 
-```java
-// ANTI-PATTERN: Violates Open/Closed Principle (OCP)
-public void processPayment(String gatewayType, long amount) {
-    if ("STRIPE".equalsIgnoreCase(gatewayType)) {
-        stripeGateway.charge(amount);
-    } else if ("PAYPAL".equalsIgnoreCase(gatewayType)) {
-        paypalGateway.charge(amount);
-    } else {
-        throw new IllegalArgumentException("Unknown gateway: " + gatewayType);
-    }
-}
-```
-
-### The Spring IoC Solution: Dynamic Map Injection
-Spring automatically discovers all beans implementing an interface and injects them into a `Map<String, StrategyInterface>` where the map key is the **bean name**:
-
-```java
-// 1. Common Strategy Interface
-public interface PaymentGatewayStrategy {
-    void processPayment(long amountCents);
-}
-
-// 2. Concrete Implementations (Bean names become Map keys)
-@Component("STRIPE")
-public class StripePaymentStrategy implements PaymentGatewayStrategy {
-    public void processPayment(long amountCents) { /* Stripe API call */ }
-}
-
-@Component("PAYPAL")
-public class PaypalPaymentStrategy implements PaymentGatewayStrategy {
-    public void processPayment(long amountCents) { /* PayPal API call */ }
-}
-
-// 3. Context Dispatcher Service with O(1) Map Lookup
-@Service
-public class PaymentProcessingService {
-
-    // Spring automatically populates this map with all PaymentGatewayStrategy beans!
-    private final Map<String, PaymentGatewayStrategy> paymentStrategies;
-
-    public PaymentProcessingService(Map<String, PaymentGatewayStrategy> paymentStrategies) {
-        this.paymentStrategies = paymentStrategies;
-    }
-
-    public void executePayment(String providerKey, long amountCents) {
-        PaymentGatewayStrategy strategy = paymentStrategies.get(providerKey.toUpperCase());
-        if (strategy == null) {
-            throw new IllegalArgumentException("Unsupported payment provider: " + providerKey);
-        }
-        strategy.processPayment(amountCents); // O(1) dispatch! Zero switch statements!
-    }
-}
-```
+| Scenario | Junior Engineer Answer | Staff / Senior Engineer Answer |
+| :--- | :--- | :--- |
+| **Why is Constructor Injection preferred over Field Injection?** | "It's cleaner and recommended by Spring docs." | "Constructor injection enforces three guarantees: (1) Immutability via `final` fields, (2) Pure unit testability without spinning up an ApplicationContext or using reflection, and (3) Fail-fast startup validation preventing `NullPointerExceptions` if dependencies are missing." |
+| **What is the difference between `BeanFactory` and `ApplicationContext`?** | "ApplicationContext has more features." | "`BeanFactory` is the root container interface using lazy instantiation (`getBean()`). `ApplicationContext` is the enterprise container used by Spring Boot that eagerly instantiates singletons at startup for fail-fast validation, and provides AOP proxy generation, event publishing, and environment property resolution." |
+| **What happens when a Prototype bean is injected into a Singleton?** | "Spring creates a new prototype instance every time you call its methods." | "The Scoped Proxy Trap: The singleton is instantiated once at startup, so its dependencies are resolved only once. The prototype bean is injected once and retained forever, degrading into a singleton. To fix this, use `ScopedProxyMode.TARGET_CLASS` or inject an `ObjectProvider<T>`." |
 
 ---
 
-# Phase 4: Senior Interview Ace (Junior vs. Staff Phrasing)
+## Active Recall & Interview Mastery
 
-Senior interviewers ask about dependency injection to test if you understand thread safety, memory models, and clean architecture.
+<AccordionGroup>
+  <Accordion title="1. Explain the 12 steps of the Spring Bean Lifecycle from classpath scanning to destruction.">
+    1. Scan classpath and register `BeanDefinition` metadata.<br/>
+    2. Execute `BeanFactoryPostProcessor` implementations to resolve property placeholders.<br/>
+    3. Instantiate raw object on the JVM heap via reflection/constructor.<br/>
+    4. Populate bean properties and inject dependencies.<br/>
+    5. Invoke Aware callbacks (`BeanNameAware`, `ApplicationContextAware`).<br/>
+    6. Run `BeanPostProcessor.postProcessBeforeInitialization()` (executes `@PostConstruct`).<br/>
+    7. Execute `InitializingBean.afterPropertiesSet()` and custom `initMethod`.<br/>
+    8. Run `BeanPostProcessor.postProcessAfterInitialization()` (wraps bean in CGLIB proxy for `@Transactional`/`@Async`).<br/>
+    9. Store fully initialized bean in `DefaultSingletonBeanRegistry.singletonObjects` cache.<br/>
+    10. Serve application traffic.<br/>
+    11. Execute `@PreDestroy` callbacks on JVM shutdown hook.<br/>
+    12. Invoke `DisposableBean.destroy()` to release resources.
+  </Accordion>
 
-### Q1: "Why does modern Spring strongly recommend Constructor Injection over Field Injection?"
+  <Accordion title="2. Why is storing mutable state in a Singleton Spring Bean catastrophic in production?">
+    Spring beans are Singletons by default, meaning exactly one instance exists in heap memory. Tomcat handles incoming HTTP requests using a thread pool of 200 worker threads. If a singleton bean has a mutable instance variable (e.g. `private User currentUser`), multiple concurrent threads read and write to that exact same memory location simultaneously, causing race conditions where user data from Thread 1 is overwritten by Thread 2, resulting in severe privacy leaks and data corruption.
+  </Accordion>
 
-```diff
-- JUNIOR ANSWER:
-  "Constructor injection is recommended because Spring documentation says it's cleaner 
-   and makes it easier to read dependencies."
-```
+  <Accordion title="3. How does Spring resolve setter circular dependencies using the 3-level cache?">
+    When Service A is instantiated, Spring places an `ObjectFactory` lambda for Service A into the 3rd level cache (`singletonFactories`). When Service A requests Service B, Service B is created and requests Service A. Service B finds Service A's factory in the 3rd level cache, creates an early proxy reference for Service A, places it into the 2nd level cache (`earlySingletonObjects`), and injects it. Service B finishes and enters the 1st level cache (`singletonObjects`). Finally, Service A receives completed Service B and moves to the 1st level cache.
+  </Accordion>
 
-```diff
-+ SENIOR / STAFF ANSWER:
-  "Constructor injection provides three critical architectural and runtime guarantees:
-   1. True Immutability: Dependencies can be declared 'final', ensuring references are never mutated after bean instantiation.
-   2. Pure Unit Testing without Framework Overhead: Classes can be instantiated in plain JUnit tests with simple 'new OrderService(mockRepo)' without needing reflection, MockitoExtension, or spinning up an ApplicationContext.
-   3. Null-Safety & Fail-Fast Validation: It is physically impossible to instantiate the class with missing dependencies, preventing NullPointerExceptions at runtime. It also visually highlights Single Responsibility violations if a constructor exceeds 4-5 parameters."
-```
+  <Accordion title="4. Why does Spring Boot 3 disable circular references by default, and how should you refactor them?">
+    Circular references (`A -> B -> A`) represent architectural coupling and violate the Single Responsibility Principle. They make systems brittle, impede modularization, and can trigger thread initialization deadlocks. Rather than bypassing them with `@Lazy`, developers should refactor the code by introducing a third coordinator service, or decouple the interaction using asynchronous or transactional domain events (`ApplicationEventPublisher` and `@EventListener`).
+  </Accordion>
 
----
+  <Accordion title="5. What is the Scoped Proxy pattern, and why is it mandatory when injecting Request-scoped beans into Singletons?">
+    Because a Singleton bean is instantiated once at startup, any direct dependency injected into its constructor is evaluated only once. Injecting a `@RequestScope` bean directly would freeze the first HTTP request's context inside the singleton forever. By setting `proxyMode = ScopedProxyMode.TARGET_CLASS`, Spring injects a dynamic CGLIB proxy. When the singleton invokes a method on the proxy, the proxy dynamically retrieves the current thread's active `HttpServletRequest` from `RequestContextHolder` and delegates to the correct per-request instance.
+  </Accordion>
 
-### Q2: "What is the difference between `BeanFactory` and `ApplicationContext`?"
+  <Accordion title="6. How does dynamic Strategy Map injection work in Spring IoC, and how does it replace switch statements?">
+    Spring can automatically inject all beans implementing an interface into a `Map<String, InterfaceName>`. Spring sets the map keys to the bean names (e.g., `@Component("STRIPE")`). Business services can query this map directly in $O(1)$ constant time (`map.get(type)`), adhering strictly to the Open/Closed Principle: new payment gateways or algorithms can be added simply by creating a new `@Component` class without modifying existing service code.
+  </Accordion>
 
-```diff
-- JUNIOR ANSWER:
-  "BeanFactory is old and ApplicationContext is new. ApplicationContext has more features."
-```
+  <Accordion title="7. What is the difference between BeanPostProcessor and BeanFactoryPostProcessor?">
+    `BeanFactoryPostProcessor` operates on the container's **metadata** (`BeanDefinition`) before any bean instances are created; it can read or modify property values and add bean definitions (e.g. `PropertySourcesPlaceholderConfigurer`). `BeanPostProcessor` operates on actual **bean instances** after they have been instantiated by the constructor, allowing customization, initialization callback execution (`@PostConstruct`), and wrapping beans in dynamic AOP proxies.
+  </Accordion>
 
-```diff
-+ SENIOR / STAFF ANSWER:
-  "BeanFactory is the root IoC container interface focused on basic dependency injection and lazy initialization—beans are instantiated only when explicitly requested via getBean().
-   
-   ApplicationContext extends BeanFactory and represents the enterprise container used by Spring Boot. It uses eager initialization for singleton beans, enforcing fail-fast configuration validation at startup before HTTP ports open. Furthermore, it integrates enterprise infrastructure: automated AOP proxy creation via BeanPostProcessors, ApplicationEventPublisher for decoupled messaging, Environment property resolution, and MessageSource for internationalization."
-```
-
----
-
-### Q3: "What happens when you inject a Prototype scoped bean into a Singleton bean, and how do you resolve it?"
-
-```diff
-- JUNIOR ANSWER:
-  "Every time you call a method on the prototype bean, Spring creates a fresh instance for you."
-```
-
-```diff
-+ SENIOR / STAFF ANSWER:
-  "That is the classic Scoped Proxy Trap. Because the Singleton bean is instantiated only once at application startup, its constructor dependencies are also resolved and injected only once. 
-   
-   As a result, the Prototype bean is instantiated once and held by the Singleton forever, effectively degrading the Prototype into a Singleton!
-   
-   To resolve this and guarantee a fresh instance on every call, we use one of two production approaches:
-   1. Scoped Proxy: Annotate the prototype bean with '@Scope(value = ConfigurableBeanFactory.SCOPE_PROTOTYPE, proxyMode = ScopedProxyMode.TARGET_CLASS)'. Spring injects a dynamic CGLIB proxy that delegates to a fresh instance on every method call.
-   2. ObjectProvider: Inject an 'ObjectProvider<MyPrototypeBean>' into the singleton and call 'provider.getObject()' whenever a new instance is needed."
-```
-
----
-
-## Spring Core Fundamentals Interview Map
-
-Spring basics are really about object creation, ownership, lifecycle, and thread safety.
-
-### 1. What problem does Dependency Injection solve?
-
-Without DI, a class creates its own dependencies:
-
-```java
-class OrderService {
-    private final PaymentClient paymentClient = new StripePaymentClient();
-}
-```
-
-This hard-codes infrastructure into business code. Tests cannot replace the payment client without changing the class.
-
-With DI:
-
-```java
-class OrderService {
-    private final PaymentClient paymentClient;
-
-    OrderService(PaymentClient paymentClient) {
-        this.paymentClient = paymentClient;
-    }
-}
-```
-
-Now Spring wires production dependencies, while tests can pass fakes.
-
-### 2. What is a bean?
-
-A bean is an object whose lifecycle is owned by the Spring container.
-
-```mermaid
-flowchart LR
-    Class["Java class"] --> Definition["BeanDefinition metadata"]
-    Definition --> Container["ApplicationContext"]
-    Container --> Instance["Bean instance"]
-    Instance --> Injected["Injected into other beans"]
-```
-
-Spring knows how to create it, configure it, inject it, wrap it with proxies, and destroy it.
-
-### 3. Why must singleton beans be stateless?
-
-Spring singleton means one object instance per application context, not one per request.
-
-Bad:
-
-```java
-@Service
-class CurrentUserService {
-    private Long currentUserId;
-
-    void setCurrentUserId(Long currentUserId) {
-        this.currentUserId = currentUserId;
-    }
-}
-```
-
-Two request threads can overwrite each other's user state.
-
-Correct:
-
-```java
-@Service
-class NoteService {
-    NoteResponse findNote(Long noteId, Long currentUserId) {
-        return repository.findByIdAndOwnerId(noteId, currentUserId)
-                .map(NoteResponse::from)
-                .orElseThrow(NotFoundException::new);
-    }
-}
-```
-
-Pass request-specific data through method arguments or request-scoped mechanisms, not mutable singleton fields.
-
-### 4. What is a proxy?
-
-A proxy is an object Spring places in front of your bean to intercept method calls.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Caller
-    participant Proxy as Spring Proxy
-    participant Tx as TransactionInterceptor
-    participant Bean as Real Service Bean
-
-    Caller->>Proxy: placeOrder()
-    Proxy->>Tx: begin transaction
-    Tx->>Bean: invoke real method
-    Bean-->>Tx: result
-    Tx->>Tx: commit or rollback
-    Tx-->>Proxy: result
-    Proxy-->>Caller: result
-```
-
-This is why self-invocation breaks `@Transactional`: `this.someMethod()` calls the real object directly, bypassing the proxy.
-
-### 5. How do you choose between `@Component`, `@Service`, `@Repository`, and `@Configuration`?
-
-| Annotation | Meaning |
-| :--- | :--- |
-| `@Component` | Generic Spring-managed object |
-| `@Service` | Application use case or business operation |
-| `@Repository` | Persistence adapter, translated data-access exceptions |
-| `@Configuration` | Factory for beans and configuration wiring |
-
-Use the annotation that communicates role. Spring can detect all of them, but humans need architecture clarity.
-
-### Build-Break-Fix Lab
-
-<Steps>
-  <Step title="Build">
-    Create an `OrderService` with constructor-injected `PaymentClient` and `OrderRepository`.
-  </Step>
-  <Step title="Break">
-    Store current user data in a singleton field and call a `@Transactional` method through `this`.
-  </Step>
-  <Step title="Observe">
-    Reproduce cross-request data leakage and missing transaction behavior.
-  </Step>
-  <Step title="Fix">
-    Pass request data as parameters and move transactional methods behind a Spring proxy boundary.
-  </Step>
-  <Step title="Prove">
-    Add unit tests for plain constructor injection and integration tests for transaction rollback.
-  </Step>
-</Steps>
-
----
-
-## Failure Modes & Edge Case Matrix
-
-| Failure Mode | Root Cause | Impact | Production Defense |
-| :--- | :--- | :--- | :--- |
-| **`NoSuchBeanDefinitionException`** | Missing `@Component` or package outside component scan | Application fails fast at startup | Verify `@SpringBootApplication` package root hierarchy. |
-| **`NoUniqueBeanDefinitionException`** | Multiple beans implement same interface without `@Primary` | Startup failure due to ambiguous injection | Use `@Qualifier("specificBeanName")` or inject `Map<String, T>`. |
-| **Circular Dependency Failure** | Two beans require each other in constructors | Application crashes on boot | Decouple using Spring Domain Events (`ApplicationEventPublisher`). |
-| **Prototype Scope Degeneration** | Injecting prototype bean directly into singleton | Prototype instance created once and never refreshed | Configure `proxyMode = ScopedProxyMode.TARGET_CLASS` or use `ObjectProvider<T>`. |
-| **Thread-Safety State Leak** | Storing user state in a singleton bean instance variable | Data race condition leaks private user data | Make all singleton beans 100% stateless; pass data strictly via method arguments. |
+  <Accordion title="8. How does ObjectProvider solve optional and prototype dependency resolution?">
+    `ObjectProvider<T>` is a variant of `Provider<T>` that offers variant-safe resolution methods: `getIfAvailable()`, `getIfUnique()`, and `getObject()`. When used with Prototype-scoped beans, calling `provider.getObject()` on every invocation guarantees that a brand new prototype instance is manufactured on demand without needing scoped proxies or violating inversion of control.
+  </Accordion>
+</AccordionGroup>
 
 ---
 
 ## Done Checklist
 
 <Check>
-- [ ] Understand Inversion of Control as an automotive assembly line eliminating tight coupling.
-- [ ] Diagram the 12-step Spring Bean Lifecycle and identify where AOP dynamic proxies are generated.
-- [ ] Enforce strict thread-safety: ensure all Singleton beans are completely stateless.
-- [ ] Eliminate Field Injection in favor of constructor injection with `final` immutable fields.
+- [ ] Understand Inversion of Control as an automotive assembly factory eliminating manual `new` constructor gridlock.
+- [ ] Diagram the 12-step Spring Bean Lifecycle from `BeanDefinition` discovery to `@PreDestroy`.
+- [ ] Identify Step 8 (`postProcessAfterInitialization`) as the exact point where AOP CGLIB proxies wrap beans.
+- [ ] Differentiate `BeanFactory` (lazy, bare-bones) from `ApplicationContext` (eager, fail-fast, enterprise).
+- [ ] Enforce strict thread-safety: ensure all Singleton beans are 100% stateless with zero mutable instance fields.
+- [ ] Eliminate Field Injection in favor of Constructor Injection with immutable `final` dependencies.
+- [ ] Understand the 6 Spring bean scopes (Singleton, Prototype, Request, Session, Application, Websocket).
+- [ ] Prevent Prototype and Request scope degeneration inside Singletons using `ScopedProxyMode.TARGET_CLASS`.
+- [ ] Disambiguate multiple interface implementations using `@Primary` and `@Qualifier`.
 - [ ] Replace complex `switch`/`if-else` blocks with dynamic `Map<String, Strategy>` injection.
-- [ ] Resolve circular dependencies cleanly using `ApplicationEventPublisher` rather than `@Lazy`.
-- [ ] Prevent Prototype scope degeneration inside Singletons using `ScopedProxyMode.TARGET_CLASS`.
+- [ ] Explain why Spring Boot 3 forbids circular references by default (`spring.main.allow-circular-references=false`).
+- [ ] Trace Spring's 3-level cache (`singletonObjects`, `earlySingletonObjects`, `singletonFactories`).
+- [ ] Refactor circular dependencies cleanly using `ApplicationEventPublisher` domain events instead of `@Lazy`.
+- [ ] Differentiate `BeanFactoryPostProcessor` (metadata modification) from `BeanPostProcessor` (instance proxying).
+- [ ] Write plain JUnit 5 unit tests for Spring services without spinning up an `ApplicationContext`.
 </Check>

@@ -454,167 +454,136 @@ public class CheckoutService {
 
 ---
 
-# Phase 4: Senior Interview Ace (Junior vs. Staff Phrasing)
+## 4. Transaction Propagation Behaviors Deep Dive
 
-Senior interviewers look for engineers who understand how transactions behave under concurrent load and high availability.
+When Transactional Method A calls Transactional Method B, Spring determines whether to join the existing transaction, suspend it, or abort using **Propagation Behaviors**:
 
-### Q1: "How does `@Transactional` work, and why does calling an annotated method internally fail?"
-
-```diff
-- JUNIOR ANSWER:
-  "@Transactional is an annotation that opens a database transaction. If you call it inside 
-   the same class, Spring gets confused because it's in the same file."
-```
-
-```diff
-+ SENIOR / STAFF ANSWER:
-  "Spring implements @Transactional using AOP with dynamic CGLIB proxies. At startup, Spring 
-   generates an enhanced proxy subclass (e.g. OrderService$$SpringCGLIB) that intercepts invocations, 
-   acquires a JDBC connection from HikariCP via PlatformTransactionManager, sets autoCommit to false, 
-   and binds the connection to the current thread using TransactionSynchronizationManager via ThreadLocal.
-   
-   When a method calls another annotated method in the same class, the invocation executes via Java's 
-   'this' pointer. Because 'this' resolves to the target instance rather than the proxy wrapper, 
-   the transaction interceptor is completely bypassed. No connection is acquired and no transaction begins. 
-   We resolve this by separating concerns into a collaborator bean or using programmatic TransactionTemplate."
-```
-
----
-
-### Q2: "What exceptions trigger a rollback by default in Spring, and what is the production standard?"
-
-```diff
-- JUNIOR ANSWER:
-  "Any exception thrown from the method causes Spring to rollback the transaction."
-```
-
-```diff
-+ SENIOR / STAFF ANSWER:
-  "By default, Spring only triggers a rollback on unchecked exceptions (subclasses of RuntimeException) 
-   and JVM Errors. If a checked Exception (such as IOException or custom business Exception) is thrown, 
-   Spring catches it, considers it an expected outcome, and proceeds to COMMIT the transaction.
-   
-   In production, we explicitly enforce '@Transactional(rollbackFor = Exception.class)' to guarantee 
-   that any unexpected checked exception triggers a full rollback, preventing silent data corruption."
-```
-
----
-
-### Q3: "What is `Propagation.REQUIRES_NEW`, and what hidden production hazard does it introduce?"
-
-```diff
-- JUNIOR ANSWER:
-  "REQUIRES_NEW tells Spring to always start a new transaction even if one is already running."
-```
-
-```diff
-+ SENIOR / STAFF ANSWER:
-  "REQUIRES_NEW suspends the caller's active transaction and acquires a brand-new, independent database 
-   connection from the pool for the inner transaction.
-   
-   The critical hazard is Connection Pool Starvation Deadlock:
-   If an outer method running on Thread 1 borrows Connection A, and then calls a REQUIRES_NEW method that 
-   requests Connection B, Thread 1 now requires 2 concurrent connections. Under peak traffic where all 
-   connections in HikariCP are borrowed by concurrent outer threads, every thread blocks waiting for a 
-   second connection from an empty pool. Because no outer transaction can complete without its inner 
-   method returning, the entire pool deadlocks until connection timeouts occur.
-   
-   We avoid REQUIRES_NEW in web worker threads and instead decouple audit or secondary actions 
-   asynchronously via @Async or Apache Kafka."
-```
-
----
-
-## Hands-on Practice Challenge & Integration Tests
-
-### The Lab: Reproducing and Defending the Self-Invocation Trap
-
-**Objective**: Write a test verifying that calling a `@Transactional` method internally bypasses proxy rollback, then refactor it using `TransactionTemplate` to guarantee atomic rollbacks.
-
-#### 1. The Broken Test (Proves Proxy Bypass)
-```java
-@Service
-public class OrderService {
-    @Autowired
-    private OrderRepository orderRepository;
-
-    public void processOrder(Order order) {
-        // Internal call via 'this'
-        saveWithAudit(order);
-    }
-
-    @Transactional
-    public void saveWithAudit(Order order) {
-        orderRepository.save(order);
-        throw new RuntimeException("Simulated payment failure!");
-    }
-}
-
-@SpringBootTest
-class OrderServiceTransactionTest {
-
-    @Autowired private OrderService orderService;
-    @Autowired private OrderRepository orderRepository;
-
-    @Test
-    void internalCall_failsToRollback_corruptingDatabaseState() {
-        Order order = new Order("ORD-100", 5000);
-        
-        assertThrows(RuntimeException.class, () -> orderService.processOrder(order));
-
-        // FATAL: Due to proxy bypass, the order was committed despite the exception!
-        assertEquals(1, orderRepository.count());
-    }
-}
-```
-
-#### 2. The Refactored Solution (Defended via Programmatic `TransactionTemplate`)
-```java
-@Service
-public class OrderService {
-    private final OrderRepository orderRepository;
-    private final TransactionTemplate transactionTemplate;
-
-    public OrderService(OrderRepository orderRepository, TransactionTemplate transactionTemplate) {
-        this.orderRepository = orderRepository;
-        this.transactionTemplate = transactionTemplate;
-    }
-
-    public void processOrder(Order order) {
-        transactionTemplate.execute(status -> {
-            orderRepository.save(order);
-            if (someFailureCondition()) {
-                status.setRollbackOnly();
-                throw new RuntimeException("Simulated failure!");
-            }
-            return null;
-        });
-    }
-}
-```
-
----
-
-## Failure Modes & Edge Case Matrix
-
-| Failure Mode | Root Cause | Impact | Production Defense |
+| Propagation | Existing Transaction Behavior | No Transaction Behavior | Physical Database Connection Impact |
 | :--- | :--- | :--- | :--- |
-| **Silent Non-Rollback** | Internal self-invocation (`this.method()`) | Bypasses AOP proxy; no transaction starts | Separate into dedicated collaborator bean or use `TransactionTemplate`. |
-| **Checked Exception Commit** | Method throws checked `Exception` without `rollbackFor` | Corrupted DB data committed despite exception | Always annotate `@Transactional(rollbackFor = Exception.class)`. |
-| **HikariCP Starvation** | Nested `REQUIRES_NEW` exhausts pool under concurrent load | All threads block; 30s timeout causes blackout | Eliminate `REQUIRES_NEW` in web threads; decouple via `@Async` or Kafka. |
-| **Connection Leak** | External HTTP API call inside `@Transactional` | Slow remote API holds connection; pool depletes | Restrict transactions strictly to SQL queries via `TransactionTemplate`. |
-| **Dirty Checking Memory Spike** | Loading 10,000 entities in read-write transaction | Hibernate snapshots double heap memory | Annotate queries with `@Transactional(readOnly = true)`. |
+| **`REQUIRED`** (Default) | Joins existing transaction. | Creates a new transaction. | Shares the same physical JDBC connection. |
+| **`REQUIRES_NEW`** | **Suspends** existing transaction; creates a brand new transaction. | Creates a new transaction. | **Borrows a second physical connection** from HikariCP! |
+| **`NESTED`** | Creates a JDBC **Savepoint** within the existing transaction. | Creates a new transaction. | Shares the same physical connection (Savepoint rollback). |
+| **`MANDATORY`** | Joins existing transaction. | **Throws exception** (`IllegalTransactionStateException`). | Requires caller to provide active connection. |
+| **`SUPPORTS`** | Joins existing transaction. | Runs non-transactionally without a transaction. | May or may not use a transaction. |
+| **`NOT_SUPPORTED`** | **Suspends** existing transaction; runs non-transactionally. | Runs non-transactionally. | Suspends connection binding during execution. |
+| **`NEVER`** | **Throws exception** if an active transaction exists. | Runs non-transactionally. | Prohibits active transactions. |
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Caller as Outer Service (@Transactional REQUIRED)
+    participant Pool as HikariCP Connection Pool
+    participant Inner as Inner Service (@Transactional REQUIRES_NEW)
+    participant DB as PostgreSQL
+
+    Caller->>Pool: 1. Borrow Connection 1
+    Pool-->>Caller: Connection 1 granted
+    Caller->>DB: 2. BEGIN (Connection 1)
+    Caller->>Inner: 3. Invoke innerMethod()
+    Note over Inner: REQUIRES_NEW intercepts call!
+    Inner->>Pool: 4. Borrow Connection 2 (Suspends Connection 1)
+    Pool-->>Inner: Connection 2 granted
+    Inner->>DB: 5. BEGIN (Connection 2)
+    Inner->>DB: 6. INSERT / UPDATE
+    Inner->>DB: 7. COMMIT (Connection 2)
+    Inner->>Pool: 8. Release Connection 2
+    Note over Caller: Resumes Connection 1
+    Caller->>DB: 9. COMMIT (Connection 1)
+    Caller->>Pool: 10. Release Connection 1
+```
+
+<Warning>
+**The Connection Pool Starvation Hazard**:
+If 20 concurrent HTTP requests execute `REQUIRED` and borrow 20 connections from a 20-connection pool, every thread then hits `REQUIRES_NEW`. Each thread requests a second connection. Because the pool is empty, all 20 threads block forever waiting for each other to finish. The service **deadlocks completely** until HikariCP throws a connection timeout exception!
+</Warning>
+
+---
+
+## 5. Under the Hood: `@Transactional(readOnly = true)`
+
+Beginners assume `readOnly = true` is just documentation. In production, it provides critical runtime optimizations:
+
+```java
+@Transactional(readOnly = true)
+public List<OrderSummary> fetchRecentOrders(Long customerId) {
+    return orderRepository.findAllByCustomerId(customerId);
+}
+```
+
+### Physical Runtime Optimizations
+
+1. **Hibernate `FlushMode.MANUAL`**: Hibernate knows the transaction cannot mutate data. It completely **skips generating dirty-checking snapshots** in heap memory when loading entities, saving up to 50% CPU and memory allocations on large query results!
+2. **Database Engine Hints**: Sets `connection.setReadOnly(true)` on the physical JDBC connection. In PostgreSQL, this allows the query engine to bypass transaction ID ($XID$) assignment, saving $XID$ consumption.
+3. **Read-Replica Dynamic Routing**: In cloud environments (AWS Aurora, Google Cloud SQL), a Spring `AbstractRoutingDataSource` inspects `TransactionSynchronizationManager.isCurrentTransactionReadOnly()`. If `true`, it routes the JDBC connection to a **Read Replica**, completely offloading read traffic from the Primary master database!
+
+---
+
+# Phase 4: Senior Interview Ace & Verification
+
+## The Senior Engineer vs Junior Engineer Mindset
+
+| Scenario | Junior Engineer Answer | Staff / Senior Engineer Answer |
+| :--- | :--- | :--- |
+| **How does `@Transactional` work, and why does calling it internally fail?** | "Spring has a bug where `@Transactional` doesn't work if called inside the same class." | "Spring implements `@Transactional` using CGLIB dynamic proxies. The proxy intercepts external calls, starts a transaction via `PlatformTransactionManager`, and binds the JDBC connection to the thread. Internal calls (`this.method()`) execute directly via Java's `this` pointer in memory, completely bypassing the proxy wrapper. We resolve this by moving the method to a collaborator bean or using `TransactionTemplate`." |
+| **What exceptions trigger a rollback by default in Spring?** | "Any exception thrown will roll back the transaction." | "By default, Spring rolls back strictly for unchecked exceptions (`RuntimeException` and `Error`). If a checked `Exception` (like `IOException`) is thrown, Spring considers it expected and commits! In production, we always enforce `@Transactional(rollbackFor = Exception.class)` to ensure checked exceptions trigger a full rollback." |
+| **What is `REQUIRES_NEW`, and why is it dangerous in high-traffic APIs?** | "It just starts a new transaction." | "`REQUIRES_NEW` suspends the active transaction and borrows an independent, second physical JDBC connection from HikariCP. Under high traffic, if all connections are borrowed by outer methods, every worker thread deadlocks waiting for a second connection from an empty pool. We avoid `REQUIRES_NEW` in web threads, decoupling secondary writes using asynchronous events or Kafka." |
+
+---
+
+## Active Recall & Interview Mastery
+
+<AccordionGroup>
+  <Accordion title="1. Explain the exact mechanism by which Spring binds database transactions to the current thread.">
+    Spring uses `TransactionSynchronizationManager`, which internally maintains `ThreadLocal<Map<Object, Object>>` resources. When a transaction begins, `PlatformTransactionManager` obtains a physical JDBC `Connection` from the `DataSource` / HikariCP pool and binds it to the current thread's `ThreadLocal` storage. Any Spring Data repository or `JdbcTemplate` executing on that thread retrieves that exact connection instance. When the method completes, the interceptor unbinds the connection and returns it to the pool in a `finally` block.
+  </Accordion>
+
+  <Accordion title="2. Why does holding a database connection during an external HTTP call cause thread and pool starvation?">
+    HikariCP connection pools typically contain only 10 to 30 connections. If a method annotated with `@Transactional` calls an external payment gateway (like Stripe) that experiences a 2-second network latency spike, that physical database connection sits completely idle on the socket for 2,000ms. Just 15 concurrent users will exhaust the entire database connection pool, causing all other unrelated database operations across the entire application to stall and time out.
+  </Accordion>
+
+  <Accordion title="3. What is the difference between REQUIRED and NESTED propagation?">
+    `REQUIRED` joins the existing transaction; if the inner method fails, the entire transaction is marked `rollbackOnly`, meaning the outer method cannot catch the exception and commit its own work. `NESTED` uses JDBC Savepoints (`connection.setSavepoint()`) on the same physical connection. If the inner method fails, only the inner savepoint is rolled back, allowing the outer transaction to catch the error and continue to commit other work.
+  </Accordion>
+
+  <Accordion title="4. How does TransactionTemplate provide superior safety over @Transactional?">
+    `TransactionTemplate` is programmatic and does not rely on dynamic AOP proxies, making it completely immune to the self-invocation trap. Furthermore, it allows developers to keep transaction boundaries as small as possible: acquiring a connection for 2ms to query or write data, releasing the connection before executing slow network I/O, and acquiring a connection again for final state persistence.
+  </Accordion>
+
+  <Accordion title="5. What happens when an exception is caught and swallowed inside a @Transactional method?">
+    If an exception is caught inside a `@Transactional` method and not re-thrown, Spring's transaction interceptor never detects the failure. Because the method returns normally, Spring assumes everything succeeded and issues an SQL `COMMIT` to PostgreSQL, permanently persisting partial or corrupt data. If you catch an exception, you must either re-throw it or explicitly call `TransactionAspectSupport.currentTransactionStatus().setRollbackOnly()`.
+  </Accordion>
+
+  <Accordion title="6. What is the 'UnexpectedRollbackException: Transaction silently rolled back because it has been marked as rollback-only' error?">
+    This occurs when an inner method with `Propagation.REQUIRED` throws an exception, marking the shared transaction as `rollbackOnly`. If the outer caller catches the exception with `try-catch` and attempts to proceed with a `COMMIT`, Spring detects the conflict (`rollbackOnly` is set, but caller requested commit) and aborts, throwing `UnexpectedRollbackException` to protect data consistency.
+  </Accordion>
+
+  <Accordion title="7. How does @Transactional(readOnly = true) optimize performance under Hibernate?">
+    When `readOnly = true` is configured, Hibernate switches its flush mode to `FlushMode.MANUAL`. During entity loading, Hibernate skips allocating snapshot copies of entity state in heap memory. During commit, it bypasses the dirty-checking loop that compares loaded snapshots against current entity fields, saving substantial CPU cycles and reducing garbage collection pressure on large read workloads.
+  </Accordion>
+
+  <Accordion title="8. How does Spring Boot coordinate transactions across multiple data sources?">
+    Spring Boot cannot coordinate transactions across two independent databases using standard JDBC because each `DataSource` has its own `PlatformTransactionManager`. To coordinate atomicity across multiple databases or between a database and JMS/Kafka, you must either use Two-Phase Commit (2PC) via JTA (Java Transaction API) with an XA transaction manager like Narayana or Atomikos, or employ the Saga Pattern / Transactional Outbox pattern.
+  </Accordion>
+</AccordionGroup>
 
 ---
 
 ## Done Checklist
 
 <Check>
-- [ ] Understand the physical role of the database Write-Ahead Log (WAL) in providing crash recovery and atomicity.
+- [ ] Understand the role of database Write-Ahead Logs (WAL) in providing crash recovery and atomicity.
 - [ ] Diagram how Spring CGLIB dynamic proxies wrap service methods with `PlatformTransactionManager`.
 - [ ] Explain why internal self-invocation (`this.method()`) completely bypasses Spring's transaction interceptor.
+- [ ] Refactor self-invocation bugs using collaborator beans or programmatic `TransactionTemplate`.
 - [ ] Enforce `@Transactional(rollbackFor = Exception.class)` to prevent silent commits on checked exceptions.
 - [ ] Prevent HikariCP pool starvation deadlocks caused by nested `REQUIRES_NEW` propagation.
-- [ ] Keep slow external HTTP network calls strictly outside database transaction boundaries using `TransactionTemplate`.
-- [ ] Optimize read-heavy queries with `@Transactional(readOnly = true)` to bypass Hibernate entity snapshot allocations.
+- [ ] Understand the 7 transaction propagation levels (`REQUIRED`, `REQUIRES_NEW`, `NESTED`, etc.).
+- [ ] Keep slow external HTTP network calls strictly outside database transaction boundaries.
+- [ ] Optimize read-heavy queries with `@Transactional(readOnly = true)` to bypass Hibernate dirty checking.
+- [ ] Leverage `readOnly = true` to route read queries dynamically to database Read Replicas.
+- [ ] Explain why catching exceptions without re-throwing causes silent commits or `UnexpectedRollbackException`.
+- [ ] Differentiate JDBC Savepoints (`NESTED`) from independent connections (`REQUIRES_NEW`).
+- [ ] Trace `TransactionSynchronizationManager` thread-bound `ThreadLocal` connection binding.
+- [ ] Write integration tests verifying that transactional rollbacks restore clean database state.
+- [ ] Monitor HikariCP connection checkout duration and active connection counts in Prometheus/Grafana.
 </Check>

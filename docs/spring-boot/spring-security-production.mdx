@@ -396,20 +396,67 @@ class AdminControllerSecurityTest {
 
 Use `@SpringBootTest` with PostgreSQL for ownership and refresh tests. Injecting `@WithMockUser` or the MockMvc `jwt()` helper bypasses cryptographic verification. Test the real decoder separately with keys created for the test.
 
-## 6. Production Security Checklist
+---
+
+## 6. Active Recall & Interview Mastery
+
+<AccordionGroup>
+  <Accordion title="1. Why do enterprise applications configure multiple SecurityFilterChain beans instead of one?">
+    Enterprise applications often serve disparate client types with conflicting security models. Browser-based authentication endpoints (`/api/auth/**`) handle logins, refresh tokens, and cookies, requiring CSRF token defense and stateful session support (`SessionCreationPolicy.IF_REQUIRED`). In contrast, API business routes (`/api/v1/**`) rely on cryptographically signed stateless JWT bearer tokens where CSRF is unnecessary and `SessionCreationPolicy.STATELESS` is required. Using multiple `@Order`-annotated `SecurityFilterChain` beans with `securityMatcher()` allows each domain to enforce its ideal security posture without compromising the other.
+  </Accordion>
+
+  <Accordion title="2. What happens if the @Order annotations on SecurityFilterChain beans are inverted?">
+    Spring Security iterates through filter chains in ascending order of their `@Order` value until it finds the first chain whose `securityMatcher()` matches the request. If a greedy fallback chain (such as one matching `/**` with `@Order(1)`) runs before a specialized chain (such as `/api/auth/**` with `@Order(2)`), all requests are intercepted by the greedy chain. The specialized chain is never evaluated, causing login and CSRF endpoints to fail or be treated as generic stateless bearer routes.
+  </Accordion>
+
+  <Accordion title="3. Why does browser CORS configuration require setAllowCredentials(true) with explicit origins?">
+    The W3C CORS specification forbids the use of wildcard origins (`*`) when `allowCredentials` is set to `true`. When credentials (cookies or authorization headers) are sent, browsers mandate that the server explicitly declare the trusted origin (e.g., `https://app.example.com`) in the `Access-Control-Allow-Origin` response header. Attempting to return `*` with credentials causes modern browsers to immediately reject the response.
+  </Accordion>
+
+  <Accordion title="4. How does Spring Security convert JWT claims into Spring Security GrantedAuthority objects?">
+    By default, Spring Security maps JWT scopes into authorities prefixed with `SCOPE_`. In production microservices where JWTs contain custom role arrays (e.g. `{"roles": ["ADMIN", "USER"]}`), we configure a `JwtGrantedAuthoritiesConverter`:
+    `roles.setAuthoritiesClaimName("roles"); roles.setAuthorityPrefix("ROLE_");`.
+    We attach this to a `JwtAuthenticationConverter`, ensuring method security annotations like `@PreAuthorize("hasRole('ADMIN')")` match the incoming claims accurately.
+  </Accordion>
+
+  <Accordion title="5. Why must AuthenticationEntryPoint and AccessDeniedHandler return RFC 9457 Problem Details?">
+    Without custom handlers, Spring Security emits empty response bodies with plain HTTP headers, or HTML error pages from Tomcat. This breaks client-side parsing in SPAs and mobile apps. Implementing `AuthenticationEntryPoint` and `AccessDeniedHandler` with `ProblemDetail` guarantees that 401 and 403 responses adhere to standardized RFC 9457 JSON contracts, supplying structured diagnostic error messages and trace IDs.
+  </Accordion>
+
+  <Accordion title="6. What is the Double Submit Cookie pattern for CSRF defense in SPAs?">
+    In the Double Submit Cookie pattern, the server sets a cryptographically random CSRF token in an accessible cookie. When the frontend JavaScript sends a mutating HTTP request (`POST`, `PUT`, `DELETE`), it reads the cookie and copies the token into a custom request header (e.g., `X-XSRF-TOKEN`). The backend compares the header value against the cookie value; because malicious third-party sites cannot read cross-origin cookies due to the Same-Origin Policy, they cannot forge the matching header.
+  </Accordion>
+
+  <Accordion title="7. Why is @EnableMethodSecurity preferred over legacy @EnableGlobalMethodSecurity?">
+    `@EnableMethodSecurity` was introduced in Spring Security 6 to replace the deprecated `@EnableGlobalMethodSecurity`. It uses modern, lightweight method interceptors, enables SpEL pre/post annotations (`@PreAuthorize`, `@PostAuthorize`, `@PreFilter`, `@PostFilter`) by default, integrates with `AuthorizationManager`, and eliminates the complex AOP hierarchy of legacy Spring Security.
+  </Accordion>
+
+  <Accordion title="8. How do you prevent Broken Object Level Authorization (BOLA) when retrieving user resources?">
+    BOLA occurs when an endpoint verifies that a user is authenticated, but fails to check if they own the requested resource ID. To prevent BOLA:
+    1. Scope database queries by both resource ID and owner ID: `repository.findByIdAndOwnerId(id, currentUserId)`.
+    2. Enforce SpEL method security: `@PreAuthorize("hasRole('ADMIN') or #userId == authentication.principal.id")`.
+    3. Return `404 Not Found` instead of `403 Forbidden` for missing/unowned resources to prevent attackers from enumerating valid resource IDs.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## 7. Done Checklist
 
 <Check>
-`@EnableMethodSecurity` is enabled for fine-grained SpEL permission checks.
-</Check>
-<Check>
-CORS is configured with an explicit whitelist of trusted production origins (no wildcards with credentials).
-</Check>
-<Check>
-AuthenticationEntryPoint and AccessDeniedHandler return RFC 9457 `ProblemDetail` JSON.
-</Check>
-<Check>
-Bearer API chain uses `STATELESS`; cookie-based auth endpoints retain CSRF protection.
-</Check>
-<Check>
-Automated MockMvc tests verify that 401 Unauthorized and 403 Forbidden trigger reliably.
+- [ ] Configure multiple `SecurityFilterChain` beans with explicit `@Order` precedence.
+- [ ] Bind browser authentication and refresh routes to a stateful chain with CSRF protection.
+- [ ] Bind general API routes to a completely stateless chain (`SessionCreationPolicy.STATELESS`).
+- [ ] Disable CSRF exclusively on stateless API routes that never accept cookies or ambient credentials.
+- [ ] Configure CORS with explicit production origins and avoid wildcard `*` with credentials.
+- [ ] Map JWT claims to `ROLE_` authorities using `JwtAuthenticationConverter`.
+- [ ] Standardize 401 Unauthorized responses using a custom `AuthenticationEntryPoint` returning `ProblemDetail`.
+- [ ] Standardize 403 Forbidden responses using a custom `AccessDeniedHandler` returning `ProblemDetail`.
+- [ ] Activate modern method security using `@EnableMethodSecurity`.
+- [ ] Prevent BOLA/IDOR by scoping database queries by owner identity or SpEL `@PreAuthorize`.
+- [ ] Return 404 Not Found instead of 403 Forbidden to prevent resource ID enumeration attacks.
+- [ ] Write MockMvc slice tests verifying that unauthenticated requests receive 401 ProblemDetail.
+- [ ] Write MockMvc slice tests verifying that unauthorized roles receive 403 ProblemDetail.
+- [ ] Verify that preflight HTTP `OPTIONS` requests succeed without requiring authentication.
+- [ ] Test cryptographic JWT validation using real key pairs in `@SpringBootTest` environments.
 </Check>

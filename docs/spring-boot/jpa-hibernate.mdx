@@ -899,16 +899,71 @@ LIMIT 50;
 
 ---
 
+---
+
+## Active Recall & Interview Mastery
+
+<AccordionGroup>
+  <Accordion title="1. Explain the 4 states of the JPA Entity Lifecycle and how transitions occur.">
+    1. **Transient**: An object newly instantiated via `new Order()`. It has no database identity (`id == null`) and is completely unassociated with any Persistence Context.<br/>
+    2. **Managed**: Associated with an active `EntityManager` (via `persist()`, `find()`, or query). Hibernate tracks every mutation; changes are automatically flushed to the database via dirty checking upon transaction commit.<br/>
+    3. **Detached**: The transaction committed and the `EntityManager` closed. The entity retains its database ID, but mutations are no longer tracked. Accessing uninitialized lazy fields throws `LazyInitializationException`.<br/>
+    4. **Removed**: Marked for physical deletion via `entityManager.remove()`. Upon flush, Hibernate generates an SQL `DELETE` statement.
+  </Accordion>
+
+  <Accordion title="2. How does Hibernate dirty checking work under the hood?">
+    When an entity is loaded into the Persistence Context (First-Level Cache), Hibernate stores two objects in JVM heap memory: (1) the actual entity instance returned to your code, and (2) an internal **loaded state array (snapshot)** representing the original column values fetched from the database. When the transaction commits, Hibernate executes a dirty-checking pass, comparing the current entity fields against the loaded snapshot array. If any field differs, it dynamically constructs an SQL `UPDATE` statement containing only the modified columns (if `@DynamicUpdate` is enabled) or all columns.
+  </Accordion>
+
+  <Accordion title="3. What is the N+1 query problem, and what are the 4 production solutions?">
+    The N+1 problem occurs when an application executes 1 initial query to fetch $N$ parent records, and then executes $N$ subsequent individual queries to fetch an associated child record for each parent (e.g., in a loop).
+    The 4 production solutions are:
+    1. **`JOIN FETCH` in JPQL**: `SELECT p FROM Post p JOIN FETCH p.author` issues a single SQL `INNER JOIN` query.<br/>
+    2. **`@EntityGraph`**: Declarative fetch plan applied to Spring Data repository methods.<br/>
+    3. **DTO Projections**: Querying only required scalar columns directly into an immutable Java record.<br/>
+    4. **`hibernate.default_batch_fetch_size: 25`**: Changes subsequent queries from 100 single lookups (`WHERE id = ?`) into 4 batched queries (`WHERE id IN (?, ?, ...)`).
+  </Accordion>
+
+  <Accordion title="4. Why does Lombok @Data cause catastrophic StackOverflowError in JPA entities?">
+    Lombok's `@Data` annotation generates `equals()`, `hashCode()`, and `toString()` methods that include every single declared field. In bidirectional associations (e.g. `Post` has `List<Comment>` and `Comment` has `Post`), calling `post.toString()` invokes `comments.toString()`, which in turn invokes `comment.getPost().toString()`. This creates an infinite circular recursion that rapidly exhausts the thread's physical stack memory, crashing the JVM process with an unrecoverable `StackOverflowError`.
+  </Accordion>
+
+  <Accordion title="5. Why does implementing equals() and hashCode() using database generated IDs break Set collections?">
+    When an entity is instantiated with `new Order()`, its database `id` is `null`. If it is added to a `HashSet<Order>`, Java computes its hash code using `id == null` and places it into a specific hash bucket. When `repository.save(order)` executes, PostgreSQL assigns a primary key (e.g., `id = 42`). The entity's hash code physically changes! When you later call `orderSet.contains(order)` or `orderSet.remove(order)`, Java searches the hash bucket corresponding to `id = 42`, fails to find the entity, and reports that the object does not exist in the set!
+  </Accordion>
+
+  <Accordion title="6. What is the difference between Optimistic Locking (@Version) and Pessimistic Locking?">
+    - **Optimistic Locking (`@Version`)**: Assumes conflicts are rare. Adds an integer or timestamp version column. When updating, Hibernate executes `UPDATE ... WHERE id = ? AND version = ?`. If another transaction updated the row first, the version check fails (0 rows updated), and Hibernate throws `OptimisticLockException`. Zero physical database locks are held.<br/>
+    - **Pessimistic Locking (`PESSIMISTIC_WRITE`)**: Assumes conflicts are frequent. Executes `SELECT ... FOR UPDATE`, acquiring an exclusive row lock at the PostgreSQL kernel level. Concurrent transactions attempting to modify the row are blocked until the lock-holding transaction commits or rolls back.
+  </Accordion>
+
+  <Accordion title="7. What causes MultipleBagFetchException, and how do you resolve it?">
+    A "bag" in Hibernate is an unordered `List` collection. Hibernate cannot execute a single SQL query containing two simultaneous `JOIN FETCH` clauses on independent child collections (e.g., `JOIN FETCH p.comments JOIN FETCH p.tags`) because doing so would produce a Cartesian product ($N \times M$ rows), multiplying data and creating ambiguous collection deduplication. To resolve this, fetch one collection via `JOIN FETCH` and configure `default_batch_fetch_size` for the second collection, or use `Set` collections.
+  </Accordion>
+
+  <Accordion title="8. How does Hibernate 6 improve performance over Hibernate 5?">
+    Hibernate 6 completely rewrote the query translation engine using **Semantic Query Model (SQM)**. In Hibernate 5, JPQL was translated into SQL via an intermediate Antlr 2 AST that generated suboptimal, deeply nested subqueries. Hibernate 6 directly translates JPQL into native dialect SQL with superior parameter binding, optimized array joins, window function support, and significantly reduced memory allocation overhead during query compilation.
+  </Accordion>
+</AccordionGroup>
+
+---
+
 ## Done Checklist
 
 <Check>
-- [ ] Understand the physical Object-Relational Impedance Mismatch between JVM heap memory pointers and 8KB relational disk pages.
+- [ ] Understand the physical Object-Relational Impedance Mismatch between JVM heap pointers and 8KB relational disk pages.
 - [ ] Explain the 4 JPA entity lifecycle states: Transient, Managed, Detached, and Removed.
-- [ ] Articulate the First-Level Cache deduplication mechanism and dirty checking snapshot comparisons.
+- [ ] Articulate the First-Level Cache deduplication mechanism and dirty-checking snapshot comparisons.
 - [ ] Understand why dynamic ByteBuddy proxies throw `LazyInitializationException` when sessions close.
 - [ ] Diagnose N+1 query problems using SQL logging and apply 4 distinct production solutions.
 - [ ] Avoid `MultipleBagFetchException` and Cartesian explosions when querying multiple collections.
 - [ ] Eliminate Lombok `@Data` from JPA entities and implement safe `equals`/`hashCode` using natural business keys.
 - [ ] Configure `spring.jpa.properties.hibernate.default_batch_fetch_size: 25` as an application-wide N+1 safety net.
 - [ ] Utilize read-only DTO constructor projections for high-throughput query endpoints.
+- [ ] Implement Optimistic Locking using `@Version` to defend against concurrent lost updates.
+- [ ] Implement Pessimistic Locking (`@Lock(LockModeType.PESSIMISTIC_WRITE)`) for critical financial reservations.
+- [ ] Never rely on `FetchType.EAGER` for `@ManyToOne` or `@OneToOne` associations; always enforce `FetchType.LAZY`.
+- [ ] Maintain bidirectional relationship consistency using defensive helper methods (`addComment()`).
+- [ ] Enforce keyset or cursor pagination to eliminate memory exhaustion on large table queries.
+- [ ] Write integration tests verifying that queries do not execute N+1 statements using query-counting assertions.
 </Check>

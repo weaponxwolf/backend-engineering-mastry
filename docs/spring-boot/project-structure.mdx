@@ -1,32 +1,77 @@
 ---
 title: "Enterprise Project Architecture: From Layers to Hexagonal & Modulith"
-description: "Master Spring Boot backend architecture: Package-by-feature encapsulation, Hexagonal Ports & Adapters, Spring Modulith, ArchUnit rules, and eliminating circular dependencies."
+sidebarTitle: "Project Structure & Modulith"
+description: "Master Spring Boot enterprise backend architecture: Package-by-feature encapsulation, Hexagonal Ports & Adapters, Spring Modulith bounded contexts, ArchUnit automated governance, and eliminating circular dependencies."
 ---
 
-# Enterprise Project Architecture: From Layers to Hexagonal & Modulith
+## Prerequisites: Before You Begin
 
-When starting a new Spring Boot application, most developers arrange code into technical packages: `controller`, `service`, `repository`, and `entity`.
-
-While simple for trivial CRUD applications with 3 tables, this **Package-by-Layer** pattern breaks down catastrophically in production backends:
-1. **Zero Encapsulation**: Because `OrderController` in package `com.app.controller` must call `OrderService` in package `com.app.service`, every single class and method must be declared `public`. Any class in the codebase can call anything else, creating an unmaintainable "Big Ball of Mud".
-2. **Circular Dependencies**: Services inevitably inject each other (`OrderService` calls `PaymentService`, which calls `OrderService`), crashing application startup with `BeanCurrentlyInCreationException`.
-3. **Database Leaking to the Edge**: JPA `@Entity` classes leak into HTTP controllers, exposing database schema details and triggering lazy-loading exceptions.
-
-This guide provides an exhaustive, production-grade manual for organizing enterprise Spring Boot 3 backends: Package-by-Feature, Hexagonal Architecture (Ports and Adapters), Spring Modulith bounded contexts, and automated architectural tests with ArchUnit.
+Before studying enterprise architecture and package design, ensure you understand:
+- **Java Access Modifiers**: The physical distinction between `public`, `protected`, `default` (package-private), and `private`.
+- **Dependency Inversion Principle (DIP)**: High-level business policies should not depend on low-level infrastructure details; both should depend on abstractions.
+- **Spring IoC & Classpath Scanning**: How `@ComponentScan` discovers beans by scanning base packages and their subpackages.
 
 ---
 
-## Architecture Evolution: Layers vs Feature vs Hexagonal
+# Phase 1: Ground Floor (Physical First Principles)
+
+## 1. The Package-by-Layer Anti-Pattern (The "Big Ball of Mud")
+
+When starting a new Spring Boot application, most beginners arrange code into technical folders: `controller`, `service`, `repository`, and `entity`.
+
+```bash
+com.example.store
+├── controller/
+│   ├── OrderController.java
+│   └── PaymentController.java
+├── service/
+│   ├── OrderService.java
+│   └── PaymentService.java
+├── repository/
+│   ├── OrderRepository.java
+│   └── PaymentRepository.java
+└── entity/
+    ├── Order.java
+    └── Payment.java
+```
+
+While simple for trivial 3-table CRUD prototypes, this **Package-by-Layer** pattern breaks down catastrophically in enterprise production backends:
 
 ```mermaid
 graph TD
-    subgraph PackageByLayer ["1. Package-by-Layer (Technical Coupling)"]
+    subgraph PackageByLayer ["The Package-by-Layer Trap (Zero Encapsulation)"]
+        Ctrl["com.example.store.controller (public classes)"]
+        Svc["com.example.store.service (public classes)"]
+        Repo["com.example.store.repository (public classes)"]
+        Ent["com.example.store.entity (public classes)"]
+
+        Ctrl -->|Must be public| Svc
+        Svc -->|Must be public| Repo
+        Repo -->|Must be public| Ent
+        Ctrl -.->|Accidental direct access!| Repo
+        Ctrl -.->|Entity leaks directly to web!| Ent
+    end
+```
+
+### The 3 Structural Disasters of Package-by-Layer
+
+1. **Zero Encapsulation**: In Java, packages define the physical boundary for `default` (package-private) visibility. Because `OrderController` in `com.example.store.controller` must call `OrderService` in `com.example.store.service`, **every single class, interface, and method must be declared `public`**! Once classes are public, any developer can call anything from anywhere, creating an unmaintainable "Big Ball of Mud".
+2. **Entity Leaks to the Edge**: Controllers accept or return database JPA `@Entity` objects directly over HTTP. This exposes sensitive database columns (password hashes, internal IDs), breaks API contracts whenever database columns change, and triggers `LazyInitializationException` outside database transactions.
+3. **Spaghetti Dependencies**: Nothing stops a developer in `PaymentService` from injecting `OrderRepository` directly, bypassing all order validation logic.
+
+---
+
+## 2. Architecture Evolution: Layers vs Feature vs Hexagonal
+
+```mermaid
+graph TD
+    subgraph Layered ["1. Package-by-Layer (Technical Coupling)"]
         L1[controller/*.java] --> L2[service/*.java]
         L2 --> L3[repository/*.java]
         L3 --> L4[entity/*.java]
     end
 
-    subgraph PackageByFeature ["2. Package-by-Feature (Bounded Cohesion)"]
+    subgraph Feature ["2. Package-by-Feature (Bounded Cohesion)"]
         F1[auth/*]
         F2[order/*]
         F3[payment/*]
@@ -34,7 +79,7 @@ graph TD
     end
 
     subgraph Hexagonal ["3. Hexagonal / Clean (Ports & Adapters)"]
-        Core["Domain Core (Entities, Value Objects, Business Invariants)"]
+        Core["Domain Core (Pure Java: Entities, Value Objects)"]
         Ports["Application Ports (Use Cases & SPI Interfaces)"]
         Inbound["Inbound Adapters (REST Controllers, Kafka Consumers)"]
         Outbound["Outbound Adapters (PostgreSQL Repositories, Stripe Client)"]
@@ -55,15 +100,15 @@ graph TD
 
 ---
 
-## Package-by-Feature & Java Encapsulation
+# Phase 2: Package-by-Feature & Java Encapsulation
 
-By packaging by feature, we can leverage Java's **Package-Private (default)** access modifier. Only the classes meant to be called from the outside are marked `public`. All internal service helpers, entities, and repositories remain package-private:
+By packaging by business capability (feature), we leverage Java's **Package-Private (default)** access modifier. Only the classes meant to be called from the outside are marked `public`. All internal service helpers, entities, and repositories remain package-private:
 
 ```bash
 com.example.store
 ├── order/
 │   ├── OrderController.java         (public - exposed HTTP endpoint)
-│   ├── OrderService.java            (public interface or package-private class)
+│   ├── OrderService.java            (public interface or class - module boundary)
 │   ├── OrderServiceImpl.java       (package-private - hidden implementation)
 │   ├── OrderRepository.java         (package-private - hidden from other packages!)
 │   ├── Order.java                   (package-private - JPA entity hidden from web!)
@@ -82,200 +127,174 @@ com.example.store
 
 <Tip>
 **The Encapsulation Advantage**:
-In the structure above, `com.example.store.payment` **cannot** inject or query `OrderRepository` directly because `OrderRepository` is package-private. The only way the payment module can interact with orders is through the public `OrderService` contract!
+In the structure above, `com.example.store.payment` **cannot** inject or query `OrderRepository` directly because `OrderRepository` is package-private. The Java compiler physically rejects the import! The only way the payment module can interact with orders is through the public `OrderService` contract.
 </Tip>
-
-### Package Structure Line-By-Line
-
-- `order/` groups one business capability instead of scattering its controller, service, repository, and entity across global technical folders.
-- `OrderController.java (public)` is public because Spring MVC and external packages need to call it through HTTP routing.
-- `OrderService.java (public interface or package-private class)` is the application boundary. Other modules should depend on a narrow behavior contract, not internals.
-- `OrderServiceImpl.java (package-private)` hides implementation details so other packages cannot bypass rules.
-- `OrderRepository.java (package-private)` prevents other features from querying order tables directly.
-- `Order.java (package-private)` keeps JPA persistence shape away from controllers and other modules.
-- `CreateOrderRequest.java (public record)` is public because it is part of the HTTP API contract.
-- `OrderResponse.java (public record)` is public because controllers serialize it to clients.
-
-Proof task:
-
-```console
-Make OrderRepository package-private.
-Try injecting it from payment/.
-Compilation should fail.
-Then expose the exact needed behavior through OrderService.
-```
-
-That compile error is not friction. It is architecture enforcement.
 
 ---
 
-## Hexagonal Architecture (Ports and Adapters) in Spring Boot
+# Phase 3: Hexagonal Architecture (Ports & Adapters)
 
-In Hexagonal Architecture (invented by Alistair Cockburn), the **Domain Core** is the center of the universe. It contains pure Java business logic and has **zero dependencies** on Spring, Hibernate, HTTP, or external cloud SDKs.
+In core enterprise systems (banking, insurance, logistics), frameworks like Spring Boot and libraries like Hibernate change over time, but core business rules remain constant.
+
+**Hexagonal Architecture** places the business domain at the center. The domain contains **zero Spring annotations**, **zero JPA imports**, and **zero external dependencies**.
 
 ```mermaid
 flowchart TD
-    subgraph DrivingAdapters ["Driving / Inbound Adapters (Left Side)"]
-        REST["OrderRestController<br/>(Spring MVC)"]
-        CLI["OrderSeedCommand<br/>(CommandLineRunner)"]
-        Consumer["OrderKafkaConsumer<br/>(Spring Kafka)"]
+    subgraph DrivingAdapters ["Inbound Driving Adapters (Outside)"]
+        REST["OrderRestController (@RestController)"]
+        KafkaCons["OrderKafkaConsumer (@KafkaListener)"]
     end
 
-    subgraph ApplicationCore ["Hexagon: Application Core (Pure Java)"]
+    subgraph Hexagon ["Inside the Hexagon (The Core)"]
         subgraph InboundPorts ["Inbound Ports (Use Cases)"]
-            UC1["CreateOrderUseCase (Interface)"]
-            UC2["CancelOrderUseCase (Interface)"]
+            PlaceOrderUC["interface PlaceOrderUseCase"]
         end
-        subgraph DomainModel ["Domain Model"]
-            Entity["Order Entity<br/>(Rich Domain Logic)"]
-            VO["Money Value Object"]
-            Rule["Domain Rules & Exceptions"]
+
+        subgraph DomainCore ["Domain Core (Pure Java)"]
+            OrderEntity["Order (Entity, Business Invariants)"]
+            MoneyVO["Money (Value Object)"]
         end
-        subgraph OutboundPorts ["Outbound Ports (SPIs)"]
-            RepoPort["OrderRepositoryPort (Interface)"]
-            PaymentPort["PaymentGatewayPort (Interface)"]
-            EventPort["OrderEventPublisherPort (Interface)"]
+
+        subgraph OutboundPorts ["Outbound Ports (SPI)"]
+            OrderRepoPort["interface OrderRepositoryPort"]
+            PaymentPort["interface PaymentGatewayPort"]
         end
     end
 
-    subgraph DrivenAdapters ["Driven / Outbound Adapters (Right Side)"]
-        PostgresAdapter["PostgresOrderRepositoryAdapter<br/>(Spring Data JPA)"]
-        StripeAdapter["StripePaymentGatewayAdapter<br/>(Spring RestClient)"]
-        KafkaAdapter["KafkaOrderEventPublisherAdapter<br/>(KafkaTemplate)"]
+    subgraph DrivenAdapters ["Outbound Driven Adapters (Infrastructure)"]
+        PostgresRepo["PostgresOrderRepositoryAdapter (Spring Data JPA)"]
+        StripeAdapter["StripePaymentGatewayAdapter (Stripe SDK)"]
     end
 
-    REST --> UC1
-    Consumer --> UC2
-    UC1 --> Entity
-    UC2 --> Entity
-    Entity --> OutboundPorts
-    PostgresAdapter -.->|Implements| RepoPort
+    REST --> PlaceOrderUC
+    KafkaCons --> PlaceOrderUC
+    PlaceOrderUC --> DomainCore
+    DomainCore --> OutboundPorts
+    PostgresRepo -.->|Implements| OrderRepoPort
     StripeAdapter -.->|Implements| PaymentPort
-    KafkaAdapter -.->|Implements| EventPort
 ```
 
-### 1. Inbound Port (Use Case Contract)
+---
+
+## 1. The Pure Domain Core (Zero Framework Dependencies)
+
+Notice: No `@Entity`, no `@Table`, no `@Id`, no `@Autowired`. Plain, pure Java:
+
 ```java
-package com.example.order.domain.port.in;
-
-import com.example.order.domain.model.OrderId;
-import java.math.BigDecimal;
-
-public interface CreateOrderUseCase {
-    OrderId createOrder(CreateOrderCommand command);
-
-    record CreateOrderCommand(
-        String customerId,
-        String productId,
-        int quantity,
-        BigDecimal unitPrice
-    ) {}
-}
-```
-
-Line by line:
-
-- `CreateOrderUseCase` names an inbound business capability, not a transport mechanism.
-- `OrderId createOrder(...)` returns a domain identifier instead of an HTTP response.
-- `CreateOrderCommand` carries the data needed by the use case.
-- `String customerId`, `String productId`, and `int quantity` are still simplified here; a stronger domain model would use typed IDs and value objects.
-- No Spring annotation appears in this interface. That keeps the application core testable without a web server.
-
-### 2. Outbound Port (Driven SPI Interface)
-```java
-package com.example.order.domain.port.out;
-
-import com.example.order.domain.model.Order;
-import com.example.order.domain.model.OrderId;
-import java.util.Optional;
-
-public interface OrderRepositoryPort {
-    Order save(Order order);
-    Optional<Order> findById(OrderId orderId);
-}
-```
-
-### 3. Pure Domain Entity (Zero Framework Dependencies)
-```java
-package com.example.order.domain.model;
+package com.example.domain.model;
 
 import java.math.BigDecimal;
-import java.time.Instant;
+import java.util.Objects;
+import java.util.UUID;
 
+// Pure Java Domain Entity enforcing strict business invariants
 public class Order {
-    private final OrderId id;
-    private final String customerId;
+
+    private final UUID id;
+    private final UUID customerId;
+    private BigDecimal totalAmount;
     private OrderStatus status;
-    private final BigDecimal totalAmount;
-    private final Instant createdAt;
 
-    // Business constructor enforcing domain invariants
-    public Order(OrderId id, String customerId, BigDecimal totalAmount) {
+    public Order(UUID id, UUID customerId, BigDecimal totalAmount) {
         if (totalAmount.compareTo(BigDecimal.ZERO) <= 0) {
-            throw new IllegalArgumentException("Order total amount must be strictly positive");
+            throw new IllegalArgumentException("Order total amount must be strictly positive!");
         }
-        this.id = id;
-        this.customerId = customerId;
+        this.id = Objects.requireNonNull(id);
+        this.customerId = Objects.requireNonNull(customerId);
         this.totalAmount = totalAmount;
-        this.status = OrderStatus.CREATED;
-        this.createdAt = Instant.now();
+        this.status = OrderStatus.PENDING;
     }
 
-    public void cancel() {
-        if (this.status == OrderStatus.SHIPPED || this.status == OrderStatus.DELIVERED) {
-            throw new IllegalStateException("Cannot cancel an order that has already been shipped");
+    public void markPaid() {
+        if (this.status != OrderStatus.PENDING) {
+            throw new IllegalStateException("Cannot pay an order in status: " + this.status);
         }
-        this.status = OrderStatus.CANCELLED;
+        this.status = OrderStatus.PAID;
     }
 
-    // Getters...
+    public UUID getId() { return id; }
+    public UUID getCustomerId() { return customerId; }
+    public BigDecimal getTotalAmount() { return totalAmount; }
+    public OrderStatus getStatus() { return status; }
 }
 ```
 
-### 4. Outbound Adapter (Spring Data JPA Implementation)
-```java
-package com.example.order.adapter.out.persistence;
+---
 
-import com.example.order.domain.model.Order;
-import com.example.order.domain.model.OrderId;
-import com.example.order.domain.port.out.OrderRepositoryPort;
+## 2. Inbound & Outbound Ports (Contracts)
+
+```java
+package com.example.domain.port.inbound;
+
+import com.example.domain.model.Order;
+import java.math.BigDecimal;
+import java.util.UUID;
+
+// Inbound Port: What the outside world can request of the domain
+public interface PlaceOrderUseCase {
+    Order placeOrder(UUID customerId, BigDecimal amount);
+}
+```
+
+```java
+package com.example.domain.port.outbound;
+
+import com.example.domain.model.Order;
+import java.util.Optional;
+import java.util.UUID;
+
+// Outbound Port (SPI): What the domain requires from infrastructure
+public interface OrderRepositoryPort {
+    void save(Order order);
+    Optional<Order> findById(UUID id);
+}
+```
+
+---
+
+## 3. The Outbound Adapter (Spring Data JPA)
+
+The database adapter implements the domain's outbound port. It maps between the pure domain entity and the database JPA entity:
+
+```java
+package com.example.infrastructure.adapter.persistence;
+
+import com.example.domain.model.Order;
+import com.example.domain.port.outbound.OrderRepositoryPort;
 import org.springframework.stereotype.Component;
 
 import java.util.Optional;
+import java.util.UUID;
 
 @Component
 public class PostgresOrderRepositoryAdapter implements OrderRepositoryPort {
 
     private final SpringDataOrderJpaRepository jpaRepository;
-    private final OrderPersistenceMapper mapper;
 
-    public PostgresOrderRepositoryAdapter(SpringDataOrderJpaRepository jpaRepo, OrderPersistenceMapper mapper) {
-        this.jpaRepository = jpaRepo;
-        this.mapper = mapper;
+    public PostgresOrderRepositoryAdapter(SpringDataOrderJpaRepository jpaRepository) {
+        this.jpaRepository = jpaRepository;
     }
 
     @Override
-    public Order save(Order domainOrder) {
-        OrderJpaEntity jpaEntity = mapper.toJpaEntity(domainOrder);
-        OrderJpaEntity saved = jpaRepository.save(jpaEntity);
-        return mapper.toDomain(saved);
+    public void save(Order order) {
+        OrderJpaEntity entity = OrderJpaEntity.fromDomain(order);
+        jpaRepository.save(entity);
     }
 
     @Override
-    public Optional<Order> findById(OrderId orderId) {
-        return jpaRepository.findById(orderId.value()).map(mapper::toDomain);
+    public Optional<Order> findById(UUID id) {
+        return jpaRepository.findById(id).map(OrderJpaEntity::toDomain);
     }
 }
 ```
 
 ---
 
-## Spring Modulith: The Modern Modular Monolith
+# Phase 4: Spring Modulith (Modular Monolith Architecture)
 
-Before breaking an application into microservices, modern backend architecture leverages **Spring Modulith**. It provides first-class verification to ensure logical domain modules in a monolith cannot violate package boundaries.
+For organizations that want the modular isolation of microservices without the operational overhead of running 50 Kubernetes deployments, **Spring Modulith** enforces architectural boundaries within a single Spring Boot application:
 
 ```xml
-<!-- pom.xml -->
 <dependency>
     <groupId>org.springframework.modulith</groupId>
     <artifactId>spring-modulith-starter-core</artifactId>
@@ -289,29 +308,49 @@ Before breaking an application into microservices, modern backend architecture l
 </dependency>
 ```
 
-### Automated Architectural Verification Test
-Write a unit test that verifies structural boundaries across all modules during `mvn test`:
+### Module Discovery Rules in Spring Modulith
+
+```bash
+com.example.store
+├── BackendApplication.java       (Main Spring Boot Application)
+├── order/                        (MODULE 1: Named "order")
+│   ├── OrderService.java         (PUBLIC: API exposed to other modules)
+│   ├── internal/                 (INTERNAL: Hidden from all other modules!)
+│   │   ├── OrderRepository.java
+│   │   └── OrderEntity.java
+├── payment/                      (MODULE 2: Named "payment")
+│   ├── PaymentService.java
+│   └── internal/
+│       └── StripeClient.java
+```
+
+- Each top-level subpackage directly beneath the `@SpringBootApplication` root package is treated as an independent **Application Module**.
+- Classes in `order/` (the root of the module) are public API contracts.
+- Any subpackages like `order/internal/` are strictly private to that module.
+
+### Automated Architecture Verification with Spring Modulith
 
 ```java
-package com.example.demo;
+package com.example.store;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.modulith.core.ApplicationModules;
 import org.springframework.modulith.docs.Documenter;
 
-class ArchitectureTests {
+class ModulithArchitectureTest {
 
     ApplicationModules modules = ApplicationModules.of(BackendApplication.class);
 
     @Test
-    void verifyModularity() {
-        // Fails the build if any module accesses internal classes of another module!
+    void verifyArchitecture() {
+        // Automatically FAILS build if Module A accesses internal package of Module B!
+        // Automatically FAILS build if circular module dependencies exist!
         modules.verify();
     }
 
     @Test
     void generateDocumentation() {
-        // Automatically creates PlantUML and C4 architecture diagrams in target/modulith-docs!
+        // Automatically generates PlantUML and C4 architecture diagrams in target/modulith-docs!
         new Documenter(modules).writeDocumentation();
     }
 }
@@ -319,64 +358,9 @@ class ArchitectureTests {
 
 ---
 
-## Eliminating Circular Dependencies
+# Phase 5: Automated Architectural Governance with ArchUnit
 
-### The Disaster: `BeanCurrentlyInCreationException`
-A circular dependency occurs when Bean A requires Bean B to initialize, while Bean B requires Bean A:
-
-```mermaid
-graph LR
-    A[OrderService] -->|Injects| B[PaymentService]
-    B -->|Injects| A
-```
-
-```console
-Caused by: org.springframework.beans.factory.BeanCurrentlyInCreationException: 
-Error creating bean with name 'orderService': Requested bean is currently in creation: 
-Is there an unresolvable circular reference?
-```
-
-<Warning>
-**The Toxic Band-Aid: `@Lazy`**:
-Annotating `@Lazy` on constructor parameters suppresses Spring's startup check by injecting an empty CGLIB proxy. It hides architectural rot, creates subtle race conditions, and postpones initialization failures to runtime.
-</Warning>
-
-### The 2 Clean Solutions to Circular Dependencies
-
-#### 1. Extract Shared Responsibilities to a Third Collaborator
-If `OrderService` needs `PaymentService` to calculate tax, and `PaymentService` needs `OrderService` to get order totals, extract tax calculation to an independent, stateless `TaxCalculatorService`:
-
-```mermaid
-graph TD
-    OrderService --> TaxCalculatorService
-    PaymentService --> TaxCalculatorService
-```
-
-#### 2. Decouple via Spring Application Events
-Instead of `PaymentService` calling `OrderService.markPaid()`, publish a domain event:
-
-```java
-// In PaymentService:
-@Transactional
-public void processPayment(PaymentRequest req) {
-    // 1. Charge card...
-    // 2. Decoupled asynchronous event publication:
-    eventPublisher.publishEvent(new PaymentCompletedEvent(orderId, paymentId, Instant.now()));
-}
-
-// In OrderService:
-@TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
-public void onPaymentCompleted(PaymentCompletedEvent event) {
-    Order order = orderRepository.findById(event.orderId()).orElseThrow();
-    order.markPaid();
-}
-```
-
----
-
-## Automated Architecture Enforcement with ArchUnit
-
-**ArchUnit** is a Java test library that inspects compiled bytecode to enforce architectural governance rules in CI/CD:
+**ArchUnit** enables engineering teams to write unit tests in Java that inspect compiled JVM bytecode to enforce architectural governance rules in CI:
 
 ```xml
 <dependency>
@@ -387,59 +371,86 @@ public void onPaymentCompleted(PaymentCompletedEvent event) {
 </dependency>
 ```
 
-### Production ArchUnit Test Suite
+### Comprehensive Production ArchUnit Test Suite
 
 ```java
-package com.example.demo;
+package com.example.store;
 
 import com.tngtech.archunit.core.importer.ImportOption;
 import com.tngtech.archunit.junit.AnalyzeClasses;
 import com.tngtech.archunit.junit.ArchTest;
 import com.tngtech.archunit.lang.ArchRule;
 import org.springframework.stereotype.Controller;
+import org.springframework.stereotype.Repository;
 import org.springframework.stereotype.Service;
 import org.springframework.web.bind.annotation.RestController;
 
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.classes;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
+import static com.tngtech.archunit.library.Architectures.layeredArchitecture;
+import static com.tngtech.archunit.library.dependencies.SlicesRuleDefinition.slices;
 
 @AnalyzeClasses(packages = "com.example.store", importOptions = ImportOption.DoNotIncludeTests.class)
-public class ArchitectureRulesTest {
+public class ArchitectureGovernanceTest {
 
+    // Rule 1: Layered Isolation
     @ArchTest
     static final ArchRule controllers_must_not_access_repositories =
         noClasses().that().areAnnotatedWith(RestController.class)
             .or().areAnnotatedWith(Controller.class)
-            .should().dependOnClassesThat().resideInAPackage("..repository..")
-            .because("Controllers must delegate all data access through the Service layer");
+            .should().dependOnClassesThat().areAnnotatedWith(Repository.class)
+            .because("Controllers must delegate all persistence operations through the Service layer");
 
+    // Rule 2: Inbound Directionality
     @ArchTest
     static final ArchRule services_must_not_access_controllers =
         noClasses().that().areAnnotatedWith(Service.class)
             .should().dependOnClassesThat().areAnnotatedWith(RestController.class)
-            .because("Lower business layers must never have dependencies on HTTP transport layers");
+            .because("Lower business layers must never depend on HTTP web controllers");
 
+    // Rule 3: Circular Package Dependency Ban
     @ArchTest
-    static final ArchRule layered_architecture_must_be_respected =
+    static final ArchRule packages_must_be_free_of_cycles =
+        slices().matching("com.example.store.(*)..")
+            .should().beFreeOfCycles()
+            .because("Circular package dependencies create spaghetti coupling and prevent modularity");
+
+    // Rule 4: Standard Naming Conventions
+    @ArchTest
+    static final ArchRule service_naming_convention =
         classes().that().resideInAPackage("..service..")
-            .should().onlyBeAccessed().byAnyPackage("..controller..", "..service..", "..config..");
+            .and().areAnnotatedWith(Service.class)
+            .should().haveSimpleNameEndingWith("Service")
+            .because("Service beans must follow standard naming conventions for searchability");
 }
 ```
+
+---
+
+# Phase 6: Senior Interview Ace & Verification
+
+## The Senior Engineer vs Junior Engineer Mindset
+
+| Scenario | Junior Engineer Answer | Staff / Senior Engineer Answer |
+| :--- | :--- | :--- |
+| **How do you organize packages in a new Spring Boot project?** | "I create controller, service, repository, and model packages because that's standard Spring layering." | "Package-by-layer violates encapsulation because all classes and repositories must be declared `public`. For microservices, I use Package-by-Feature to leverage Java's package-private modifier, hiding internal entities and repositories from external features. For complex domains, I use Hexagonal Architecture or Spring Modulith to decouple core business logic from frameworks." |
+| **What is Hexagonal Architecture and why would you use it?** | "It's an architecture with ports and adapters that makes code cleaner." | "Hexagonal Architecture enforces the Dependency Inversion Principle around business logic. The domain core contains pure Java models and port interfaces with zero framework dependencies. Inbound adapters (REST/Kafka) drive the domain via Inbound Ports; infrastructure (PostgreSQL/Stripe) implements Outbound Ports. This isolates core business invariants from framework upgrades, ORM changes, and external SDK deprecations." |
+| **How do you prevent circular dependencies between Spring beans?** | "You just add `@Lazy` to one of the constructor parameters." | "`@Lazy` is an architectural anti-pattern that masks circular coupling with a synthetic proxy. Circular dependencies indicate a violation of the Single Responsibility Principle. I eliminate them by either (1) extracting the shared concern into a third collaborator, or (2) decoupling the communication asynchronously using Spring Domain Events (`ApplicationEventPublisher`)." |
 
 ---
 
 ## Active Recall & Interview Mastery
 
 <AccordionGroup>
-  <Accordion title="1. Why does Package-by-Layer violate Java encapsulation in medium-to-large backends?">
+  <Accordion title="1. Why does Package-by-Layer violate Java encapsulation in enterprise backends?">
     In Package-by-Layer, classes are grouped by technical concerns (`com.app.controller`, `com.app.service`, `com.app.repository`). Because Java packages form the encapsulation boundary for package-private (default) access, classes in `controller` cannot invoke classes in `service` unless those service classes, methods, and repositories are explicitly declared `public`. Consequently, every bean in the entire application becomes globally accessible, allowing any developer to bypass domain boundaries and inject arbitrary repositories anywhere.
   </Accordion>
 
   <Accordion title="2. What is the fundamental difference between Inbound and Outbound Ports in Hexagonal Architecture?">
-    An **Inbound Port** (Driving Port) defines the use case interface that the core domain exposes to external drivers (e.g., `CreateOrderUseCase` invoked by a REST controller or Kafka consumer). An **Outbound Port** (Driven Port / SPI) defines an interface that the domain *requires* from infrastructure to do its job (e.g., `OrderRepositoryPort` or `PaymentGatewayPort`). The domain owns both port interfaces; outbound adapters in infrastructure implement the outbound ports via the Dependency Inversion Principle.
+    An **Inbound Port** (Driving Port) defines the use case interface that the core domain exposes to external drivers (e.g., `PlaceOrderUseCase` invoked by a REST controller or Kafka consumer). An **Outbound Port** (Driven Port / SPI) defines an interface that the domain *requires* from infrastructure to do its job (e.g., `OrderRepositoryPort` or `PaymentGatewayPort`). The domain owns both port interfaces; outbound adapters in infrastructure implement the outbound ports via the Dependency Inversion Principle.
   </Accordion>
 
-  <Accordion title="3. Why is using @Lazy to fix circular dependencies considered an anti-pattern?">
+  <Accordion title="3. Why is using @Lazy to fix circular dependencies considered a toxic anti-pattern?">
     `@Lazy` does not resolve the underlying architectural flaw: it simply instructs Spring to inject a synthetic dynamic proxy instead of initializing the bean immediately. The circular reference and tight coupling between the two components remain intact. This masks architectural rot, introduces subtle race conditions in multithreaded environments, and can cause unexpected runtime exceptions during late lazy proxy initialization.
   </Accordion>
 
@@ -450,4 +461,38 @@ public class ArchitectureRulesTest {
   <Accordion title="5. How does ArchUnit help maintain team discipline in enterprise codebases?">
     ArchUnit allows engineering teams to write unit tests that enforce architectural rules as code. Rules such as *"Controllers must never talk to Repositories"* or *"Domain entities must not import Spring packages"* execute in seconds during `mvn test`. If an engineer violates these rules, the build immediately fails in CI with a detailed line-by-line violation report, preventing architectural decay before pull requests can be merged.
   </Accordion>
+
+  <Accordion title="6. What are the trade-offs between Hexagonal Architecture and Package-by-Feature?">
+    Package-by-Feature is simpler, requires less boilerplate, and allows Spring/JPA annotations directly on entities, making it fast and pragmatic for standard CRUD microservices. Hexagonal Architecture introduces strict mapping layers (Domain Entity $\leftrightarrow$ JPA Entity $\leftrightarrow$ Web DTO) and port interfaces. While it requires more code, it provides complete isolation of domain logic from framework changes, database migrations, and transport protocols, making it essential for complex, mission-critical business domains.
+  </Accordion>
+
+  <Accordion title="7. How does Spring Modulith support isolated integration testing with @ApplicationModuleTest?">
+    `@ApplicationModuleTest` allows developers to test an individual business module (e.g., the `order` module) without booting the entire application's bean graph. It automatically mocks or stubs out external module dependencies while initializing all internal components of the target module, enabling fast, isolated integration testing that runs in milliseconds rather than minutes.
+  </Accordion>
+
+  <Accordion title="8. How do you break a circular dependency between OrderService and PaymentService using Domain Events?">
+    Instead of `PaymentService` directly injecting `OrderService` to call `orderService.markPaid()`, `PaymentService` publishes a lightweight domain event: `eventPublisher.publishEvent(new PaymentCompletedEvent(orderId))`. `OrderService` listens to the event using `@TransactionalEventListener(phase = AFTER_COMMIT)`. Both services now have zero direct dependencies on each other, breaking the circular reference while maintaining transaction safety.
+  </Accordion>
 </AccordionGroup>
+
+---
+
+## Done Checklist
+
+<Check>
+- [ ] Identify the 3 structural flaws of Package-by-Layer (public visibility bloat, entity leaks, spaghetti dependencies).
+- [ ] Organize enterprise code by business capabilities using Package-by-Feature.
+- [ ] Leverage Java's `default` (package-private) access modifier to hide repositories and entities.
+- [ ] Explain the core principles of Hexagonal Architecture (Ports and Adapters).
+- [ ] Author pure Java domain models completely free of Spring, Hibernate, or Jakarta annotations.
+- [ ] Define Inbound Ports (Use Cases) and Outbound Ports (Driven SPIs).
+- [ ] Implement Outbound Adapters that map between domain models and database JPA entities.
+- [ ] Structure Spring Modulith modules beneath the `@SpringBootApplication` root package.
+- [ ] Enforce module encapsulation using `ApplicationModules.of(App.class).verify()`.
+- [ ] Automatically generate living architecture documentation (PlantUML, C4) via Modulith.
+- [ ] Explain why `@Lazy` circular dependency workarounds are architectural code smells.
+- [ ] Decouple bidirectional bean dependencies cleanly using Spring Domain Events.
+- [ ] Write ArchUnit tests preventing controllers from directly accessing repositories.
+- [ ] Write ArchUnit tests banning cyclic package dependencies across the codebase.
+- [ ] Test individual domain modules in isolation using Spring Modulith's `@ApplicationModuleTest`.
+</Check>

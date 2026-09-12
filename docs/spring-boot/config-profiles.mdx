@@ -536,4 +536,38 @@ This gives grouped config, type safety, validation, and fail-fast startup.
     2. Require authorization: set `management.endpoint.env.show-values=when_authorized` with RBAC role requirements (`ROLE_ACTUATOR_ADMIN`).
     3. Register a custom `SanitizingFunction` bean to inspect all outgoing keys and replace custom sensitive values with `******REDACTED******`.
   </Accordion>
+
+  <Accordion title="6. What is the difference between @Profile and @ConditionalOnProperty?">
+    `@Profile` activates beans based solely on active profile names (e.g., `dev`, `prod`). It couples code to environment naming conventions. In contrast, `@ConditionalOnProperty` activates beans based on specific functional feature flags or configuration properties (e.g., `feature.payment.mock=true`). This follows Twelve-Factor principles: beans activate based on feature flags, not arbitrary environment strings.
+  </Accordion>
+
+  <Accordion title="7. How does Kubernetes configtree support secret rotation without restarting Spring Boot pods?">
+    Kubernetes Secret and ConfigMap volumes mount files into directories (e.g., `/etc/secrets/db-password`). When Kubernetes updates a secret, it atomically updates the symbolic link in the directory. By importing configuration via `spring.config.import=configtree:/etc/secrets/`, Spring maps directory file names to properties and file contents to values. A background watcher or scheduled refresh can reload these properties without restarting the JVM process.
+  </Accordion>
+
+  <Accordion title="8. How does Jakarta Bean Validation integrate with @ConfigurationProperties?">
+    By placing `@Validated` on a `@ConfigurationProperties` record or class, Spring Boot registers a `Validator` that inspects the properties during startup. Annotations such as `@NotNull`, `@Min(100)`, `@Email`, and `@Pattern` are evaluated as properties bind. If any property fails validation, Spring aborts startup with a `ConfigurationPropertiesBindException` detailing the invalid key and rejected value, preventing runtime outages.
+  </Accordion>
 </AccordionGroup>
+
+---
+
+## Done Checklist
+
+<Check>
+- [ ] Understand POSIX environment array (`envp`) mechanics and process isolation in Linux.
+- [ ] Explain why the compiled application JAR must remain 100% identical across all environments.
+- [ ] Master Spring Boot's 17-level property resolution hierarchy.
+- [ ] Explain Relaxed Binding rules across kebab-case, camelCase, and UPPER_SNAKE_CASE.
+- [ ] Replace scattered `@Value` annotations with type-safe `@ConfigurationProperties` records.
+- [ ] Enforce fail-fast startup validation on configuration properties using `@Validated`.
+- [ ] Group modular profiles into clear environment aliases using `spring.profiles.group`.
+- [ ] Avoid branching on environment strings (`if ("prod".equals(profile))`) in business logic.
+- [ ] Mount Kubernetes secrets and config maps using `spring.config.import=configtree:/etc/secrets/`.
+- [ ] Restrict Spring Boot Actuator endpoints using `management.endpoints.web.exposure.include`.
+- [ ] Redact sensitive keys in Actuator using custom `SanitizingFunction` beans.
+- [ ] Implement custom property converters using Spring's `Converter<String, TargetType>` interface.
+- [ ] Isolate local test configurations using `@TestPropertySource` and Testcontainers.
+- [ ] Protect version control by ensuring zero passwords or secret keys exist in Git repositories.
+- [ ] Verify that missing required production configuration causes immediate startup failure.
+</Check>

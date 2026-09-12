@@ -777,4 +777,34 @@ When senior interviewers ask about Spring MVC and REST API design, they are test
   <Accordion title="6. What is the role of a HandlerMethodArgumentResolver in Spring MVC?">
     A `HandlerMethodArgumentResolver` intercepts controller method parameter evaluation. It allows developers to define custom parameter annotations (such as `@CurrentUserContext UserContext user`) and extract, validate, and construct domain objects from incoming HTTP requests (headers, cookies, security context) before the controller method executes, eliminating repetitive extraction boilerplate across controller classes.
   </Accordion>
+
+  <Accordion title="7. Why is Keyset (Cursor) pagination superior to Offset pagination for deep scrolling?">
+    Under offset pagination (`LIMIT 20 OFFSET 1000000`), PostgreSQL must read 1,000,020 rows off physical disk, sort them, and discard the first 1,000,000 rows, causing query latency to scale linearly ($O(N)$) into multiple seconds. In contrast, keyset pagination filters on indexed primary keys or timestamps (`WHERE id > :lastSeenId ORDER BY id ASC LIMIT 20`), allowing the B-Tree index to perform a direct $O(\log N)$ point seek directly to the 1,000,001st row, maintaining sub-millisecond execution regardless of table size.
+  </Accordion>
+
+  <Accordion title="8. How do you implement robust Idempotency-Key support for POST endpoints?">
+    An HTTP client generates a unique UUID `Idempotency-Key` header with each mutating request. In an incoming Spring MVC interceptor or filter, the server checks Redis or PostgreSQL for that key. If present and completed, the cached response is returned immediately. If in-flight, concurrent requests block or return `409 Conflict`. If new, an atomic distributed lock or record is acquired, the business logic runs within a database transaction, and the final response payload is persisted with an expiration TTL (e.g. 24 hours).
+  </Accordion>
 </AccordionGroup>
+
+---
+
+## Done Checklist
+
+<Check>
+- [ ] Diagram physical TCP socket reception, Tomcat NIO engine (Acceptor, Poller, Worker), and `DispatcherServlet`.
+- [ ] Trace `DispatcherServlet.doDispatch()` through `HandlerMapping`, `HandlerAdapter`, and interceptors.
+- [ ] Understand Jackson deserialization and `MappingJackson2HttpMessageConverter`.
+- [ ] Never return raw JPA entities from `@RestController` methods; always return immutable DTO records.
+- [ ] Prevent N+1 serialization queries and lazy-loading crashes by eliminating entity traversal in JSON serialization.
+- [ ] Differentiate `Page<T>` (requires expensive `COUNT(*)`) from `Slice<T>` (`LIMIT size + 1`, zero count overhead).
+- [ ] Implement Keyset (Cursor) pagination (`WHERE id > :cursor LIMIT :size`) for constant $O(1)$ deep scroll performance.
+- [ ] Export large datasets with $O(1)$ constant JVM heap memory using `StreamingResponseBody`.
+- [ ] Implement real-time unidirectional event streaming using `SseEmitter` (Server-Sent Events).
+- [ ] Configure declarative HTTP interfaces using `@HttpExchange` backed by a pooled `RestClient`.
+- [ ] Configure production connection timeouts (2s), socket timeouts (5s), and connection pool limits on HTTP clients.
+- [ ] Enforce idempotency on critical mutating POST endpoints using `Idempotency-Key` headers and Redis.
+- [ ] Implement custom parameter resolvers using `HandlerMethodArgumentResolver`.
+- [ ] Return appropriate HTTP status codes (`201 Created` with `Location` header, `204 No Content`, `400`, `404`, `409`).
+- [ ] Write MockMvc slice tests verifying HTTP status codes, headers, and JSON responses.
+</Check>

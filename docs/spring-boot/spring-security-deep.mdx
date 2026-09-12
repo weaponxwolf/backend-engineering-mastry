@@ -708,6 +708,22 @@ flowchart LR
     - **`AuthenticationEntryPoint`**: Invoked when an unauthenticated user (anonymous caller) attempts to access a protected resource. It handles missing or invalid authentication credentials, returning an `HTTP 401 Unauthorized` response.
     - **`AccessDeniedHandler`**: Invoked when an authenticated user attempts to access a resource for which they lack the necessary roles or permissions. It returns an `HTTP 403 Forbidden` response.
   </Accordion>
+
+  <Accordion title="5. How does ThreadLocal state leakage happen in Spring Security, and how is it prevented?">
+    Tomcat handles incoming requests using a reusable thread pool (e.g., 200 worker threads). By default, `SecurityContextHolder` stores security credentials in a `ThreadLocal` variable. If a request finishes without clearing the context, the thread returns to the pool carrying the previous user's credentials. When the thread is reused for an unauthenticated visitor, that visitor inherits the previous user's identity. Spring Security prevents this via `SecurityContextHolderFilter`, which ensures `SecurityContextHolder.clearContext()` is called inside a `finally` block at the end of every request.
+  </Accordion>
+
+  <Accordion title="6. Why does CORS preflight fail if security filters are misconfigured?">
+    Before sending cross-origin mutating requests (like `POST` or `PUT` with JSON), browsers automatically send an HTTP `OPTIONS` preflight request without authentication headers. If the Spring Security filter chain requires authentication on all incoming requests before the `CorsFilter` can evaluate headers, the preflight request is rejected with `401 Unauthorized`. To prevent this, `CorsFilter` must be positioned before `BearerTokenAuthenticationFilter` or `UsernamePasswordAuthenticationFilter`, or configured via `http.cors()`.
+  </Accordion>
+
+  <Accordion title="7. What is the difference between @PreAuthorize and @PostAuthorize?">
+    `@PreAuthorize` evaluates authorization expressions **before** the method is entered; if the check fails, the method never executes. `@PostAuthorize` executes the method first, captures the return value, and evaluates the expression with access to `returnObject` (e.g. `@PostAuthorize("returnObject.ownerId == authentication.principal.id")`). If the check fails, Spring throws an `AccessDeniedException`, preventing the return value from being delivered to the caller.
+  </Accordion>
+
+  <Accordion title="8. Why is BCrypt workload calibration critical for production stability?">
+    BCrypt is intentionally CPU-intensive to thwart brute-force password cracking. The cost factor (log rounds) exponentially increases hashing time: cost 10 takes $\approx 80\text{ ms}$, cost 12 takes $\approx 300\text{ ms}$, and cost 14 takes $\approx 1.2\text{ seconds}$ per hash. If an attacker submits 50 concurrent login requests on an uncalibrated cost factor, all Tomcat CPU worker threads saturate at 100%, causing Kubernetes liveness probes to time out and restarting the container in a cascading crash loop.
+  </Accordion>
 </AccordionGroup>
 
 ---
@@ -715,10 +731,19 @@ flowchart LR
 ## 9. Done Checklist
 
 <Check>
-- [ ] Diagram the flow from Tomcat $\rightarrow$ `DelegatingFilterProxy` $\rightarrow$ `FilterChainProxy` $\rightarrow$ `SecurityFilterChain`.
-- [ ] Configure Spring Security 6 using the modern functional Lambda DSL.
-- [ ] Implement stateless REST security: disabled CSRF, stateless session creation policy, and custom CORS.
-- [ ] Build a production `OncePerRequestFilter` that extracts and validates JWT tokens.
-- [ ] Format 401 and 403 error responses using RFC 7807 `ProblemDetail`.
+- [ ] Diagram the request flow from Tomcat $\rightarrow$ `DelegatingFilterProxy` $\rightarrow$ `FilterChainProxy` $\rightarrow$ `SecurityFilterChain`.
+- [ ] Configure Spring Security 6 using modern functional Lambda DSL (`HttpSecurity.authorizeHttpRequests`).
+- [ ] Implement stateless REST security: disabled CSRF, `SessionCreationPolicy.STATELESS`, and custom CORS.
+- [ ] Understand the 15 standard filters in the default Spring Security filter chain and their ordering.
+- [ ] Prevent ThreadLocal context leaks using `SecurityContextHolder.clearContext()` in `finally` blocks.
+- [ ] Format 401 Unauthorized and 403 Forbidden error responses using RFC 9457 `ProblemDetail`.
 - [ ] Protect against BOLA/IDOR using SpEL method security: `@PreAuthorize("#userId == authentication.principal.id")`.
+- [ ] Differentiate `@PreAuthorize` (pre-execution check) from `@PostAuthorize` (post-execution returnObject check).
+- [ ] Configure CORS correctly to handle browser preflight `OPTIONS` requests before authentication filters.
+- [ ] Avoid wildcard origins (`*`) when `allowCredentials(true)` is set to comply with browser security rules.
+- [ ] Calibrate BCrypt password encoder work factors (cost 10-12) to balance security with CPU starvation risks.
+- [ ] Build custom `AuthenticationEntryPoint` and `AccessDeniedHandler` implementations.
+- [ ] Differentiate cookie-based ambient credentials requiring CSRF from header-based bearer tokens.
+- [ ] Write slice security tests with MockMvc verifying 401 and 403 responses using `@WithMockUser`.
+- [ ] Verify that downstream threads (e.g. `@Async`) receive security context using `DelegatingSecurityContextAsyncTaskExecutor`.
 </Check>
