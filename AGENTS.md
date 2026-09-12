@@ -838,7 +838,7 @@ All phases of the comprehensive documentation overhaul and book-replacement dept
       - **Problem Solved**: The top/sidebar tab select button previously contained only 2 generic tabs (`Learn` and `Practice`), forcing 8 massive levels (88 pages) into an overwhelming, endless sidebar scroll under `Learn`, while the select dropdown was barren and underutilized.
       - **9 Major Domain Tabs**: Re-architected `navigation.tabs` into 9 focused major engineering domains directly selectable from the main select button:
         1. 🚀 **Getting Started**: Platform Orientation & Level 0: Backend Basics (13 pages).
-        2. ☕ **Java Foundation**: Core Java & OOP, Collections & Streams, Concurrency & JVM Internals (8 pages).
+        2. ☕ **Java Foundation**: Core Language, OOP & Modern Syntax, Data Structures & Streams, I/O & Framework Internals, Concurrency & JVM Internals (15 pages).
         3. 🗄️ **Database Engineering**: Relational Modeling & SQL, Indexes & Transactions & Locking, PostgreSQL Performance & Migrations, Distributed Data & Search (9 pages).
         4. 🍃 **Spring Boot**: Architecture & Core IoC, Web APIs & Validation, Data JPA & Transactions, Spring Security (9 pages).
         5. 🛡️ **Production & DevOps**: Security & Identity, Testing & Verification, Observability & Logging, Caching & SRE & CI/CD (9 pages).
@@ -951,13 +951,44 @@ All phases of the comprehensive documentation overhaul and book-replacement dept
     - **Navigation Update**:
       - Added all three new pages to `docs/docs.json`, increasing the validated documentation set from 93 to 96 pages.
 
+19. **Java Foundation Comprehensive Overhaul (September 12, 2026)**:
+    - **Problem Solved**:
+      - Java Foundation previously contained only 8 pages (~4,400 lines), creating an extreme depth imbalance against Database (9 pages), Spring Boot (9 pages), and System Design (13 pages).
+      - Critical engineering disciplines were bundled together (Collections and Exceptions crammed in one file; Generics and Streams crammed in another).
+      - Massive backend engineering voids existed: zero coverage of Java I/O / NIO, zero coverage of Reflection / Dynamic Proxies (the foundation of Spring Boot), minimal coverage of `ThreadPoolExecutor` and explicit locks, and no pure Java unit testing foundations.
+    - **Re-Architected 4-Group, 15-Chapter Java Curriculum**:
+      1. *Core Language, OOP & Modern Syntax*:
+         - `docs/java/java-core.mdx`: Memory Layout, Bytecode, Compressed OOPs, Primitives vs Wrappers, Strings & JIT.
+         - `docs/java/java-control-flow-modern-syntax.mdx` [NEW]: CPU branch prediction, IEEE-754 floating-point traps in billing (`0.1 + 0.2 != 0.3`), Two's complement integer overflow (`Math.addExact`), switch expressions (`yield`), pattern matching for switch with guards (`when`), record patterns & nested deconstruction, and Data-Oriented Programming (DOP) with sealed hierarchies.
+         - `docs/java/oop.mdx`: Object-Oriented Design, SOLID, vtable mechanics, Rich Domain Models, Composition over Inheritance.
+      2. *Data Structures, Type System & Streams*:
+         - `docs/java/collections-deep-dive.mdx` [NEW]: 64-byte CPU cache lines vs pointer chasing, ArrayList 1.5x growth formula, HashMap power-of-two capacity and bitwise index masking (`(n-1) & h`), treeification ($8$) and untreeification ($6$) thresholds, ConcurrentHashMap lock-free CAS and bin-level synchronization, LinkedHashMap LRU cache via `removeEldestEntry()`, ArrayDeque circular ring buffers, and Java 21 Sequenced Collections.
+         - `docs/java/exception-architecture.mdx` [NEW]: The physical latency of `Throwable.fillInStackTrace()` (native C++ stack walk cost), CPU exhaustion when using exceptions for control flow, handling `InterruptedException` without breaking graceful thread pool termination, try-with-resources bytecode desugaring and suppressed exceptions (`addSuppressed()`), zero-cost lightweight exceptions, and enterprise RFC 9457 `ProblemDetail` mapping.
+         - `docs/java/generics-type-system.mdx` [NEW]: 2004 binary compatibility constraint, bytecode Type Erasure, compiler-generated synthetic Bridge Methods, array covariance flaws vs generic invariance, mathematical derivation of PECS (*Producer Extends, Consumer Super*), and Super Type Tokens (`ParameterizedTypeReference<T>`).
+         - `docs/java/lambdas-streams.mdx` [NEW]: Why lambdas avoid anonymous inner class overhead via `invokedynamic` and `LambdaMetafactory.metafactory()`, the `parallelStream()` cluster freeze hazard in `ForkJoinPool.commonPool()`, stateless vs stateful intermediate operations, the 8 `Spliterator` characteristics, advanced collectors (`groupingBy`, downstream, safe `toMap`), and custom `BatchCollector` implementations.
+      3. *I/O, Network Systems & Framework Internals*:
+         - `docs/java/java-io-nio.mdx` [NEW]: The traditional 4-copy I/O bottleneck vs Linux kernel Zero-Copy (`sendfile()` / `FileChannel.transferTo()`), the C10K thread-per-connection collapse, `ByteBuffer` internal state machine (`capacity`, `position`, `limit`, `mark`, `flip()`), and multiplexed non-blocking socket I/O using `Selector` with Linux `epoll` (the engine behind Tomcat NIO and Netty).
+         - `docs/java/reflection-annotations-proxies.mdx` [NEW]: Metaspace `InstanceKlass` and the `Class<T>` mirror, Reflection Inflation optimization, the `@Transactional` self-invocation proxy bypass trap, JDK Dynamic Proxies (`Proxy.newProxyInstance`) vs CGLIB/ByteBuddy subclass proxies, and building a working miniature Spring IoC container from scratch in 50 lines.
+         - `docs/java/java-testing-junit-mockito.mdx` [NEW]: Test execution physics (sub-millisecond unit tests vs 15-second Spring context boots), avoiding the brittle over-mocking anti-pattern, JUnit 5 Jupiter engine architecture, parameterized tests with `@CsvSource`, AssertJ fluent domain assertions, the 5 test doubles (Dummy, Stub, Spy, Mock, Fake), and Mockito ByteBuddy proxy mechanics with `ArgumentCaptor`.
+      4. *Concurrency, Threading & JVM Internals*:
+         - `docs/java/concurrency-jvm.mdx`: Hardware latency hierarchy, CPU store buffers, JMM, `volatile` memory barriers, `synchronized` object monitors, and CAS.
+         - `docs/java/concurrent-utilities-threadpools.mdx` [NEW]: Physical OS thread context switch overhead ($1\text{–}2\text{ µs}$), Little's Law thread pool sizing math ($N = N_{\text{CPU}} \times (1 + W/C)$), the fatal `Executors.newFixedThreadPool()` unbounded queue OOM crash, `ThreadPoolExecutor` 4-step task submission sequence, the 4 rejection policies (`CallerRunsPolicy` backpressure), `ReentrantLock` vs `StampedLock` optimistic reads, cache-line bouncing with `AtomicLong` vs `LongAdder`, asynchronous pipelines with `CompletableFuture`, and graceful thread pool shutdown.
+         - `docs/java/reactive-vs-virtual-threads.mdx`: Project Loom Virtual Threads vs Reactive WebFlux, Continuation unmounting, and carrier pinning traps.
+         - `docs/java/jvm-performance-tuning.mdx`: JVM memory layout, G1GC vs Generational ZGC, JFR, async-profiler flame graphs, and Native Memory Tracking (NMT).
+         - `docs/java/java-backend-mastery.mdx`: Value objects, defensive immutability, and rich domain modeling.
+    - **Clean Migration & Validation**:
+      - Replaced obsolete bundled pages `collections-exceptions.mdx` and `generics-streams.mdx`.
+      - Updated incoming links in `first-program.mdx`, `backend-roadmap.mdx`, `mastery-assessments.mdx`, and `index.mdx`.
+      - Validated full test suite: `test:audit` (4/4 passed), `audit` (0 errors, 103 navigation entries), `validate` (build passed), and `links` (0 broken links).
+
 ---
 
 ## Latest Verification Summary
 - `npm run check` (`npm run test:audit` + `npm run audit` + `npm run validate` + `npm run links`):
   - **Audit Tests**: 4/4 passing (nested navigation, duplicate route detection, metadata validation, code fence labeling).
-  - **Content Inventory**: 96 pages, 46,112 lines, 1,447 code blocks, **0 structure errors**.
+  - **Content Inventory**: 103 pages, 51,196 lines, 1,640 code blocks, **0 structure errors**.
   - **Editorial Observations**: 0 generic text fences remain.
-  - **Mintlify Validate**: Build validation passed cleanly (`navigation.tabs` with 9 major topics).
-  - **Mintlify Broken Links**: `success no broken links found` (100% link and anchor integrity across all 87 MDX documents).
+  - **Mintlify Validate**: Build validation passed cleanly (`navigation.tabs` with 9 major topics, 15 pages in Java Foundation).
+  - **Mintlify Broken Links**: `success no broken links found` (100% link and anchor integrity across all 103 MDX documents).
 - `npm run build` (`node scripts/build-vercel.mjs`) should still be run before deployment packaging when a new static bundle is required.
+

@@ -53,29 +53,42 @@
         "icon": "coffee",
         "groups": [
           {
-            "group": "Core Java & OOP",
+            "group": "Core Language, OOP & Modern Syntax",
             "icon": "code",
             "pages": [
               "java/java-core",
+              "java/java-control-flow-modern-syntax",
               "java/oop"
             ]
           },
           {
-            "group": "Collections & Streams",
+            "group": "Data Structures, Type System & Streams",
             "icon": "boxes-stacked",
             "pages": [
-              "java/collections-exceptions",
-              "java/generics-streams"
+              "java/collections-deep-dive",
+              "java/exception-architecture",
+              "java/generics-type-system",
+              "java/lambdas-streams"
             ]
           },
           {
-            "group": "Concurrency & JVM Internals",
+            "group": "I/O, Network Systems & Framework Internals",
+            "icon": "network-wired",
+            "pages": [
+              "java/java-io-nio",
+              "java/reflection-annotations-proxies",
+              "java/java-testing-junit-mockito"
+            ]
+          },
+          {
+            "group": "Concurrency, Threading & JVM Internals",
             "icon": "cpu",
             "pages": [
               "java/concurrency-jvm",
-              "java/java-backend-mastery",
+              "java/concurrent-utilities-threadpools",
+              "java/reactive-vs-virtual-threads",
               "java/jvm-performance-tuning",
-              "java/reactive-vs-virtual-threads"
+              "java/java-backend-mastery"
             ]
           }
         ]
